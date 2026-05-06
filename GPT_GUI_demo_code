@@ -63,7 +63,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
     QSpinBox, QDoubleSpinBox, QCheckBox, QTabWidget, QTableWidget,
     QTableWidgetItem, QTextEdit, QSplitter, QGroupBox, QFormLayout,
-    QScrollArea, QSizePolicy,
+    QScrollArea, QSizePolicy, QListWidget, QListWidgetItem, QLineEdit,
 )
 
 import matplotlib
@@ -752,44 +752,67 @@ def plot_raw_data(fig: Figure, cube: np.ndarray, axis_info: AxisInfo, cmap: str 
 
 
 def plot_conventional_nmf_enhanced(fig: Figure, conv: ConventionalNMFResult, axis_info: AxisInfo, cmap: str = "viridis", max_items: int = 20):
+    """Show conventional NMF as two component sets per row: [W,H] [W,H]."""
     fig.clear()
     n_comp = min(len(conv.W_images), max_items)
-    n_rows = n_comp + 1
-    fig.set_size_inches(14.0, max(6.0, n_rows * 3.8), forward=True)
-    gs = fig.add_gridspec(n_rows, 2, width_ratios=[1, 1])
+    n_sets_per_row = 2
+    n_rows = int(np.ceil(float(n_comp) / float(n_sets_per_row))) + 1
+    total_cols = 4
+    fig.set_size_inches(18.0, max(6.0, n_rows * 3.4), forward=True)
+    gs = fig.add_gridspec(n_rows, total_cols, width_ratios=[1.0, 1.15, 1.0, 1.15])
     x_energy = axis_info.energy_axis
-    for i in range(n_comp):
-        ax_img = fig.add_subplot(gs[i, 0])
-        ax_sp = fig.add_subplot(gs[i, 1])
-        img = conv.W_images[i]
-        spec = conv.H_spectra[i]
+
+    for idx in range(n_comp):
+        row = idx // n_sets_per_row
+        block = idx % n_sets_per_row
+        c0 = block * 2
+        ax_img = fig.add_subplot(gs[row, c0])
+        ax_sp = fig.add_subplot(gs[row, c0 + 1])
+        img = conv.W_images[idx]
+        spec = conv.H_spectra[idx]
         x = x_energy if len(x_energy) == len(spec) else np.arange(len(spec), dtype=np.float32)
-        im = ax_img.imshow(img, aspect="equal", cmap=cmap, origin="upper")
-        ax_img.set_title("Component %d - W" % i, fontsize=9)
-        ax_img.set_xlabel(axis_info.x_label)
-        ax_img.set_ylabel(axis_info.y_label)
+
+        im = ax_img.imshow(img, cmap=cmap, origin="upper", aspect="equal")
+        ax_img.set_title("C%d - W" % idx, fontsize=9)
+        ax_img.set_xticks([])
+        ax_img.set_yticks([])
+        try:
+            ih, iw = img.shape
+            ax_img.set_box_aspect(float(ih) / float(iw))
+        except Exception:
+            pass
         add_colorbar(fig, ax_img, im)
-        ax_sp.plot(x, spec)
-        ax_sp.set_title("Component %d - H" % i, fontsize=9)
-        ax_sp.set_xlabel(axis_info.energy_label)
+
+        ax_sp.plot(x, spec, linewidth=1.0)
+        ax_sp.set_title("H%d" % idx, fontsize=9)
+        ax_sp.set_xlabel(axis_info.energy_label, fontsize=8)
         ax_sp.set_ylabel("")
         ax_sp.grid(True, alpha=0.3)
+        ax_sp.tick_params(labelsize=7)
 
-    ax_rimg = fig.add_subplot(gs[n_comp, 0])
-    ax_rsp = fig.add_subplot(gs[n_comp, 1])
-    im = ax_rimg.imshow(conv.residual_image, aspect="equal", cmap=cmap, origin="upper")
+    row = n_rows - 1
+    ax_rimg = fig.add_subplot(gs[row, 0:2])
+    ax_rsp = fig.add_subplot(gs[row, 2:4])
+    im = ax_rimg.imshow(conv.residual_image, cmap=cmap, origin="upper", aspect="equal")
     ax_rimg.set_title("Residual - Sum over Spectrum", fontsize=9)
-    ax_rimg.set_xlabel(axis_info.x_label)
-    ax_rimg.set_ylabel(axis_info.y_label)
+    ax_rimg.set_xticks([])
+    ax_rimg.set_yticks([])
+    try:
+        ih, iw = conv.residual_image.shape
+        ax_rimg.set_box_aspect(float(ih) / float(iw))
+    except Exception:
+        pass
     add_colorbar(fig, ax_rimg, im)
+
     spec = conv.residual_spectrum
     x = x_energy if len(x_energy) == len(spec) else np.arange(len(spec), dtype=np.float32)
-    ax_rsp.plot(x, spec)
+    ax_rsp.plot(x, spec, linewidth=1.0)
     ax_rsp.set_title("Residual - Sum over Space", fontsize=9)
-    ax_rsp.set_xlabel(axis_info.energy_label)
+    ax_rsp.set_xlabel(axis_info.energy_label, fontsize=8)
     ax_rsp.set_ylabel("")
     ax_rsp.grid(True, alpha=0.3)
-    fig.subplots_adjust(left=0.06, right=0.96, top=0.96, bottom=0.04, hspace=0.85, wspace=0.35)
+    ax_rsp.tick_params(labelsize=7)
+    fig.subplots_adjust(left=0.04, right=0.98, top=0.96, bottom=0.05, hspace=0.75, wspace=0.18)
 
 
 def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cmap: str = "viridis", max_depth: Optional[int] = None):
@@ -825,7 +848,7 @@ def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cma
         n_nodes = len(node_summaries_by_depth[d])
         n_wrap_rows = max(1, int(np.ceil(float(max(1, n_nodes)) / float(max_nodes_per_row))))
         depth_row_offsets.append(total_rows)
-        total_rows += n_wrap_rows * rows_per_node + gap_rows_per_depth
+        total_rows += 1 + n_wrap_rows * rows_per_node + gap_rows_per_depth
     total_rows = max(1, total_rows)
 
     fig_width = max(14.0, total_cols * 3.0)
@@ -845,7 +868,7 @@ def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cma
         for i, ns in enumerate(nodes):
             wrap_r = i // max_nodes_per_row
             wrap_c = i % max_nodes_per_row
-            base_r = row_offset + wrap_r * rows_per_node
+            base_r = row_offset + 1 + wrap_r * rows_per_node
             base_c = wrap_c * cols_per_node
             n_comp = min(rank, len(ns.component_maps))
 
@@ -858,14 +881,14 @@ def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cma
 
                 ax_img = fig.add_subplot(gs[base_r + 0, c])
                 im = ax_img.imshow(img, aspect="equal", cmap=cmap, origin="upper")
-                ax_img.set_title("N%d C%d\nErr=%.3g" % (i, ci, err), fontsize=7)
+                ax_img.set_title("D%d N%d C%d" % (d, i, ci), fontsize=8)
                 ax_img.set_xticks([])
                 ax_img.set_yticks([])
                 add_colorbar(fig, ax_img, im)
 
                 ax_sp = fig.add_subplot(gs[base_r + 1, c])
                 ax_sp.plot(x, spec)
-                ax_sp.set_title("H%d" % ci, fontsize=7)
+                ax_sp.set_title("D%d N%d H%d" % (d, i, ci), fontsize=8)
                 ax_sp.set_xlabel(axis_info.energy_label, fontsize=7)
                 ax_sp.set_ylabel("", fontsize=7)
                 ax_sp.tick_params(labelsize=6)
@@ -878,14 +901,14 @@ def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cma
 
                 ax_rimg = fig.add_subplot(gs[base_r + 2, base_c])
                 im = ax_rimg.imshow(res_img, aspect="equal", cmap=cmap, origin="upper")
-                ax_rimg.set_title("N%d Residual" % i, fontsize=7)
+                ax_rimg.set_title("D%d N%d Residual" % (d, i), fontsize=8)
                 ax_rimg.set_xticks([])
                 ax_rimg.set_yticks([])
                 add_colorbar(fig, ax_rimg, im)
 
                 ax_rsp = fig.add_subplot(gs[base_r + 3, base_c])
                 ax_rsp.plot(x, res_spec)
-                ax_rsp.set_title("Residual Spectrum", fontsize=7)
+                ax_rsp.set_title("D%d N%d Residual Spectrum" % (d, i), fontsize=8)
                 ax_rsp.set_xlabel(axis_info.energy_label, fontsize=7)
                 ax_rsp.set_ylabel("", fontsize=7)
                 ax_rsp.tick_params(labelsize=6)
@@ -980,6 +1003,7 @@ def build_combined_dataset(component_entries: List[Dict[str, Any]], name: str = 
     combined_spec = np.sum(Xsum, axis=0, dtype=np.float64)
     if not name:
         name = "Combined %d component(s)" % len(component_entries)
+
     return {
         "name": name,
         "members": labels,
@@ -1039,10 +1063,12 @@ class AnalysisWorker(QThread):
             if self.params.get("run_conventional", True):
                 logs.append("Running conventional NMF...")
                 conv_result = run_conventional_nmf(
-                    self.X, self.image_shape,
+                    self.X,
+                    self.image_shape,
                     n_components=int(self.params["conv_components"]),
                     max_iter=int(self.params["max_iter"]),
-                    init=self.params["init"], solver=self.params["solver"],
+                    init=self.params["init"],
+                    solver=self.params["solver"],
                     random_state=int(self.params["random_state"]),
                     chunk_size=int(self.params["chunk_size"]),
                 )
@@ -1050,14 +1076,16 @@ class AnalysisWorker(QThread):
             if self.params.get("run_rr", True):
                 logs.append("Running recursive NMF...")
                 rr_result = run_rr_nmf(
-                    self.X, self.image_shape,
+                    self.X,
+                    self.image_shape,
                     rank=int(self.params["rr_rank"]),
                     max_depth=int(self.params["rr_depth"]),
                     residual_mode=self.params["residual_mode"],
                     residual_nonnegative=self.params["residual_nonnegative"],
                     decompose_residual_branch=bool(self.params["decompose_residual_branch"]),
                     max_iter=int(self.params["max_iter"]),
-                    init=self.params["init"], solver=self.params["solver"],
+                    init=self.params["init"],
+                    solver=self.params["solver"],
                     random_state=int(self.params["random_state"]),
                     chunk_size=int(self.params["chunk_size"]),
                 )
@@ -1074,8 +1102,9 @@ class AnalysisWorker(QThread):
 class RR2NMFGui(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Residual-aware rr-NMF Demo for EELS/EDS - v4.1")
-        self.resize(1750, 1000)
+        self.setWindowTitle("Residual-aware rr-NMF Demo for EELS/EDS - v4.2")
+        self.resize(1800, 1050)
+
         self.cube: Optional[np.ndarray] = None
         self.roi_cube: Optional[np.ndarray] = None
         self.X: Optional[np.ndarray] = None
@@ -1086,7 +1115,10 @@ class RR2NMFGui(QMainWindow):
         self.conv_result: Optional[ConventionalNMFResult] = None
         self.rr_result: Optional[RRNMFResult] = None
         self.worker: Optional[AnalysisWorker] = None
+        self.rr_component_entries: List[Dict[str, Any]] = []
+        self.rr_combined_sets: List[Dict[str, Any]] = []
         self._syncing_energy_channel = False
+
         self._build_ui()
 
     def _build_ui(self):
@@ -1095,6 +1127,7 @@ class RR2NMFGui(QMainWindow):
         main_layout = QHBoxLayout(central)
         splitter = QSplitter(Qt.Horizontal)
         main_layout.addWidget(splitter)
+
         control = QWidget()
         control_layout = QVBoxLayout(control)
         splitter.addWidget(control)
@@ -1110,19 +1143,23 @@ class RR2NMFGui(QMainWindow):
         self.lbl_energy_axis = QLabel("Energy axis: channel")
         self.combo_norm = QComboBox()
         self.combo_norm.addItems(["none", "global_max", "max", "area"])
+
         self.spin_y0 = QSpinBox(); self.spin_y1 = QSpinBox()
         self.spin_x0 = QSpinBox(); self.spin_x1 = QSpinBox()
         self.spin_l0 = QSpinBox(); self.spin_l1 = QSpinBox()
         for sp in [self.spin_y0, self.spin_y1, self.spin_x0, self.spin_x1, self.spin_l0, self.spin_l1]:
             sp.setRange(0, 10**9)
             sp.valueChanged.connect(self.on_channel_roi_changed)
+
         self.spin_e0 = QDoubleSpinBox(); self.spin_e1 = QDoubleSpinBox()
         for sp in [self.spin_e0, self.spin_e1]:
             sp.setRange(-1e9, 1e9)
             sp.setDecimals(6)
             sp.valueChanged.connect(self.on_energy_roi_changed)
+
         self.btn_full_roi = QPushButton("Use Full ROI")
         self.btn_full_roi.clicked.connect(self.set_roi_full)
+
         data_form.addRow(self.btn_load)
         data_form.addRow("File", self.lbl_file)
         data_form.addRow("Loaded cube", self.lbl_shape)
@@ -1147,7 +1184,7 @@ class RR2NMFGui(QMainWindow):
         self.chk_rr = QCheckBox("Run recursive NMF"); self.chk_rr.setChecked(True)
         self.spin_rr_rank = QSpinBox(); self.spin_rr_rank.setRange(2, 10); self.spin_rr_rank.setValue(2)
         self.spin_rr_depth = QSpinBox(); self.spin_rr_depth.setRange(0, 8); self.spin_rr_depth.setValue(3)
-        self.combo_residual_mode = QComboBox(); self.combo_residual_mode.addItems(["redistribute_equal", "discard", "explicit_branch"])
+        self.combo_residual_mode = QComboBox(); self.combo_residual_mode.addItems(["discard", "redistribute_equal", "explicit_branch"])
         self.combo_residual_nonnegative = QComboBox(); self.combo_residual_nonnegative.addItems(["clip", "abs", "shift"])
         self.chk_decompose_residual = QCheckBox("Decompose residual branch"); self.chk_decompose_residual.setChecked(False)
         self.spin_iter = QSpinBox(); self.spin_iter.setRange(10, 10000); self.spin_iter.setValue(300)
@@ -1155,6 +1192,7 @@ class RR2NMFGui(QMainWindow):
         self.combo_solver = QComboBox(); self.combo_solver.addItems(["mu", "cd"])
         self.spin_seed = QSpinBox(); self.spin_seed.setRange(0, 999999); self.spin_seed.setValue(0)
         self.spin_chunk = QSpinBox(); self.spin_chunk.setRange(128, 50000); self.spin_chunk.setValue(2048)
+
         nmf_form.addRow(self.chk_conv)
         nmf_form.addRow("Conventional k", self.spin_conv_k)
         nmf_form.addRow(self.chk_rr)
@@ -1196,16 +1234,67 @@ class RR2NMFGui(QMainWindow):
         self.tabs = QTabWidget()
         splitter.addWidget(self.tabs)
         splitter.setStretchFactor(1, 1)
+
         self.canvas_raw = ControlledMplCanvas(width=14, height=5.5)
         self.tabs.addTab(PlotPanel(self.canvas_raw), "Raw Data")
+
         self.canvas_tree = ControlledMplCanvas(width=14, height=10)
-        self.tabs.addTab(PlotPanel(self.canvas_tree), "rr-NMF Tree")
+        tree_page = QWidget()
+        tree_layout = QVBoxLayout(tree_page)
+        tree_layout.addWidget(PlotPanel(self.canvas_tree), stretch=5)
+        tree_layout.addWidget(self._build_rr_combine_panel(), stretch=2)
+        self.tabs.addTab(tree_page, "rr-NMF Tree")
+
         self.canvas_conv = ControlledMplCanvas(width=16, height=10)
         self.tabs.addTab(PlotPanel(self.canvas_conv), "Conventional NMF")
+
         self.canvas_energy = ControlledMplCanvas(width=12, height=8)
         self.tabs.addTab(PlotPanel(self.canvas_energy), "Energy Summary")
+
         self.table_energy = QTableWidget(); self.tabs.addTab(self.table_energy, "Energy Table")
         self.table_nodes = QTableWidget(); self.tabs.addTab(self.table_nodes, "Node Table")
+
+    def _build_rr_combine_panel(self) -> QWidget:
+        box = QGroupBox("Build New Dataset from Selected rr-NMF Components")
+        layout = QHBoxLayout(box)
+
+        left = QVBoxLayout()
+        left.addWidget(QLabel("Available components (residual excluded)"))
+        self.list_rr_components = QListWidget()
+        self.list_rr_components.setSelectionMode(QListWidget.MultiSelection)
+        left.addWidget(self.list_rr_components)
+
+        mid = QVBoxLayout()
+        self.edit_combined_name = QLineEdit()
+        self.edit_combined_name.setPlaceholderText("Optional combined-set name")
+        self.btn_create_combined = QPushButton("Create Combined Set")
+        self.btn_preview_selected = QPushButton("Preview Selected Components")
+        self.btn_preview_combined = QPushButton("Preview Saved Set")
+        self.btn_remove_combined = QPushButton("Remove Saved Set")
+        self.btn_export_combined = QPushButton("Export Selected Combined NPZ")
+        for w in [self.edit_combined_name, self.btn_create_combined, self.btn_preview_selected,
+                  self.btn_preview_combined, self.btn_remove_combined, self.btn_export_combined]:
+            mid.addWidget(w)
+        mid.addStretch(1)
+
+        right = QVBoxLayout()
+        right.addWidget(QLabel("Saved combined sets"))
+        self.list_rr_combined = QListWidget()
+        right.addWidget(self.list_rr_combined)
+
+        self.canvas_rr_combined = ControlledMplCanvas(width=12, height=4.8)
+        layout.addLayout(left, stretch=2)
+        layout.addLayout(mid, stretch=1)
+        layout.addLayout(right, stretch=2)
+        layout.addWidget(PlotPanel(self.canvas_rr_combined), stretch=4)
+
+        self.btn_create_combined.clicked.connect(self.create_combined_rr_set)
+        self.btn_preview_selected.clicked.connect(self.preview_selected_rr_components)
+        self.btn_preview_combined.clicked.connect(self.preview_combined_rr_set)
+        self.btn_remove_combined.clicked.connect(self.remove_combined_rr_set)
+        self.btn_export_combined.clicked.connect(self.export_combined_rr_set)
+        self.list_rr_combined.currentRowChanged.connect(lambda _: self.preview_combined_rr_set(silent=True))
+        return box
 
     def append_log(self, msg: str):
         self.log.append(str(msg))
@@ -1227,6 +1316,8 @@ class RR2NMFGui(QMainWindow):
             self.roi_axis_info = axis_info
             self.conv_result = None
             self.rr_result = None
+            self.rr_component_entries = []
+            self.rr_combined_sets = []
             self.lbl_file.setText(os.path.basename(path))
             self.lbl_shape.setText(str(cube.shape))
             self.lbl_energy_axis.setText(axis_info.energy_label)
@@ -1235,6 +1326,7 @@ class RR2NMFGui(QMainWindow):
             self.append_log("Metadata: %s" % meta)
             if len(axis_info.energy_axis) > 0:
                 self.append_log("Energy axis: %.6g to %.6g %s" % (float(axis_info.energy_axis[0]), float(axis_info.energy_axis[-1]), axis_info.energy_unit))
+            self.refresh_rr_component_list()
             self.refresh_raw_view()
         except Exception as e:
             QMessageBox.critical(self, "Load failed", str(e))
@@ -1245,7 +1337,8 @@ class RR2NMFGui(QMainWindow):
             return
         y, x, l = self.cube.shape
         self._syncing_energy_channel = True
-        for sp, mx, val in [(self.spin_y0, y, 0), (self.spin_y1, y, y), (self.spin_x0, x, 0), (self.spin_x1, x, x), (self.spin_l0, l, 0), (self.spin_l1, l, l)]:
+        for sp, mx, val in [(self.spin_y0, y, 0), (self.spin_y1, y, y), (self.spin_x0, x, 0),
+                            (self.spin_x1, x, x), (self.spin_l0, l, 0), (self.spin_l1, l, l)]:
             sp.blockSignals(True)
             sp.setRange(0, mx)
             sp.setValue(val)
@@ -1294,12 +1387,10 @@ class RR2NMFGui(QMainWindow):
         l0 = max(0, min(self.spin_l0.value(), L - 1))
         l1_exclusive = max(1, min(self.spin_l1.value(), L))
         l1_idx = max(0, min(l1_exclusive - 1, L - 1))
-        self.spin_e0.blockSignals(True)
-        self.spin_e1.blockSignals(True)
+        self.spin_e0.blockSignals(True); self.spin_e1.blockSignals(True)
         self.spin_e0.setValue(float(e_axis[l0]))
         self.spin_e1.setValue(float(e_axis[l1_idx]))
-        self.spin_e0.blockSignals(False)
-        self.spin_e1.blockSignals(False)
+        self.spin_e0.blockSignals(False); self.spin_e1.blockSignals(False)
 
     def sync_channel_from_energy_roi(self):
         if self.cube is None:
@@ -1312,24 +1403,18 @@ class RR2NMFGui(QMainWindow):
         idx1 = nearest_channel_from_energy(e_axis, self.spin_e1.value())
         lo = max(0, min(min(idx0, idx1), L - 1))
         hi = max(1, min(max(idx0, idx1) + 1, L))
-        self.spin_l0.blockSignals(True)
-        self.spin_l1.blockSignals(True)
-        self.spin_l0.setValue(lo)
-        self.spin_l1.setValue(hi)
-        self.spin_l0.blockSignals(False)
-        self.spin_l1.blockSignals(False)
+        self.spin_l0.blockSignals(True); self.spin_l1.blockSignals(True)
+        self.spin_l0.setValue(lo); self.spin_l1.setValue(hi)
+        self.spin_l0.blockSignals(False); self.spin_l1.blockSignals(False)
 
     def update_roi_label(self):
         if self.cube is None:
             self.lbl_roi_shape.setText("ROI: -")
             return
         y, x, l = self.cube.shape
-        y0, y1 = self.spin_y0.value(), self.spin_y1.value()
-        x0, x1 = self.spin_x0.value(), self.spin_x1.value()
-        l0, l1 = self.spin_l0.value(), self.spin_l1.value()
-        y0, y1 = max(0, min(y0, y)), max(0, min(y1, y))
-        x0, x1 = max(0, min(x0, x)), max(0, min(x1, x))
-        l0, l1 = max(0, min(l0, l)), max(0, min(l1, l))
+        y0, y1 = max(0, min(self.spin_y0.value(), y)), max(0, min(self.spin_y1.value(), y))
+        x0, x1 = max(0, min(self.spin_x0.value(), x)), max(0, min(self.spin_x1.value(), x))
+        l0, l1 = max(0, min(self.spin_l0.value(), l)), max(0, min(self.spin_l1.value(), l))
         if y1 <= y0 or x1 <= x0 or l1 <= l0:
             self.lbl_roi_shape.setText("Invalid ROI")
             return
@@ -1368,7 +1453,8 @@ class RR2NMFGui(QMainWindow):
 
     def refresh_raw_view(self):
         if self.cube is None:
-            self.canvas_raw.clear(); return
+            self.canvas_raw.clear()
+            return
         try:
             roi_cube, _, _, roi_axis = self.get_roi_cube_and_X()
             self.roi_cube = roi_cube
@@ -1399,11 +1485,13 @@ class RR2NMFGui(QMainWindow):
         try:
             roi_cube, X, shape, roi_axis = self.get_roi_cube_and_X()
         except Exception as e:
-            QMessageBox.warning(self, "ROI/Data error", str(e)); return
+            QMessageBox.warning(self, "ROI/Data error", str(e))
+            return
         self.roi_cube = roi_cube
         self.X = X
         self.image_shape = shape
         self.roi_axis_info = roi_axis
+        self.rr_combined_sets = []
         self.btn_run.setEnabled(False)
         self.append_log("Starting analysis on ROI cube=%s, X=%s, image_shape=%s" % (roi_cube.shape, X.shape, shape))
         self.worker = AnalysisWorker(X, shape, self.collect_params())
@@ -1445,6 +1533,100 @@ class RR2NMFGui(QMainWindow):
         self.canvas_energy.set_base_size(*self.canvas_energy.fig.get_size_inches())
         self.canvas_energy.draw()
         self.refresh_tables()
+        self.refresh_rr_component_list()
+
+    def refresh_rr_component_list(self):
+        if not hasattr(self, "list_rr_components"):
+            return
+        self.list_rr_components.clear()
+        self.list_rr_combined.clear()
+        self.rr_component_entries = collect_rr_component_entries(self.rr_result) if self.rr_result is not None else []
+        for ent in self.rr_component_entries:
+            self.list_rr_components.addItem(QListWidgetItem(ent["label"]))
+        for i, combined in enumerate(self.rr_combined_sets):
+            members = ", ".join(combined.get("members", []))
+            self.list_rr_combined.addItem("%d: %s [%s]" % (i + 1, combined.get("name", "Combined"), members))
+
+    def _selected_rr_entries(self) -> List[Dict[str, Any]]:
+        selected_labels = [item.text() for item in self.list_rr_components.selectedItems()]
+        return [ent for ent in self.rr_component_entries if ent["label"] in selected_labels]
+
+    def preview_selected_rr_components(self):
+        selected = self._selected_rr_entries()
+        if not selected:
+            QMessageBox.warning(self, "No selection", "Select one or more rr-NMF components first.")
+            return
+        try:
+            name = self.edit_combined_name.text().strip() or "Preview %d component(s)" % len(selected)
+            combined = build_combined_dataset(selected, name=name)
+            plot_combined_dataset(self.canvas_rr_combined.fig, combined, self.roi_axis_info, cmap=self.combo_cmap.currentText())
+            self.canvas_rr_combined.set_base_size(*self.canvas_rr_combined.fig.get_size_inches())
+            self.canvas_rr_combined.draw()
+        except Exception as e:
+            QMessageBox.critical(self, "Preview failed", str(e))
+
+    def create_combined_rr_set(self):
+        selected = self._selected_rr_entries()
+        if not selected:
+            QMessageBox.warning(self, "No selection", "Select one or more rr-NMF components first.")
+            return
+        try:
+            name = self.edit_combined_name.text().strip() or "Combined %d" % (len(self.rr_combined_sets) + 1)
+            combined = build_combined_dataset(selected, name=name)
+            self.rr_combined_sets.append(combined)
+            self.refresh_rr_component_list()
+            self.list_rr_combined.setCurrentRow(len(self.rr_combined_sets) - 1)
+            self.append_log("Created combined set: %s from %s" % (name, ", ".join(combined["members"])))
+        except Exception as e:
+            QMessageBox.critical(self, "Create combined set failed", str(e))
+
+    def preview_combined_rr_set(self, silent: bool = False):
+        if not hasattr(self, "list_rr_combined"):
+            return
+        row = self.list_rr_combined.currentRow()
+        if row < 0 or row >= len(self.rr_combined_sets):
+            if not silent:
+                QMessageBox.warning(self, "No selection", "Select a saved combined set first.")
+            return
+        combined = self.rr_combined_sets[row]
+        plot_combined_dataset(self.canvas_rr_combined.fig, combined, self.roi_axis_info, cmap=self.combo_cmap.currentText())
+        self.canvas_rr_combined.set_base_size(*self.canvas_rr_combined.fig.get_size_inches())
+        self.canvas_rr_combined.draw()
+
+    def remove_combined_rr_set(self):
+        row = self.list_rr_combined.currentRow()
+        if row < 0 or row >= len(self.rr_combined_sets):
+            QMessageBox.warning(self, "No selection", "Select a saved combined set first.")
+            return
+        removed = self.rr_combined_sets.pop(row)
+        self.refresh_rr_component_list()
+        self.canvas_rr_combined.clear()
+        self.append_log("Removed combined set: %s" % removed.get("name", "Combined"))
+
+    def export_combined_rr_set(self):
+        row = self.list_rr_combined.currentRow()
+        if row < 0 or row >= len(self.rr_combined_sets):
+            QMessageBox.warning(self, "No selection", "Select a saved combined set first.")
+            return
+        combined = self.rr_combined_sets[row]
+        path, _ = QFileDialog.getSaveFileName(self, "Save combined dataset", "combined_rr_component_set.npz", "NPZ Files (*.npz);;All Files (*.*)")
+        if not path:
+            return
+        try:
+            if not path.lower().endswith(".npz"):
+                path += ".npz"
+            np.savez_compressed(
+                path,
+                matrix=combined["matrix"],
+                image=combined["image"],
+                spectrum=combined["spectrum"],
+                members=np.array(combined["members"], dtype=object),
+                name=np.array(combined["name"], dtype=object),
+                energy_axis=self.roi_axis_info.energy_axis,
+            )
+            self.append_log("Exported combined dataset: %s" % path)
+        except Exception as e:
+            QMessageBox.critical(self, "Export failed", str(e))
 
     def dataframe_to_table(self, df: pd.DataFrame, table: QTableWidget, max_rows: int = 2000):
         if df is None or df.empty:
@@ -1470,7 +1652,8 @@ class RR2NMFGui(QMainWindow):
 
     def export_csv(self):
         if self.conv_result is None and self.rr_result is None:
-            QMessageBox.warning(self, "No result", "Run analysis first."); return
+            QMessageBox.warning(self, "No result", "Run analysis first.")
+            return
         out_dir = QFileDialog.getExistingDirectory(self, "Select output directory")
         if not out_dir:
             return
