@@ -1,61 +1,35 @@
 """
-rr2_nmf_eels_eds_gui_integrated.py
+rr2_nmf_gui_ver2_large_safe_roi_bcf.py
 
-Integrated demo GUI for EELS/EDS hyperspectral data analysis using:
+Integrated EELS/EDS GUI for:
 1) Conventional NMF
-2) Energy-preserving residual-redistributed recursive NMF
-3) Optional explicit residual tree bookkeeping
-4) Component/residual energy quantification
-5) Tree visualization with W image + H spectrum + edges
-6) CSV/NPZ export
+2) Energy-preserving residual-redistributed recursive rank-k NMF
+3) Optional explicit residual branch mode
+4) Large-data-safe energy/error calculation without constructing huge component matrices
+5) BCF/DM/EMD/HSpy/NPY/NPZ loading attempts
+6) ROI selection along Y, X, and spectral/channel dimensions before processing
+7) Energy quantification for conventional NMF and rr-NMF
+8) Tree visualization: W image + H spectrum + edges
 
 Python compatibility:
-    - Designed to run on Python 3.8 and Python 3.9+.
-    - The code avoids Python 3.9-only built-in generic syntax such as list[str].
-    - Runtime version sensing is included through PY_VERSION / IS_PY38 / IS_PY39_PLUS.
+    Python >= 3.8
 
-Recommended environment for Python 3.8:
-    conda create -n rr2nmf_gui_py38 python=3.8 -y
-    conda activate rr2nmf_gui_py38
-    pip install numpy scipy pandas scikit-learn matplotlib PyQt5
-    # Optional for microscopy formats:
-    pip install hyperspy exspy
+Recommended install:
+    pip install numpy pandas scipy scikit-learn matplotlib PyQt5
 
-Recommended environment for Python 3.9+:
-    conda create -n rr2nmf_gui python=3.9 -y
-    conda activate rr2nmf_gui
-    pip install numpy scipy pandas scikit-learn matplotlib PyQt5
-    # Optional for microscopy formats:
-    pip install hyperspy exspy
+Optional microscopy loaders:
+    pip install hyperspy exspy rosettasciio
 
-Supported loading in this first integrated version:
-    - .npy: expected 3D cube (H, W, L) or 2D matrix (N, L)
-    - .npz: first array or selected key if simple
-    - .hspy/.hdf5/.h5/.emd/.dm3/.dm4/.msa via HyperSpy if installed
-
-Notes:
-    - Microscopy loader is intentionally conservative. For complex files with multiple signals,
-      the GUI selects the first signal that can be interpreted as 3D or 2D spectral data.
-    - For serious EELS/EDS production use, add a dataset selector dialog after loading.
+Important for large data:
+    - This version does NOT store full S_i = outer(W_i, H_i) matrices.
+    - This version does NOT store full residual matrices for every node.
+    - It stores only W maps, H spectra, energy/error records, and small metadata.
+    - Child matrices are still required for recursion; therefore ROI selection is strongly recommended.
 """
 
 import os
 import sys
 import traceback
-
-# =============================================================================
-# Python-version compatibility layer
-# =============================================================================
-
-PY_VERSION = sys.version_info[:3]
-IS_PY38 = sys.version_info.major == 3 and sys.version_info.minor == 8
-IS_PY39_PLUS = sys.version_info >= (3, 9)
-
-if sys.version_info < (3, 8):
-    raise RuntimeError(
-        "This GUI requires Python >= 3.8. "
-        "Please create a Python 3.8 or 3.9+ environment."
-    )
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -73,12 +47,10 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QVBoxLayout,
     QHBoxLayout,
-    QGridLayout,
     QLabel,
     QPushButton,
     QComboBox,
     QSpinBox,
-    QDoubleSpinBox,
     QCheckBox,
     QTabWidget,
     QTableWidget,
@@ -87,94 +59,178 @@ from PyQt5.QtWidgets import (
     QSplitter,
     QGroupBox,
     QFormLayout,
-    QLineEdit,
 )
 
 import matplotlib
 matplotlib.use("Qt5Agg")
-import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib.patches import ConnectionPatch
 
 
 # =============================================================================
-# Utility functions
+# Python version guard
 # =============================================================================
 
-def safe_float(x: Any, default: float = np.nan) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return default
+PY_VERSION = sys.version_info[:3]
+IS_PY38 = sys.version_info.major == 3 and sys.version_info.minor == 8
+IS_PY39_PLUS = sys.version_info >= (3, 9)
 
+if sys.version_info < (3, 8):
+    raise RuntimeError("This GUI requires Python >= 3.8")
+
+
+# =============================================================================
+# Utilities
+# =============================================================================
 
 def fro_energy(A: np.ndarray) -> float:
-    """Squared Frobenius norm."""
-    A = np.asarray(A)
-    return float(np.linalg.norm(A, "fro") ** 2)
+    return float(np.sum(np.asarray(A) * np.asarray(A), dtype=np.float64))
 
 
 def nonnegative(X: np.ndarray, mode: str = "clip") -> np.ndarray:
-    """Convert array to nonnegative values for NMF."""
     X = np.asarray(X, dtype=np.float32)
     if mode == "clip":
         return np.clip(X, 0, None)
     if mode == "abs":
         return np.abs(X)
     if mode == "shift":
-        mn = np.nanmin(X)
+        mn = float(np.nanmin(X))
         return X - mn if mn < 0 else X
     return X
 
 
 def normalize_spectra(X: np.ndarray, mode: str = "none", eps: float = 1e-12) -> np.ndarray:
-    """Normalize each spectrum row-wise."""
     X = np.asarray(X, dtype=np.float32)
     if mode == "none":
         return X
-    if mode == "max":
-        denom = np.max(X, axis=1, keepdims=True) + eps
-        return X / denom
-    if mode == "area":
-        denom = np.sum(X, axis=1, keepdims=True) + eps
-        return X / denom
     if mode == "global_max":
-        return X / (np.max(X) + eps)
+        return X / (float(np.max(X)) + eps)
+    if mode == "max":
+        return X / (np.max(X, axis=1, keepdims=True) + eps)
+    if mode == "area":
+        return X / (np.sum(X, axis=1, keepdims=True) + eps)
     return X
 
 
-def component_matrix(W: np.ndarray, H: np.ndarray, i: int) -> np.ndarray:
-    return np.outer(W[:, i], H[i, :])
-
-
 def pairwise_corr_matrix(A: np.ndarray) -> np.ndarray:
-    """
-    Pairwise Pearson correlation matrix for rows of A.
-    A: (num_components, num_features)
-    """
-    if A.shape[0] <= 1:
-        return np.ones((A.shape[0], A.shape[0]), dtype=np.float32)
+    A = np.asarray(A)
+    if A.ndim != 2 or A.shape[0] <= 1:
+        return np.ones((max(1, A.shape[0]), max(1, A.shape[0])), dtype=np.float32)
     return np.corrcoef(A)
 
 
+def component_energy_no_outer(w: np.ndarray, h: np.ndarray) -> float:
+    return float(np.sum(w * w, dtype=np.float64) * np.sum(h * h, dtype=np.float64))
+
+
+def component_error_no_outer(X: np.ndarray, w: np.ndarray, h: np.ndarray, x_energy: Optional[float] = None, chunk_size: int = 4096) -> float:
+    """
+    Compute ||X - outer(w,h)||_F without constructing outer(w,h).
+    ||X-S||^2 = ||X||^2 + ||S||^2 - 2<w h^T, X>
+              = ||X||^2 + ||w||^2||h||^2 - 2 w^T X h
+    """
+    if x_energy is None:
+        x_energy = fro_energy(X)
+    s_energy = component_energy_no_outer(w, h)
+    dot_xs = 0.0
+    N = X.shape[0]
+    h64 = h.astype(np.float64, copy=False)
+    for st in range(0, N, chunk_size):
+        en = min(st + chunk_size, N)
+        Xc = X[st:en].astype(np.float64, copy=False)
+        wc = w[st:en].astype(np.float64, copy=False)
+        dot_xs += float(np.dot(wc, Xc @ h64))
+    err2 = float(x_energy + s_energy - 2.0 * dot_xs)
+    if err2 < 0 and abs(err2) < 1e-6 * max(1.0, x_energy):
+        err2 = 0.0
+    return float(np.sqrt(max(err2, 0.0)))
+
+
+def residual_energy_no_full_R(X: np.ndarray, W: np.ndarray, H: np.ndarray, x_energy: Optional[float] = None, chunk_size: int = 4096) -> float:
+    """Compute ||X - W@H||_F^2 chunk-wise without storing residual."""
+    if x_energy is None:
+        x_energy = fro_energy(X)
+    total = 0.0
+    N = X.shape[0]
+    H32 = H.astype(np.float32, copy=False)
+    for st in range(0, N, chunk_size):
+        en = min(st + chunk_size, N)
+        Xc = X[st:en].astype(np.float32, copy=False)
+        Wc = W[st:en].astype(np.float32, copy=False)
+        Rc = Xc - (Wc @ H32)
+        total += float(np.sum(Rc * Rc, dtype=np.float64))
+    return total
+
+
+def make_child_matrix_chunked(
+    X: np.ndarray,
+    W: np.ndarray,
+    H: np.ndarray,
+    comp_i: int,
+    rank: int,
+    residual_mode: str,
+    residual_nonnegative: str,
+    chunk_size: int = 2048,
+) -> np.ndarray:
+    """
+    Build child matrix for recursion using chunks.
+    Still returns a full child matrix, so ROI is recommended for large data.
+
+    discard:
+        child = S_i
+    redistribute_equal:
+        child = S_i + (X - W@H)/rank
+    explicit_branch component child:
+        child = S_i
+    """
+    N, L = X.shape
+    child = np.empty((N, L), dtype=np.float32)
+    H32 = H.astype(np.float32, copy=False)
+    hi = H32[comp_i]
+
+    for st in range(0, N, chunk_size):
+        en = min(st + chunk_size, N)
+        Xc = X[st:en].astype(np.float32, copy=False)
+        Wc = W[st:en].astype(np.float32, copy=False)
+        Sic = np.outer(Wc[:, comp_i], hi)
+        if residual_mode == "redistribute_equal":
+            WHc = Wc @ H32
+            child_c = Sic + (Xc - WHc) / float(rank)
+        else:
+            child_c = Sic
+        child[st:en] = nonnegative(child_c, residual_nonnegative)
+    return child
+
+
+def make_residual_branch_chunked(X: np.ndarray, W: np.ndarray, H: np.ndarray, residual_nonnegative: str, chunk_size: int = 2048) -> np.ndarray:
+    """Build residual branch matrix R = X - W@H chunk-wise."""
+    N, L = X.shape
+    R_out = np.empty((N, L), dtype=np.float32)
+    H32 = H.astype(np.float32, copy=False)
+    for st in range(0, N, chunk_size):
+        en = min(st + chunk_size, N)
+        Xc = X[st:en].astype(np.float32, copy=False)
+        Wc = W[st:en].astype(np.float32, copy=False)
+        Rc = Xc - (Wc @ H32)
+        R_out[st:en] = nonnegative(Rc, residual_nonnegative)
+    return R_out
+
+
 def estimate_cube_from_array(arr: np.ndarray) -> Tuple[np.ndarray, Tuple[int, int, int]]:
-    """
-    Return cube as (H,W,L). If arr is 2D, infer H,W as (N,1).
-    """
     arr = np.asarray(arr)
     if arr.ndim == 3:
         return arr.astype(np.float32), arr.shape
     if arr.ndim == 2:
         N, L = arr.shape
         return arr.reshape(N, 1, L).astype(np.float32), (N, 1, L)
-    raise ValueError(f"Unsupported array ndim={arr.ndim}. Expected 2D or 3D.")
+    raise ValueError("Unsupported array ndim=%s. Expected 2D or 3D." % (arr.ndim,))
 
 
 def load_hyperspectral_file(path: str) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """Load EELS/EDS-like data. Returns cube (H,W,L) and metadata."""
+    """Load EELS/EDS data into cube (Y, X, Spectrum). Includes BCF attempt through HyperSpy/RosettaSciIO."""
     ext = os.path.splitext(path)[1].lower()
-    meta: Dict[str, Any] = {"path": path, "loader": None}
+    meta: Dict[str, Any] = {"path": path, "extension": ext, "loader": None}
 
     if ext == ".npy":
         arr = np.load(path)
@@ -188,36 +244,46 @@ def load_hyperspectral_file(path: str) -> Tuple[np.ndarray, Dict[str, Any]]:
         if not keys:
             raise ValueError("NPZ file has no arrays.")
         key = keys[0]
-        arr = z[key]
-        cube, shape = estimate_cube_from_array(arr)
+        cube, shape = estimate_cube_from_array(z[key])
         meta.update({"loader": "numpy_npz", "npz_key": key, "shape": shape})
         return cube, meta
 
-    # Optional HyperSpy loader
+    # Microscopy formats: dm3/dm4/emd/hspy/h5/msa/bcf via HyperSpy if available.
     try:
         import hyperspy.api as hs  # type: ignore
     except Exception as e:
         raise RuntimeError(
-            f"File extension {ext} requires HyperSpy/exspy or a custom loader. "
-            f"Install hyperspy/exspy or convert to .npy/.npz. Original error: {e}"
+            "This file format requires HyperSpy/RosettaSciIO support. "
+            "Install optional packages with: pip install hyperspy exspy rosettasciio. "
+            "Original import error: %s" % str(e)
         )
 
-    sigs = hs.load(path)
+    # Some BCF readers require lazy=False. Keep simple here.
+    try:
+        sigs = hs.load(path, lazy=False)
+    except TypeError:
+        sigs = hs.load(path)
+
     if not isinstance(sigs, list):
         sigs = [sigs]
 
     candidates = []
     for idx, s in enumerate(sigs):
-        data = np.asarray(s.data)
-        candidates.append((idx, s, data))
+        try:
+            data = np.asarray(s.data)
+            candidates.append((idx, s, data))
+        except Exception:
+            continue
 
-    # Prefer 3D data. Need convert to (H,W,L). HyperSpy axes ordering can vary,
-    # so this is conservative: if 3D, assume spectral axis is the largest or last.
+    if not candidates:
+        raise ValueError("No readable dataset found in file.")
+
+    # Prefer 3D datasets. Convert guessed spectral axis to last.
     for idx, s, data in candidates:
         if data.ndim == 3:
             shape = data.shape
-            # Heuristic: spectral dimension usually largest; otherwise last.
-            spec_axis = int(np.argmax(shape)) if max(shape) > 128 else 2
+            # Heuristic: spectrum axis is often largest; otherwise use last.
+            spec_axis = int(np.argmax(shape)) if max(shape) >= 128 else 2
             cube = np.moveaxis(data, spec_axis, -1).astype(np.float32)
             meta.update({
                 "loader": "hyperspy",
@@ -225,11 +291,11 @@ def load_hyperspectral_file(path: str) -> Tuple[np.ndarray, Dict[str, Any]]:
                 "original_shape": shape,
                 "converted_shape": cube.shape,
                 "spec_axis_guess": spec_axis,
-                "title": getattr(s.metadata.General, "title", "") if hasattr(s.metadata, "General") else "",
+                "signal_class": s.__class__.__name__,
             })
             return cube, meta
 
-    # Fallback: first 2D spectral matrix
+    # Fallback 2D matrix
     for idx, s, data in candidates:
         if data.ndim == 2:
             cube, shape = estimate_cube_from_array(data)
@@ -238,6 +304,7 @@ def load_hyperspectral_file(path: str) -> Tuple[np.ndarray, Dict[str, Any]]:
                 "signal_index": idx,
                 "original_shape": data.shape,
                 "converted_shape": cube.shape,
+                "signal_class": s.__class__.__name__,
             })
             return cube, meta
 
@@ -245,15 +312,14 @@ def load_hyperspectral_file(path: str) -> Tuple[np.ndarray, Dict[str, Any]]:
 
 
 # =============================================================================
-# NMF result containers
+# Results
 # =============================================================================
 
 @dataclass
 class ConventionalNMFResult:
     W: np.ndarray
     H: np.ndarray
-    WH: np.ndarray
-    R: np.ndarray
+    R_energy: float
     W_images: List[np.ndarray]
     H_spectra: List[np.ndarray]
     energy_records: pd.DataFrame
@@ -269,14 +335,10 @@ class RRNMFResult:
     errors_by_depth: List[List[float]]
     energy_records: pd.DataFrame
     node_records: pd.DataFrame
-    targets_by_depth: List[List[np.ndarray]]
-    residuals_by_depth: List[List[np.ndarray]]
-    inputs_by_depth: List[List[np.ndarray]]
-    tree_positions: Dict[Tuple[int, int], int]
 
 
 # =============================================================================
-# Conventional NMF
+# NMF algorithms
 # =============================================================================
 
 def run_conventional_nmf(
@@ -287,33 +349,31 @@ def run_conventional_nmf(
     init: str = "nndsvda",
     solver: str = "mu",
     random_state: int = 0,
+    chunk_size: int = 4096,
 ) -> ConventionalNMFResult:
     X = nonnegative(X, "clip").astype(np.float32)
     img_h, img_w = image_shape
     global_energy = fro_energy(X)
 
-    model = NMF(
-        n_components=n_components,
-        init=init,
-        solver=solver,
-        max_iter=max_iter,
-        random_state=random_state,
-    )
+    model = NMF(n_components=n_components, init=init, solver=solver, max_iter=max_iter, random_state=random_state)
     W = model.fit_transform(X)
     H = model.components_
-    WH = W @ H
-    R = X - WH
-    residual_energy = fro_energy(R)
-    recon_ratio = 1.0 - residual_energy / global_energy if global_energy > 0 else np.nan
+
+    R_energy = residual_energy_no_full_R(X, W, H, x_energy=global_energy, chunk_size=chunk_size)
+    recon_ratio = 1.0 - R_energy / global_energy if global_energy > 0 else np.nan
 
     records = []
-    W_images, H_spectra = [], []
+    W_images = []
+    H_spectra = []
+
     for i in range(n_components):
-        S_i = component_matrix(W, H, i)
-        E_i = fro_energy(S_i)
-        W_map = W[:, i].reshape(img_h, img_w)
+        Wi = W[:, i]
+        Hi = H[i]
+        E_i = component_energy_no_outer(Wi, Hi)
+        err_i = component_error_no_outer(X, Wi, Hi, x_energy=global_energy, chunk_size=chunk_size)
+        W_map = Wi.reshape(img_h, img_w)
         W_images.append(W_map)
-        H_spectra.append(H[i].copy())
+        H_spectra.append(Hi.copy())
         records.append({
             "method": "conventional_nmf",
             "depth": 0,
@@ -326,8 +386,9 @@ def run_conventional_nmf(
             "global_energy": global_energy,
             "node_ratio": E_i / global_energy if global_energy > 0 else np.nan,
             "global_ratio": E_i / global_energy if global_energy > 0 else np.nan,
+            "component_error_vs_X": err_i,
             "recon_ratio_total": recon_ratio,
-            "residual_energy_total": residual_energy,
+            "residual_energy_total": R_energy,
         })
 
     records.append({
@@ -337,61 +398,47 @@ def run_conventional_nmf(
         "parent_id": -1,
         "component_id": "R",
         "type": "residual",
-        "energy": residual_energy,
+        "energy": R_energy,
         "node_energy": global_energy,
         "global_energy": global_energy,
-        "node_ratio": residual_energy / global_energy if global_energy > 0 else np.nan,
-        "global_ratio": residual_energy / global_energy if global_energy > 0 else np.nan,
+        "node_ratio": R_energy / global_energy if global_energy > 0 else np.nan,
+        "global_ratio": R_energy / global_energy if global_energy > 0 else np.nan,
+        "component_error_vs_X": np.nan,
         "recon_ratio_total": recon_ratio,
-        "residual_energy_total": residual_energy,
+        "residual_energy_total": R_energy,
     })
 
-    energy_records = pd.DataFrame(records)
     h_corr = pairwise_corr_matrix(H)
     w_corr = pairwise_corr_matrix(W.T)
 
     return ConventionalNMFResult(
         W=W,
         H=H,
-        WH=WH,
-        R=R,
+        R_energy=R_energy,
         W_images=W_images,
         H_spectra=H_spectra,
-        energy_records=energy_records,
+        energy_records=pd.DataFrame(records),
         recon_ratio=recon_ratio,
         h_corr=h_corr,
         w_corr=w_corr,
     )
 
 
-# =============================================================================
-# Recursive residual-redistributed NMF
-# =============================================================================
-
 def run_rr_nmf(
     X: np.ndarray,
     image_shape: Tuple[int, int],
     rank: int = 2,
     max_depth: int = 3,
-    residual_mode: str = "redistribute_equal",  # discard, redistribute_equal, explicit_branch
-    residual_nonnegative: str = "clip",          # clip, abs, shift
+    residual_mode: str = "redistribute_equal",
+    residual_nonnegative: str = "clip",
     decompose_residual_branch: bool = False,
     max_iter: int = 300,
     init: str = "nndsvda",
     solver: str = "mu",
     random_state: int = 0,
+    chunk_size: int = 2048,
+    max_node_pixels_warning: int = 250000,
 ) -> RRNMFResult:
-    """
-    Recursive NMF modes:
-        discard:
-            next child input = S_i only
-        redistribute_equal:
-            next child input = S_i + R/rank
-            This is energy-preserving before nonnegative conversion.
-        explicit_branch:
-            children include S_0..S_{rank-1} and residual R branch.
-            If decompose_residual_branch is False, residual branch is recorded but not decomposed further.
-    """
     X = nonnegative(X, "clip").astype(np.float32)
     img_h, img_w = image_shape
     N, L = X.shape
@@ -402,47 +449,39 @@ def run_rr_nmf(
     W_images_by_depth: List[List[np.ndarray]] = []
     H_spectra_by_depth: List[List[np.ndarray]] = []
     errors_by_depth: List[List[float]] = []
-    targets_by_depth: List[List[np.ndarray]] = []
-    residuals_by_depth: List[List[np.ndarray]] = []
-    inputs_by_depth: List[List[np.ndarray]] = []
-
     energy_records: List[Dict[str, Any]] = []
     node_records: List[Dict[str, Any]] = []
 
-    # Node is dict with X, node_id, parent_id, path, type
-    next_node_id = 0
+    node_id_counter = 0
     current_nodes: List[Dict[str, Any]] = [{
         "X": X,
-        "node_id": next_node_id,
+        "node_id": node_id_counter,
         "parent_id": -1,
         "path": "root",
         "node_type": "root",
     }]
-    next_node_id += 1
+    node_id_counter += 1
 
     for d in range(max_depth + 1):
-        inputs_by_depth.append([n["X"] for n in current_nodes])
         Wimgs_d: List[np.ndarray] = []
         Hspecs_d: List[np.ndarray] = []
-        errors_d: List[float] = []
-        targets_d: List[np.ndarray] = []
-        residuals_d: List[np.ndarray] = []
-
+        errs_d: List[float] = []
         next_nodes: List[Dict[str, Any]] = []
 
-        for local_node_idx, node in enumerate(current_nodes):
+        for local_idx, node in enumerate(current_nodes):
             Xd = nonnegative(node["X"], "clip").astype(np.float32)
-            node_id = node["node_id"]
-            parent_id = node["parent_id"]
+            node_id = int(node["node_id"])
+            parent_id = int(node["parent_id"])
             node_energy = fro_energy(Xd)
 
             node_records.append({
                 "depth": d,
-                "node_local_index": local_node_idx,
+                "node_local_index": local_idx,
                 "node_id": node_id,
                 "parent_id": parent_id,
                 "path": node["path"],
                 "node_type": node["node_type"],
+                "node_shape": str(Xd.shape),
                 "node_energy": node_energy,
                 "global_ratio": node_energy / global_energy if global_energy > 0 else np.nan,
             })
@@ -450,7 +489,6 @@ def run_rr_nmf(
             if node_energy <= 0 or Xd.shape[0] < rank:
                 continue
 
-            # If this is residual branch and not decomposed, skip NMF but keep record.
             if node["node_type"] == "residual" and not decompose_residual_branch:
                 energy_records.append({
                     "method": "rr_nmf",
@@ -468,37 +506,28 @@ def run_rr_nmf(
                 })
                 continue
 
-            model = NMF(
-                n_components=rank,
-                init=init,
-                solver=solver,
-                max_iter=max_iter,
-                random_state=random_state,
-            )
+            model = NMF(n_components=rank, init=init, solver=solver, max_iter=max_iter, random_state=random_state)
             W = model.fit_transform(Xd)
             H = model.components_
-            WH = W @ H
-            R = Xd - WH
-            R_energy = fro_energy(R)
-            residuals_d.append(R)
+
+            R_energy = residual_energy_no_full_R(Xd, W, H, x_energy=node_energy, chunk_size=chunk_size)
             recon_ratio_node = 1.0 - R_energy / node_energy if node_energy > 0 else np.nan
 
-            # Component branches
             for i in range(rank):
-                S_i = component_matrix(W, H, i)
-                E_i = fro_energy(S_i)
-                err_i = float(np.linalg.norm(Xd - S_i, "fro"))
+                Wi = W[:, i]
+                Hi = H[i]
+                E_i = component_energy_no_outer(Wi, Hi)
+                err_i = component_error_no_outer(Xd, Wi, Hi, x_energy=node_energy, chunk_size=chunk_size)
 
-                W_map = W[:, i].reshape(img_h, img_w)
+                W_map = Wi.reshape(img_h, img_w)
                 Wimgs_d.append(W_map)
-                Hspecs_d.append(H[i].copy())
-                errors_d.append(err_i)
-                targets_d.append(S_i)
+                Hspecs_d.append(Hi.copy())
+                errs_d.append(err_i)
 
                 energy_records.append({
                     "method": "rr_nmf",
                     "depth": d,
-                    "node_local_index": local_node_idx,
+                    "node_local_index": local_idx,
                     "node_id": node_id,
                     "parent_id": parent_id,
                     "component_id": i,
@@ -508,37 +537,33 @@ def run_rr_nmf(
                     "global_energy": global_energy,
                     "node_ratio": E_i / node_energy if node_energy > 0 else np.nan,
                     "global_ratio": E_i / global_energy if global_energy > 0 else np.nan,
+                    "component_error_vs_node": err_i,
                     "node_residual_energy": R_energy,
                     "node_residual_ratio": R_energy / node_energy if node_energy > 0 else np.nan,
                     "node_recon_ratio": recon_ratio_node,
                     "path": f"{node['path']}/C{i}",
                 })
 
-                # Prepare next input
                 if d < max_depth:
-                    if residual_mode == "discard":
-                        child_X = S_i
-                    elif residual_mode == "redistribute_equal":
-                        child_X = S_i + (R / rank)
-                    elif residual_mode == "explicit_branch":
-                        child_X = S_i
-                    else:
-                        raise ValueError(f"Unknown residual_mode={residual_mode}")
-                    child_X = nonnegative(child_X, residual_nonnegative)
+                    child_X = make_child_matrix_chunked(
+                        Xd, W, H, i, rank=rank,
+                        residual_mode=residual_mode,
+                        residual_nonnegative=residual_nonnegative,
+                        chunk_size=chunk_size,
+                    )
                     next_nodes.append({
                         "X": child_X,
-                        "node_id": next_node_id,
+                        "node_id": node_id_counter,
                         "parent_id": node_id,
                         "path": f"{node['path']}/C{i}",
                         "node_type": "component",
                     })
-                    next_node_id += 1
+                    node_id_counter += 1
 
-            # Residual record for this decomposed node
             energy_records.append({
                 "method": "rr_nmf",
                 "depth": d,
-                "node_local_index": local_node_idx,
+                "node_local_index": local_idx,
                 "node_id": node_id,
                 "parent_id": parent_id,
                 "component_id": "R",
@@ -554,45 +579,35 @@ def run_rr_nmf(
                 "path": f"{node['path']}/R",
             })
 
-            # Explicit residual branch
             if residual_mode == "explicit_branch" and d < max_depth:
-                R_branch = nonnegative(R, residual_nonnegative)
+                R_branch = make_residual_branch_chunked(Xd, W, H, residual_nonnegative=residual_nonnegative, chunk_size=chunk_size)
                 next_nodes.append({
                     "X": R_branch,
-                    "node_id": next_node_id,
+                    "node_id": node_id_counter,
                     "parent_id": node_id,
                     "path": f"{node['path']}/R",
                     "node_type": "residual",
                 })
-                next_node_id += 1
+                node_id_counter += 1
 
         W_images_by_depth.append(Wimgs_d)
         H_spectra_by_depth.append(Hspecs_d)
-        errors_by_depth.append(errors_d)
-        targets_by_depth.append(targets_d)
-        residuals_by_depth.append(residuals_d)
+        errors_by_depth.append(errs_d)
 
         if d < max_depth:
             current_nodes = next_nodes
-
-    energy_df = pd.DataFrame(energy_records)
-    node_df = pd.DataFrame(node_records)
 
     return RRNMFResult(
         W_images_by_depth=W_images_by_depth,
         H_spectra_by_depth=H_spectra_by_depth,
         errors_by_depth=errors_by_depth,
-        energy_records=energy_df,
-        node_records=node_df,
-        targets_by_depth=targets_by_depth,
-        residuals_by_depth=residuals_by_depth,
-        inputs_by_depth=inputs_by_depth,
-        tree_positions={},
+        energy_records=pd.DataFrame(energy_records),
+        node_records=pd.DataFrame(node_records),
     )
 
 
 # =============================================================================
-# Plot widgets
+# Matplotlib canvas and plotting
 # =============================================================================
 
 class MplCanvas(FigureCanvas):
@@ -621,10 +636,10 @@ def plot_w_h_gallery(fig: Figure, W_images: List[np.ndarray], H_spectra: List[np
         ax_w = fig.add_subplot(rows, cols, i * 2 + 1)
         ax_h = fig.add_subplot(rows, cols, i * 2 + 2)
         ax_w.imshow(W_images[i], aspect="auto")
-        ax_w.set_title(f"C{i} W", fontsize=8)
+        ax_w.set_title("C%d W" % i, fontsize=8)
         ax_w.axis("off")
         ax_h.plot(H_spectra[i])
-        ax_h.set_title(f"C{i} H", fontsize=8)
+        ax_h.set_title("C%d H" % i, fontsize=8)
         ax_h.set_xticks([])
         ax_h.set_yticks([])
     fig.suptitle(title)
@@ -640,7 +655,6 @@ def plot_tree_with_H_and_edges(fig: Figure, rr: RRNMFResult, max_depth: Optional
     num_depths = len(W_images_by_depth)
     if max_depth is not None:
         num_depths = min(num_depths, max_depth + 1)
-
     if num_depths <= 0:
         ax = fig.add_subplot(111)
         ax.text(0.5, 0.5, "No recursive result", ha="center", va="center")
@@ -658,7 +672,6 @@ def plot_tree_with_H_and_edges(fig: Figure, rr: RRNMFResult, max_depth: Optional
             axes[d, c].axis("off")
 
     node_positions: Dict[Tuple[int, int], int] = {}
-
     for d in range(num_depths):
         n = min(len(W_images_by_depth[d]), len(H_spectra_by_depth[d]), max_width_nodes)
         if n <= 0:
@@ -672,29 +685,23 @@ def plot_tree_with_H_and_edges(fig: Figure, rr: RRNMFResult, max_depth: Optional
 
             ax_w = axes[d, w_col]
             ax_h = axes[d, h_col]
-            ax_w.clear(); ax_h.clear()
-
+            ax_w.clear()
+            ax_h.clear()
             ax_w.imshow(W_images_by_depth[d][i], aspect="auto")
             err_txt = ""
             if d < len(errors_by_depth) and i < len(errors_by_depth[d]):
-                err_txt = f"\nErr={errors_by_depth[d][i]:.2g}"
-            ax_w.set_title(f"D{d}-C{i}{err_txt}", fontsize=7)
+                err_txt = "\nErr=%.3g" % errors_by_depth[d][i]
+            ax_w.set_title("D%d-C%d%s" % (d, i, err_txt), fontsize=7)
             ax_w.axis("off")
-
             ax_h.plot(H_spectra_by_depth[d][i])
             ax_h.set_title("H", fontsize=7)
-            ax_h.set_xticks([]); ax_h.set_yticks([])
+            ax_h.set_xticks([])
+            ax_h.set_yticks([])
 
-    # Edges for component tree. Works cleanly for rank-k component-only ordering.
-    # For explicit residual branch, parent mapping is not fully represented by W/H component list,
-    # so edges are approximate by index grouping.
     for d in range(1, num_depths):
         n = min(len(W_images_by_depth[d]), max_width_nodes)
         parent_n = max(1, len(W_images_by_depth[d - 1]))
-        if parent_n == 0:
-            continue
-        # infer branching from count ratio if possible
-        branch_factor = max(1, int(round(n / parent_n))) if parent_n > 0 else 1
+        branch_factor = max(1, int(round(float(n) / float(parent_n)))) if parent_n > 0 else 1
         for i in range(n):
             parent_i = i // max(1, branch_factor)
             if (d - 1, parent_i) in node_positions and (d, i) in node_positions:
@@ -751,7 +758,7 @@ def plot_energy_summary(fig: Figure, conv: Optional[ConventionalNMFResult], rr: 
 
 
 # =============================================================================
-# Worker thread
+# Worker
 # =============================================================================
 
 class AnalysisWorker(QThread):
@@ -780,8 +787,9 @@ class AnalysisWorker(QThread):
                     init=self.params["init"],
                     solver=self.params["solver"],
                     random_state=int(self.params["random_state"]),
+                    chunk_size=int(self.params["chunk_size"]),
                 )
-                logs.append(f"Conventional NMF recon ratio: {conv_result.recon_ratio:.6f}")
+                logs.append("Conventional NMF recon ratio: %.6f" % conv_result.recon_ratio)
 
             if self.params.get("run_rr", True):
                 logs.append("Running recursive NMF...")
@@ -797,8 +805,9 @@ class AnalysisWorker(QThread):
                     init=self.params["init"],
                     solver=self.params["solver"],
                     random_state=int(self.params["random_state"]),
+                    chunk_size=int(self.params["chunk_size"]),
                 )
-                logs.append(f"rr-NMF records: {len(rr_result.energy_records)} energy rows")
+                logs.append("rr-NMF energy rows: %d" % len(rr_result.energy_records))
 
             self.finished_ok.emit(conv_result, rr_result, "\n".join(logs))
         except Exception:
@@ -812,8 +821,8 @@ class AnalysisWorker(QThread):
 class RR2NMFGui(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Residual-aware rr-NMF Demo for EELS/EDS")
-        self.resize(1600, 950)
+        self.setWindowTitle("Residual-aware rr-NMF Demo for EELS/EDS - ROI/BCF/Large-safe")
+        self.resize(1650, 980)
 
         self.cube: Optional[np.ndarray] = None
         self.X: Optional[np.ndarray] = None
@@ -829,55 +838,59 @@ class RR2NMFGui(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
-
         splitter = QSplitter(Qt.Horizontal)
         main_layout.addWidget(splitter)
 
-        # Left control panel
         control = QWidget()
         control_layout = QVBoxLayout(control)
         splitter.addWidget(control)
         splitter.setStretchFactor(0, 0)
 
-        # Data group
-        data_group = QGroupBox("Data")
+        data_group = QGroupBox("Data / ROI")
         data_form = QFormLayout(data_group)
         self.btn_load = QPushButton("Load EELS/EDS Data")
         self.btn_load.clicked.connect(self.load_file)
         self.lbl_file = QLabel("No file loaded")
         self.lbl_shape = QLabel("Shape: -")
+        self.lbl_roi_shape = QLabel("ROI: -")
         self.combo_norm = QComboBox()
         self.combo_norm.addItems(["none", "global_max", "max", "area"])
+
+        self.spin_y0 = QSpinBox(); self.spin_y1 = QSpinBox()
+        self.spin_x0 = QSpinBox(); self.spin_x1 = QSpinBox()
+        self.spin_l0 = QSpinBox(); self.spin_l1 = QSpinBox()
+        for sp in [self.spin_y0, self.spin_y1, self.spin_x0, self.spin_x1, self.spin_l0, self.spin_l1]:
+            sp.setRange(0, 10**9)
+            sp.valueChanged.connect(self.update_roi_label)
+
         data_form.addRow(self.btn_load)
         data_form.addRow("File", self.lbl_file)
-        data_form.addRow("Cube", self.lbl_shape)
+        data_form.addRow("Loaded cube", self.lbl_shape)
+        data_form.addRow("Y start", self.spin_y0)
+        data_form.addRow("Y end", self.spin_y1)
+        data_form.addRow("X start", self.spin_x0)
+        data_form.addRow("X end", self.spin_x1)
+        data_form.addRow("Channel start", self.spin_l0)
+        data_form.addRow("Channel end", self.spin_l1)
+        data_form.addRow("ROI shape", self.lbl_roi_shape)
         data_form.addRow("Normalize", self.combo_norm)
         control_layout.addWidget(data_group)
 
-        # NMF group
         nmf_group = QGroupBox("NMF Settings")
         nmf_form = QFormLayout(nmf_group)
-
-        self.chk_conv = QCheckBox("Run conventional NMF")
-        self.chk_conv.setChecked(True)
+        self.chk_conv = QCheckBox("Run conventional NMF"); self.chk_conv.setChecked(True)
         self.spin_conv_k = QSpinBox(); self.spin_conv_k.setRange(1, 200); self.spin_conv_k.setValue(20)
-
-        self.chk_rr = QCheckBox("Run recursive NMF")
-        self.chk_rr.setChecked(True)
+        self.chk_rr = QCheckBox("Run recursive NMF"); self.chk_rr.setChecked(True)
         self.spin_rr_rank = QSpinBox(); self.spin_rr_rank.setRange(2, 10); self.spin_rr_rank.setValue(2)
         self.spin_rr_depth = QSpinBox(); self.spin_rr_depth.setRange(0, 8); self.spin_rr_depth.setValue(3)
-
-        self.combo_residual_mode = QComboBox()
-        self.combo_residual_mode.addItems(["redistribute_equal", "discard", "explicit_branch"])
-        self.combo_residual_nonnegative = QComboBox()
-        self.combo_residual_nonnegative.addItems(["clip", "abs", "shift"])
-        self.chk_decompose_residual = QCheckBox("Decompose residual branch")
-        self.chk_decompose_residual.setChecked(False)
-
+        self.combo_residual_mode = QComboBox(); self.combo_residual_mode.addItems(["redistribute_equal", "discard", "explicit_branch"])
+        self.combo_residual_nonnegative = QComboBox(); self.combo_residual_nonnegative.addItems(["clip", "abs", "shift"])
+        self.chk_decompose_residual = QCheckBox("Decompose residual branch"); self.chk_decompose_residual.setChecked(False)
         self.spin_iter = QSpinBox(); self.spin_iter.setRange(10, 10000); self.spin_iter.setValue(300)
         self.combo_init = QComboBox(); self.combo_init.addItems(["nndsvda", "nndsvd", "random"])
         self.combo_solver = QComboBox(); self.combo_solver.addItems(["mu", "cd"])
         self.spin_seed = QSpinBox(); self.spin_seed.setRange(0, 999999); self.spin_seed.setValue(0)
+        self.spin_chunk = QSpinBox(); self.spin_chunk.setRange(128, 50000); self.spin_chunk.setValue(2048)
 
         nmf_form.addRow(self.chk_conv)
         nmf_form.addRow("Conventional k", self.spin_conv_k)
@@ -891,76 +904,112 @@ class RR2NMFGui(QMainWindow):
         nmf_form.addRow("Init", self.combo_init)
         nmf_form.addRow("Solver", self.combo_solver)
         nmf_form.addRow("Random seed", self.spin_seed)
+        nmf_form.addRow("Chunk size", self.spin_chunk)
         control_layout.addWidget(nmf_group)
 
-        # Run/export group
         run_group = QGroupBox("Run / Export")
         run_layout = QVBoxLayout(run_group)
-        self.btn_run = QPushButton("Run Analysis")
+        self.btn_run = QPushButton("Run Analysis on ROI")
         self.btn_run.clicked.connect(self.run_analysis)
         self.btn_export_csv = QPushButton("Export Energy CSV")
         self.btn_export_csv.clicked.connect(self.export_csv)
-        self.btn_export_npz = QPushButton("Export Result NPZ")
-        self.btn_export_npz.clicked.connect(self.export_npz)
         run_layout.addWidget(self.btn_run)
         run_layout.addWidget(self.btn_export_csv)
-        run_layout.addWidget(self.btn_export_npz)
         control_layout.addWidget(run_group)
 
-        self.log = QTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMinimumHeight(180)
+        self.log = QTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(180)
         control_layout.addWidget(QLabel("Log"))
         control_layout.addWidget(self.log)
         control_layout.addStretch(1)
 
-        # Right tabs
         self.tabs = QTabWidget()
         splitter.addWidget(self.tabs)
         splitter.setStretchFactor(1, 1)
 
         self.canvas_tree = MplCanvas(width=12, height=8)
         self.tabs.addTab(self.canvas_tree, "rr-NMF Tree")
-
         self.canvas_conv = MplCanvas(width=10, height=8)
         self.tabs.addTab(self.canvas_conv, "Conventional NMF")
-
         self.canvas_energy = MplCanvas(width=10, height=8)
         self.tabs.addTab(self.canvas_energy, "Energy Summary")
-
         self.table_energy = QTableWidget()
         self.tabs.addTab(self.table_energy, "Energy Table")
-
         self.table_nodes = QTableWidget()
         self.tabs.addTab(self.table_nodes, "Node Table")
 
     def append_log(self, msg: str):
-        self.log.append(msg)
+        self.log.append(str(msg))
+
+    def set_roi_full(self):
+        if self.cube is None:
+            return
+        y, x, l = self.cube.shape
+        for sp, mx, val in [
+            (self.spin_y0, y, 0), (self.spin_y1, y, y),
+            (self.spin_x0, x, 0), (self.spin_x1, x, x),
+            (self.spin_l0, l, 0), (self.spin_l1, l, l),
+        ]:
+            sp.blockSignals(True)
+            sp.setRange(0, mx)
+            sp.setValue(val)
+            sp.blockSignals(False)
+        self.update_roi_label()
+
+    def update_roi_label(self):
+        if self.cube is None:
+            self.lbl_roi_shape.setText("ROI: -")
+            return
+        y, x, l = self.cube.shape
+        y0, y1 = self.spin_y0.value(), self.spin_y1.value()
+        x0, x1 = self.spin_x0.value(), self.spin_x1.value()
+        l0, l1 = self.spin_l0.value(), self.spin_l1.value()
+        y0, y1 = max(0, min(y0, y)), max(0, min(y1, y))
+        x0, x1 = max(0, min(x0, x)), max(0, min(x1, x))
+        l0, l1 = max(0, min(l0, l)), max(0, min(l1, l))
+        if y1 <= y0 or x1 <= x0 or l1 <= l0:
+            self.lbl_roi_shape.setText("Invalid ROI")
+        else:
+            self.lbl_roi_shape.setText("(%d, %d, %d) -> X=(%d, %d)" % (y1-y0, x1-x0, l1-l0, (y1-y0)*(x1-x0), l1-l0))
+
+    def get_roi_X(self) -> Tuple[np.ndarray, Tuple[int, int]]:
+        if self.cube is None:
+            raise ValueError("No cube loaded")
+        y, x, l = self.cube.shape
+        y0, y1 = self.spin_y0.value(), self.spin_y1.value()
+        x0, x1 = self.spin_x0.value(), self.spin_x1.value()
+        l0, l1 = self.spin_l0.value(), self.spin_l1.value()
+        y0, y1 = max(0, min(y0, y)), max(0, min(y1, y))
+        x0, x1 = max(0, min(x0, x)), max(0, min(x1, x))
+        l0, l1 = max(0, min(l0, l)), max(0, min(l1, l))
+        if y1 <= y0 or x1 <= x0 or l1 <= l0:
+            raise ValueError("Invalid ROI")
+        roi = self.cube[y0:y1, x0:x1, l0:l1].astype(np.float32, copy=False)
+        hh, ww, ll = roi.shape
+        X = roi.reshape(hh * ww, ll)
+        X = normalize_spectra(X, self.combo_norm.currentText())
+        X = nonnegative(X, "clip")
+        return X, (hh, ww)
 
     def load_file(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Load EELS/EDS Data",
             "",
-            "Data Files (*.npy *.npz *.hspy *.hdf5 *.h5 *.emd *.dm3 *.dm4 *.msa);;All Files (*.*)",
+            "Data Files (*.npy *.npz *.bcf *.hspy *.hdf5 *.h5 *.emd *.dm3 *.dm4 *.msa);;All Files (*.*)",
         )
         if not path:
             return
         try:
-            self.append_log(f"Loading: {path}")
+            self.append_log("Loading: %s" % path)
             cube, meta = load_hyperspectral_file(path)
             cube = nonnegative(cube, "clip")
             self.cube = cube
-            H_img, W_img, L = cube.shape
-            self.image_shape = (H_img, W_img)
-            X = cube.reshape(H_img * W_img, L)
-            X = normalize_spectra(X, self.combo_norm.currentText())
-            self.X = nonnegative(X, "clip")
             self.metadata = meta
             self.lbl_file.setText(os.path.basename(path))
-            self.lbl_shape.setText(f"{cube.shape} -> X={self.X.shape}")
-            self.append_log(f"Loaded cube shape: {cube.shape}")
-            self.append_log(f"Metadata: {meta}")
+            self.lbl_shape.setText(str(cube.shape))
+            self.set_roi_full()
+            self.append_log("Loaded cube shape: %s" % (cube.shape,))
+            self.append_log("Metadata: %s" % meta)
         except Exception as e:
             QMessageBox.critical(self, "Load failed", str(e))
             self.append_log(traceback.format_exc())
@@ -979,16 +1028,21 @@ class RR2NMFGui(QMainWindow):
             "init": self.combo_init.currentText(),
             "solver": self.combo_solver.currentText(),
             "random_state": self.spin_seed.value(),
+            "chunk_size": self.spin_chunk.value(),
         }
 
     def run_analysis(self):
-        if self.X is None or self.image_shape is None:
-            QMessageBox.warning(self, "No data", "Load data first.")
+        try:
+            X, shape = self.get_roi_X()
+        except Exception as e:
+            QMessageBox.warning(self, "ROI/Data error", str(e))
             return
+        self.X = X
+        self.image_shape = shape
         self.btn_run.setEnabled(False)
-        self.append_log("Starting analysis...")
+        self.append_log("Starting analysis on X=%s, image_shape=%s" % (X.shape, shape))
         params = self.collect_params()
-        self.worker = AnalysisWorker(self.X, self.image_shape, params)
+        self.worker = AnalysisWorker(X, shape, params)
         self.worker.finished_ok.connect(self.on_analysis_finished)
         self.worker.failed.connect(self.on_analysis_failed)
         self.worker.start()
@@ -1020,15 +1074,11 @@ class RR2NMFGui(QMainWindow):
 
         plot_energy_summary(self.canvas_energy.fig, self.conv_result, self.rr_result)
         self.canvas_energy.draw()
-
         self.refresh_tables()
 
     def dataframe_to_table(self, df: pd.DataFrame, table: QTableWidget, max_rows: int = 2000):
         if df is None or df.empty:
-            table.clear()
-            table.setRowCount(0)
-            table.setColumnCount(0)
-            return
+            table.clear(); table.setRowCount(0); table.setColumnCount(0); return
         df_show = df.head(max_rows).copy()
         table.setRowCount(len(df_show))
         table.setColumnCount(len(df_show.columns))
@@ -1036,10 +1086,7 @@ class RR2NMFGui(QMainWindow):
         for r in range(len(df_show)):
             for c, col in enumerate(df_show.columns):
                 val = df_show.iloc[r, c]
-                if isinstance(val, float):
-                    txt = f"{val:.6g}"
-                else:
-                    txt = str(val)
+                txt = "%.6g" % val if isinstance(val, float) else str(val)
                 table.setItem(r, c, QTableWidgetItem(txt))
         table.resizeColumnsToContents()
 
@@ -1049,12 +1096,8 @@ class RR2NMFGui(QMainWindow):
             dfs.append(self.conv_result.energy_records)
         if self.rr_result is not None:
             dfs.append(self.rr_result.energy_records)
-        if dfs:
-            df_energy = pd.concat(dfs, ignore_index=True)
-        else:
-            df_energy = pd.DataFrame()
+        df_energy = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
         self.dataframe_to_table(df_energy, self.table_energy)
-
         if self.rr_result is not None:
             self.dataframe_to_table(self.rr_result.node_records, self.table_nodes)
         else:
@@ -1075,35 +1118,7 @@ class RR2NMFGui(QMainWindow):
             if self.rr_result is not None:
                 self.rr_result.energy_records.to_csv(os.path.join(out_dir, "rr_nmf_energy.csv"), index=False)
                 self.rr_result.node_records.to_csv(os.path.join(out_dir, "rr_nmf_nodes.csv"), index=False)
-            self.append_log(f"CSV exported to {out_dir}")
-        except Exception as e:
-            QMessageBox.critical(self, "Export failed", str(e))
-            self.append_log(traceback.format_exc())
-
-    def export_npz(self):
-        if self.conv_result is None and self.rr_result is None:
-            QMessageBox.warning(self, "No result", "Run analysis first.")
-            return
-        path, _ = QFileDialog.getSaveFileName(self, "Save NPZ result", "rr2_nmf_results.npz", "NPZ (*.npz)")
-        if not path:
-            return
-        try:
-            payload: Dict[str, Any] = {}
-            if self.conv_result is not None:
-                payload["conv_W"] = self.conv_result.W
-                payload["conv_H"] = self.conv_result.H
-                payload["conv_R"] = self.conv_result.R
-                payload["conv_h_corr"] = self.conv_result.h_corr
-                payload["conv_w_corr"] = self.conv_result.w_corr
-            if self.rr_result is not None:
-                # Object arrays because depth lists may vary in length
-                payload["rr_W_images_by_depth"] = np.array(self.rr_result.W_images_by_depth, dtype=object)
-                payload["rr_H_spectra_by_depth"] = np.array(self.rr_result.H_spectra_by_depth, dtype=object)
-                payload["rr_errors_by_depth"] = np.array(self.rr_result.errors_by_depth, dtype=object)
-                payload["rr_targets_by_depth"] = np.array(self.rr_result.targets_by_depth, dtype=object)
-                payload["rr_residuals_by_depth"] = np.array(self.rr_result.residuals_by_depth, dtype=object)
-            np.savez_compressed(path, **payload)
-            self.append_log(f"NPZ exported: {path}")
+            self.append_log("CSV exported to %s" % out_dir)
         except Exception as e:
             QMessageBox.critical(self, "Export failed", str(e))
             self.append_log(traceback.format_exc())
