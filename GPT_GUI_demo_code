@@ -935,6 +935,88 @@ def plot_energy_summary(fig: Figure, conv: Optional[ConventionalNMFResult], rr: 
     fig.subplots_adjust(left=0.08, right=0.95, top=0.92, bottom=0.08, hspace=0.45, wspace=0.35)
 
 
+def collect_rr_component_entries(rr: RRNMFResult) -> List[Dict[str, Any]]:
+    """Collect all non-residual rr-NMF component W/H pairs for user-defined recombination."""
+    entries: List[Dict[str, Any]] = []
+    if rr is None:
+        return entries
+    for d, depth_nodes in enumerate(rr.node_summaries_by_depth):
+        for n, ns in enumerate(depth_nodes):
+            for c, (wmap, hspec) in enumerate(zip(ns.component_maps, ns.component_spectra)):
+                entries.append({
+                    "label": "D%d N%d C%d" % (d, n, c),
+                    "depth": d,
+                    "node": n,
+                    "component": c,
+                    "W_map": wmap,
+                    "H_spec": hspec,
+                })
+    return entries
+
+
+def build_combined_dataset(component_entries: List[Dict[str, Any]], name: str = "") -> Dict[str, Any]:
+    """Build a new synthetic dataset by summing selected W_i H_i component matrices."""
+    if not component_entries:
+        raise ValueError("No rr-NMF components selected.")
+
+    h, w = component_entries[0]["W_map"].shape
+    L = len(component_entries[0]["H_spec"])
+    Xsum = np.zeros((h * w, L), dtype=np.float32)
+
+    labels = []
+    for ent in component_entries:
+        wmap = ent["W_map"]
+        hspec = ent["H_spec"]
+        if wmap.shape != (h, w):
+            raise ValueError("Selected components have inconsistent W image shapes.")
+        if len(hspec) != L:
+            raise ValueError("Selected components have inconsistent H spectrum lengths.")
+        wvec = wmap.reshape(-1).astype(np.float32, copy=False)
+        hvec = hspec.astype(np.float32, copy=False)
+        Xsum += np.outer(wvec, hvec)
+        labels.append(ent["label"])
+
+    combined_img = np.sum(Xsum, axis=1, dtype=np.float64).reshape(h, w)
+    combined_spec = np.sum(Xsum, axis=0, dtype=np.float64)
+    if not name:
+        name = "Combined %d component(s)" % len(component_entries)
+    return {
+        "name": name,
+        "members": labels,
+        "matrix": Xsum,
+        "image": combined_img,
+        "spectrum": combined_spec,
+    }
+
+
+def plot_combined_dataset(fig: Figure, combined: Dict[str, Any], axis_info: AxisInfo, cmap: str = "viridis"):
+    fig.clear()
+    fig.set_size_inches(12.0, 4.8, forward=True)
+    gs = fig.add_gridspec(1, 2, width_ratios=[1, 1.15])
+    ax_img = fig.add_subplot(gs[0, 0])
+    ax_sp = fig.add_subplot(gs[0, 1])
+
+    im = ax_img.imshow(combined["image"], cmap=cmap, origin="upper", aspect="equal")
+    ax_img.set_title(combined.get("name", "Combined Image"), fontsize=10)
+    ax_img.set_xticks([])
+    ax_img.set_yticks([])
+    try:
+        ih, iw = combined["image"].shape
+        ax_img.set_box_aspect(float(ih) / float(iw))
+    except Exception:
+        pass
+    add_colorbar(fig, ax_img, im)
+
+    spec = combined["spectrum"]
+    x = axis_info.energy_axis if len(axis_info.energy_axis) == len(spec) else np.arange(len(spec), dtype=np.float32)
+    ax_sp.plot(x, spec, linewidth=1.0)
+    ax_sp.set_title("Combined Spectrum", fontsize=10)
+    ax_sp.set_xlabel(axis_info.energy_label)
+    ax_sp.set_ylabel("")
+    ax_sp.grid(True, alpha=0.3)
+    fig.subplots_adjust(left=0.055, right=0.97, top=0.88, bottom=0.16, wspace=0.28)
+
+
 # =============================================================================
 # Worker
 # =============================================================================
