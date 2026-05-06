@@ -289,7 +289,7 @@ def run_conventional_nmf(
     random_state: int = 0,
 ) -> ConventionalNMFResult:
     X = nonnegative(X, "clip").astype(np.float32)
-    H_img, W_img = image_shape
+    img_h, img_w = image_shape
     global_energy = fro_energy(X)
 
     model = NMF(
@@ -311,8 +311,8 @@ def run_conventional_nmf(
     for i in range(n_components):
         S_i = component_matrix(W, H, i)
         E_i = fro_energy(S_i)
-        W_img = W[:, i].reshape(H_img, W_img)
-        W_images.append(W_img)
+        W_map = W[:, i].reshape(img_h, img_w)
+        W_images.append(W_map)
         H_spectra.append(H[i].copy())
         records.append({
             "method": "conventional_nmf",
@@ -393,9 +393,9 @@ def run_rr_nmf(
             If decompose_residual_branch is False, residual branch is recorded but not decomposed further.
     """
     X = nonnegative(X, "clip").astype(np.float32)
-    H_img, W_img = image_shape
+    img_h, img_w = image_shape
     N, L = X.shape
-    assert N == H_img * W_img
+    assert N == img_h * img_w
 
     global_energy = fro_energy(X)
 
@@ -489,8 +489,8 @@ def run_rr_nmf(
                 E_i = fro_energy(S_i)
                 err_i = float(np.linalg.norm(Xd - S_i, "fro"))
 
-                W_img = W[:, i].reshape(H_img, W_img)
-                Wimgs_d.append(W_img)
+                W_map = W[:, i].reshape(img_h, img_w)
+                Wimgs_d.append(W_map)
                 Hspecs_d.append(H[i].copy())
                 errors_d.append(err_i)
                 targets_d.append(S_i)
