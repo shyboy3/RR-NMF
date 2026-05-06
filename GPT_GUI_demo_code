@@ -1,10 +1,10 @@
 """
-rr2_nmf_gui_ver4_full.py
+rr2_nmf_gui_ver4_1_full.py
 
 Residual-aware / residual-redistributed recursive NMF GUI for EELS/EDS spectral-imaging data.
 
-Main features
--------------
+Features
+--------
 1. Data loading
    - .npy / .npz
    - .bcf / .dm3 / .dm4 / .emd / .hspy / .h5 / .hdf5 / .msa via HyperSpy/RosettaSciIO if installed
@@ -30,14 +30,16 @@ Main features
 
 5. Visualization
    - Raw Data: XY image = sum over spectrum, spectrum = sum over space
-   - rr-NMF Tree: W image + H spectrum + residual image/spectrum summaries
-   - Conventional NMF: W image + H spectrum + final residual image/spectrum
+   - rr-NMF Tree: wrapped layout. Component image above spectrum. Residual image/spectrum below components.
+   - Conventional NMF: W image + H spectrum, plus final residual image/spectrum
    - Energy Summary
-   - Colorbar, scale bar, energy-axis labels
+   - Colorbar without text labels
+   - No scale-bar white boxes
+   - No spectrum Y-axis titles
    - Explicit Zoom + / Zoom - / Fit Width / Reset / pan buttons
 
-Recommended install
--------------------
+Install
+-------
 pip install numpy pandas scipy scikit-learn matplotlib PyQt5
 
 Optional microscopy loaders
@@ -68,15 +70,8 @@ import matplotlib
 matplotlib.use("Qt5Agg")
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from matplotlib.patches import ConnectionPatch
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
-import matplotlib.font_manager as fm
 
-
-# =============================================================================
-# Python version guard
-# =============================================================================
 
 if sys.version_info < (3, 8):
     raise RuntimeError("This GUI requires Python >= 3.8")
@@ -319,7 +314,6 @@ def try_extract_axis_info_from_signal(signal: Any, cube_shape: Tuple[int, int, i
             axis_info.energy_axis = np.arange(L, dtype=np.float32) * scale + offset
             axis_info.energy_unit = unit if unit not in ["", "None"] else "channel"
             axis_info.energy_label = "Energy (%s)" % axis_info.energy_unit if axis_info.energy_unit != "channel" else "Channel"
-
             spatial_axes = [ax for j, ax in enumerate(axes) if j != spec_idx]
             if len(spatial_axes) >= 2:
                 ay, axx = spatial_axes[0], spatial_axes[1]
@@ -421,37 +415,17 @@ def nearest_channel_from_energy(energy_axis: np.ndarray, value: float) -> int:
 # Plot helpers
 # =============================================================================
 
-def add_colorbar(fig: Figure, ax, im, label: str = "Intensity"):
+def add_colorbar(fig: Figure, ax, im, label: str = ""):
+    """Add colorbar without text label to keep plots compact."""
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="4%", pad=0.05)
     cb = fig.colorbar(im, cax=cax)
-    cb.set_label(label, fontsize=8)
     cb.ax.tick_params(labelsize=7)
 
 
 def add_scalebar(ax, img_shape: Tuple[int, int], axis_info: AxisInfo):
-    fontprops = fm.FontProperties(size=7)
-    width_px = int(img_shape[1])
-    if width_px <= 0:
-        return
-    size_px = max(1, int(round(width_px * 0.2)))
-    if axis_info.spatial_unit == "px" or axis_info.x_scale <= 0:
-        label = "%d px" % size_px
-    else:
-        real_size = size_px * axis_info.x_scale
-        if real_size >= 100:
-            real_size_disp = round(real_size, 0)
-        elif real_size >= 10:
-            real_size_disp = round(real_size, 1)
-        else:
-            real_size_disp = round(real_size, 2)
-        label = "%s %s" % (real_size_disp, axis_info.spatial_unit)
-    scalebar = AnchoredSizeBar(
-        ax.transData, size=size_px, label=label, loc="lower right",
-        pad=0.3, color="white", frameon=True,
-        size_vertical=max(1, int(img_shape[0] * 0.01)), fontproperties=fontprops,
-    )
-    ax.add_artist(scalebar)
+    """Scale bars are disabled to remove white boxes from all images."""
+    return
 
 
 # =============================================================================
@@ -768,12 +742,11 @@ def plot_raw_data(fig: Figure, cube: np.ndarray, axis_info: AxisInfo, cmap: str 
     ax_img.set_title("Raw Data: Sum over Spectrum", fontsize=11)
     ax_img.set_xlabel(axis_info.x_label)
     ax_img.set_ylabel(axis_info.y_label)
-    add_colorbar(fig, ax_img, im, label="Sum Intensity")
-    add_scalebar(ax_img, img.shape, axis_info)
+    add_colorbar(fig, ax_img, im)
     ax_spec.plot(x, spec)
     ax_spec.set_title("Raw Data: Sum over Space", fontsize=11)
     ax_spec.set_xlabel(axis_info.energy_label)
-    ax_spec.set_ylabel("Intensity (a.u.)")
+    ax_spec.set_ylabel("")
     ax_spec.grid(True, alpha=0.3)
     fig.subplots_adjust(left=0.06, right=0.96, top=0.9, bottom=0.12, wspace=0.35)
 
@@ -795,12 +768,11 @@ def plot_conventional_nmf_enhanced(fig: Figure, conv: ConventionalNMFResult, axi
         ax_img.set_title("Component %d - W" % i, fontsize=9)
         ax_img.set_xlabel(axis_info.x_label)
         ax_img.set_ylabel(axis_info.y_label)
-        add_colorbar(fig, ax_img, im, label="Weight")
-        add_scalebar(ax_img, img.shape, axis_info)
+        add_colorbar(fig, ax_img, im)
         ax_sp.plot(x, spec)
         ax_sp.set_title("Component %d - H" % i, fontsize=9)
         ax_sp.set_xlabel(axis_info.energy_label)
-        ax_sp.set_ylabel("Relative Intensity")
+        ax_sp.set_ylabel("")
         ax_sp.grid(True, alpha=0.3)
 
     ax_rimg = fig.add_subplot(gs[n_comp, 0])
@@ -809,19 +781,26 @@ def plot_conventional_nmf_enhanced(fig: Figure, conv: ConventionalNMFResult, axi
     ax_rimg.set_title("Residual - Sum over Spectrum", fontsize=9)
     ax_rimg.set_xlabel(axis_info.x_label)
     ax_rimg.set_ylabel(axis_info.y_label)
-    add_colorbar(fig, ax_rimg, im, label="Residual Sum")
-    add_scalebar(ax_rimg, conv.residual_image.shape, axis_info)
+    add_colorbar(fig, ax_rimg, im)
     spec = conv.residual_spectrum
     x = x_energy if len(x_energy) == len(spec) else np.arange(len(spec), dtype=np.float32)
     ax_rsp.plot(x, spec)
     ax_rsp.set_title("Residual - Sum over Space", fontsize=9)
     ax_rsp.set_xlabel(axis_info.energy_label)
-    ax_rsp.set_ylabel("Residual Intensity")
+    ax_rsp.set_ylabel("")
     ax_rsp.grid(True, alpha=0.3)
     fig.subplots_adjust(left=0.06, right=0.96, top=0.96, bottom=0.04, hspace=0.85, wspace=0.35)
 
 
 def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cmap: str = "viridis", max_depth: Optional[int] = None):
+    """
+    Wrapped tree view.
+    Per node for rank=2:
+        row 0: C0 image | C1 image
+        row 1: C0 H     | C1 H
+        row 2: Residual image
+        row 3: Residual spectrum
+    """
     fig.clear()
     node_summaries_by_depth = rr.node_summaries_by_depth
     rank = rr.rank
@@ -834,109 +813,91 @@ def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cma
         ax.axis("off")
         return
 
-    def item_order(ns: RRNodeSummary):
-        if rank == 2 and len(ns.component_maps) >= 2:
-            return [("component", 0), ("residual", None), ("component", 1)]
-        out = [("component", i) for i in range(len(ns.component_maps))]
-        out.append(("residual", None))
-        return out
+    max_nodes_per_row = 4
+    cols_per_node = max(2, rank)
+    rows_per_node = 4
+    gap_rows_per_depth = 1
 
-    max_nodes = max(len(depth_nodes) for depth_nodes in node_summaries_by_depth[:num_depths])
-    max_items = 1
-    for depth_nodes in node_summaries_by_depth[:num_depths]:
-        for ns in depth_nodes:
-            max_items = max(max_items, len(item_order(ns)))
-    total_cols = max(2, max_nodes * max_items * 2)
-    fig_width = max(18.0, total_cols * 2.4)
-    fig_height = max(8.0, num_depths * 4.2)
+    depth_row_offsets = []
+    total_rows = 0
+    total_cols = max(2, max_nodes_per_row * cols_per_node)
+    for d in range(num_depths):
+        n_nodes = len(node_summaries_by_depth[d])
+        n_wrap_rows = max(1, int(np.ceil(float(max(1, n_nodes)) / float(max_nodes_per_row))))
+        depth_row_offsets.append(total_rows)
+        total_rows += n_wrap_rows * rows_per_node + gap_rows_per_depth
+    total_rows = max(1, total_rows)
+
+    fig_width = max(14.0, total_cols * 3.0)
+    fig_height = max(8.0, total_rows * 1.65)
     fig.set_size_inches(fig_width, fig_height, forward=True)
-
-    axes = np.empty((num_depths, total_cols), dtype=object)
-    for r in range(num_depths):
-        for c in range(total_cols):
-            axes[r, c] = fig.add_subplot(num_depths, total_cols, r * total_cols + c + 1)
-            axes[r, c].axis("off")
-    node_centers: Dict[Tuple[int, int], float] = {}
+    gs = fig.add_gridspec(total_rows, total_cols)
     x_energy = axis_info.energy_axis
 
     for d in range(num_depths):
         nodes = node_summaries_by_depth[d]
-        n_nodes = len(nodes)
-        if n_nodes == 0:
-            continue
-        block_width = float(total_cols) / float(n_nodes)
-        for i, ns in enumerate(nodes):
-            items = item_order(ns)
-            local_width = len(items) * 2
-            start_col = int(round(i * block_width + (block_width - local_width) / 2.0))
-            start_col = max(0, min(start_col, total_cols - local_width))
-            node_centers[(d, i)] = start_col + local_width / 2.0
-            for j, (kind, idx) in enumerate(items):
-                col_img = start_col + j * 2
-                col_sp = col_img + 1
-                ax_img = axes[d, col_img]
-                ax_sp = axes[d, col_sp]
-                ax_img.clear()
-                ax_sp.clear()
-                if kind == "component":
-                    img = ns.component_maps[idx]
-                    spec = ns.component_spectra[idx]
-                    err = ns.component_errors[idx]
-                    x = x_energy if len(x_energy) == len(spec) else np.arange(len(spec), dtype=np.float32)
-                    im = ax_img.imshow(img, aspect="equal", cmap=cmap, origin="upper")
-                    ax_img.set_title("D%d N%d C%d\nErr=%.3g" % (d, i, idx, err), fontsize=7)
-                    ax_img.set_xlabel(axis_info.x_label, fontsize=7)
-                    ax_img.set_ylabel(axis_info.y_label, fontsize=7)
-                    add_colorbar(fig, ax_img, im, label="Weight")
-                    add_scalebar(ax_img, img.shape, axis_info)
-                    ax_sp.plot(x, spec)
-                    ax_sp.set_title("H%d" % idx, fontsize=7)
-                    ax_sp.set_xlabel(axis_info.energy_label, fontsize=7)
-                    ax_sp.set_ylabel("Relative", fontsize=7)
-                    ax_sp.tick_params(labelsize=6)
-                    ax_sp.grid(True, alpha=0.25)
-                else:
-                    if ns.residual_image is None or ns.residual_spectrum is None:
-                        continue
-                    img = ns.residual_image
-                    spec = ns.residual_spectrum
-                    x = x_energy if len(x_energy) == len(spec) else np.arange(len(spec), dtype=np.float32)
-                    im = ax_img.imshow(img, aspect="equal", cmap=cmap, origin="upper")
-                    ax_img.set_title("D%d N%d Residual" % (d, i), fontsize=7)
-                    ax_img.set_xlabel(axis_info.x_label, fontsize=7)
-                    ax_img.set_ylabel(axis_info.y_label, fontsize=7)
-                    add_colorbar(fig, ax_img, im, label="Residual Sum")
-                    add_scalebar(ax_img, img.shape, axis_info)
-                    ax_sp.plot(x, spec)
-                    ax_sp.set_title("Residual Spectrum", fontsize=7)
-                    ax_sp.set_xlabel(axis_info.energy_label, fontsize=7)
-                    ax_sp.set_ylabel("Residual", fontsize=7)
-                    ax_sp.tick_params(labelsize=6)
-                    ax_sp.grid(True, alpha=0.25)
+        row_offset = depth_row_offsets[d]
 
-    for d in range(1, num_depths):
-        curr_nodes = node_summaries_by_depth[d]
-        prev_nodes = node_summaries_by_depth[d - 1]
-        if not curr_nodes or not prev_nodes:
-            continue
-        for i in range(len(curr_nodes)):
-            parent_i = i // max(1, rank)
-            if parent_i >= len(prev_nodes):
-                continue
-            if (d - 1, parent_i) not in node_centers or (d, i) not in node_centers:
-                continue
-            pcol = int(round(node_centers[(d - 1, parent_i)]))
-            ccol = int(round(node_centers[(d, i)]))
-            pcol = max(0, min(pcol, total_cols - 1))
-            ccol = max(0, min(ccol, total_cols - 1))
-            con = ConnectionPatch(
-                xyA=(0.5, 1.0), coordsA=axes[d, ccol].transAxes,
-                xyB=(0.5, 0.0), coordsB=axes[d - 1, pcol].transAxes,
-                arrowstyle="-", color="gray", linewidth=0.8,
-            )
-            fig.add_artist(con)
-    fig.suptitle("rr-NMF Tree (Components + Residual summaries)", fontsize=12)
-    fig.subplots_adjust(left=0.025, right=0.985, top=0.94, bottom=0.05, hspace=0.85, wspace=0.45)
+        ax_depth = fig.add_subplot(gs[row_offset, :])
+        ax_depth.axis("off")
+        ax_depth.text(0.0, 0.6, "Depth %d" % d, fontsize=12, fontweight="bold", ha="left", va="center")
+
+        for i, ns in enumerate(nodes):
+            wrap_r = i // max_nodes_per_row
+            wrap_c = i % max_nodes_per_row
+            base_r = row_offset + wrap_r * rows_per_node
+            base_c = wrap_c * cols_per_node
+            n_comp = min(rank, len(ns.component_maps))
+
+            for ci in range(n_comp):
+                c = base_c + ci
+                img = ns.component_maps[ci]
+                spec = ns.component_spectra[ci]
+                err = ns.component_errors[ci]
+                x = x_energy if len(x_energy) == len(spec) else np.arange(len(spec), dtype=np.float32)
+
+                ax_img = fig.add_subplot(gs[base_r + 0, c])
+                im = ax_img.imshow(img, aspect="equal", cmap=cmap, origin="upper")
+                ax_img.set_title("N%d C%d\nErr=%.3g" % (i, ci, err), fontsize=7)
+                ax_img.set_xticks([])
+                ax_img.set_yticks([])
+                add_colorbar(fig, ax_img, im)
+
+                ax_sp = fig.add_subplot(gs[base_r + 1, c])
+                ax_sp.plot(x, spec)
+                ax_sp.set_title("H%d" % ci, fontsize=7)
+                ax_sp.set_xlabel(axis_info.energy_label, fontsize=7)
+                ax_sp.set_ylabel("", fontsize=7)
+                ax_sp.tick_params(labelsize=6)
+                ax_sp.grid(True, alpha=0.25)
+
+            if ns.residual_image is not None and ns.residual_spectrum is not None:
+                res_img = ns.residual_image
+                res_spec = ns.residual_spectrum
+                x = x_energy if len(x_energy) == len(res_spec) else np.arange(len(res_spec), dtype=np.float32)
+
+                ax_rimg = fig.add_subplot(gs[base_r + 2, base_c])
+                im = ax_rimg.imshow(res_img, aspect="equal", cmap=cmap, origin="upper")
+                ax_rimg.set_title("N%d Residual" % i, fontsize=7)
+                ax_rimg.set_xticks([])
+                ax_rimg.set_yticks([])
+                add_colorbar(fig, ax_rimg, im)
+
+                ax_rsp = fig.add_subplot(gs[base_r + 3, base_c])
+                ax_rsp.plot(x, res_spec)
+                ax_rsp.set_title("Residual Spectrum", fontsize=7)
+                ax_rsp.set_xlabel(axis_info.energy_label, fontsize=7)
+                ax_rsp.set_ylabel("", fontsize=7)
+                ax_rsp.tick_params(labelsize=6)
+                ax_rsp.grid(True, alpha=0.25)
+
+            for cc in range(base_c + n_comp, base_c + cols_per_node):
+                if cc < total_cols:
+                    ax_blank = fig.add_subplot(gs[base_r:base_r + rows_per_node, cc])
+                    ax_blank.axis("off")
+
+    fig.suptitle("rr-NMF Tree (wrapped nodes; residual below components)", fontsize=12)
+    fig.subplots_adjust(left=0.035, right=0.975, top=0.965, bottom=0.035, hspace=0.95, wspace=0.55)
 
 
 def plot_energy_summary(fig: Figure, conv: Optional[ConventionalNMFResult], rr: Optional[RRNMFResult]):
@@ -1031,7 +992,7 @@ class AnalysisWorker(QThread):
 class RR2NMFGui(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Residual-aware rr-NMF Demo for EELS/EDS - v4")
+        self.setWindowTitle("Residual-aware rr-NMF Demo for EELS/EDS - v4.1")
         self.resize(1750, 1000)
         self.cube: Optional[np.ndarray] = None
         self.roi_cube: Optional[np.ndarray] = None
@@ -1155,7 +1116,7 @@ class RR2NMFGui(QMainWindow):
         splitter.setStretchFactor(1, 1)
         self.canvas_raw = ControlledMplCanvas(width=14, height=5.5)
         self.tabs.addTab(PlotPanel(self.canvas_raw), "Raw Data")
-        self.canvas_tree = ControlledMplCanvas(width=22, height=10)
+        self.canvas_tree = ControlledMplCanvas(width=14, height=10)
         self.tabs.addTab(PlotPanel(self.canvas_tree), "rr-NMF Tree")
         self.canvas_conv = ControlledMplCanvas(width=16, height=10)
         self.tabs.addTab(PlotPanel(self.canvas_conv), "Conventional NMF")
@@ -1203,16 +1164,21 @@ class RR2NMFGui(QMainWindow):
         y, x, l = self.cube.shape
         self._syncing_energy_channel = True
         for sp, mx, val in [(self.spin_y0, y, 0), (self.spin_y1, y, y), (self.spin_x0, x, 0), (self.spin_x1, x, x), (self.spin_l0, l, 0), (self.spin_l1, l, l)]:
-            sp.blockSignals(True); sp.setRange(0, mx); sp.setValue(val); sp.blockSignals(False)
+            sp.blockSignals(True)
+            sp.setRange(0, mx)
+            sp.setValue(val)
+            sp.blockSignals(False)
         e_axis = self.axis_info.energy_axis
-        self.spin_e0.blockSignals(True); self.spin_e1.blockSignals(True)
+        self.spin_e0.blockSignals(True)
+        self.spin_e1.blockSignals(True)
         if len(e_axis) > 0:
             mn = float(np.nanmin(e_axis)); mx = float(np.nanmax(e_axis)); margin = abs(mx - mn) * 0.1 + 1.0
             self.spin_e0.setRange(mn - margin, mx + margin)
             self.spin_e1.setRange(mn - margin, mx + margin)
             self.spin_e0.setValue(float(e_axis[0]))
             self.spin_e1.setValue(float(e_axis[-1]))
-        self.spin_e0.blockSignals(False); self.spin_e1.blockSignals(False)
+        self.spin_e0.blockSignals(False)
+        self.spin_e1.blockSignals(False)
         self._syncing_energy_channel = False
         self.update_roi_label()
 
@@ -1246,9 +1212,12 @@ class RR2NMFGui(QMainWindow):
         l0 = max(0, min(self.spin_l0.value(), L - 1))
         l1_exclusive = max(1, min(self.spin_l1.value(), L))
         l1_idx = max(0, min(l1_exclusive - 1, L - 1))
-        self.spin_e0.blockSignals(True); self.spin_e1.blockSignals(True)
-        self.spin_e0.setValue(float(e_axis[l0])); self.spin_e1.setValue(float(e_axis[l1_idx]))
-        self.spin_e0.blockSignals(False); self.spin_e1.blockSignals(False)
+        self.spin_e0.blockSignals(True)
+        self.spin_e1.blockSignals(True)
+        self.spin_e0.setValue(float(e_axis[l0]))
+        self.spin_e1.setValue(float(e_axis[l1_idx]))
+        self.spin_e0.blockSignals(False)
+        self.spin_e1.blockSignals(False)
 
     def sync_channel_from_energy_roi(self):
         if self.cube is None:
@@ -1261,9 +1230,12 @@ class RR2NMFGui(QMainWindow):
         idx1 = nearest_channel_from_energy(e_axis, self.spin_e1.value())
         lo = max(0, min(min(idx0, idx1), L - 1))
         hi = max(1, min(max(idx0, idx1) + 1, L))
-        self.spin_l0.blockSignals(True); self.spin_l1.blockSignals(True)
-        self.spin_l0.setValue(lo); self.spin_l1.setValue(hi)
-        self.spin_l0.blockSignals(False); self.spin_l1.blockSignals(False)
+        self.spin_l0.blockSignals(True)
+        self.spin_l1.blockSignals(True)
+        self.spin_l0.setValue(lo)
+        self.spin_l1.setValue(hi)
+        self.spin_l0.blockSignals(False)
+        self.spin_l1.blockSignals(False)
 
     def update_roi_label(self):
         if self.cube is None:
@@ -1304,9 +1276,11 @@ class RR2NMFGui(QMainWindow):
             energy_axis=self.axis_info.energy_axis[l0:l1].copy() if len(self.axis_info.energy_axis) == l else np.arange(ll, dtype=np.float32),
             energy_unit=self.axis_info.energy_unit,
             energy_label=self.axis_info.energy_label,
-            x_scale=self.axis_info.x_scale, y_scale=self.axis_info.y_scale,
+            x_scale=self.axis_info.x_scale,
+            y_scale=self.axis_info.y_scale,
             spatial_unit=self.axis_info.spatial_unit,
-            x_label=self.axis_info.x_label, y_label=self.axis_info.y_label,
+            x_label=self.axis_info.x_label,
+            y_label=self.axis_info.y_label,
         )
         return roi, X, (hh, ww), roi_axis
 
@@ -1315,7 +1289,8 @@ class RR2NMFGui(QMainWindow):
             self.canvas_raw.clear(); return
         try:
             roi_cube, _, _, roi_axis = self.get_roi_cube_and_X()
-            self.roi_cube = roi_cube; self.roi_axis_info = roi_axis
+            self.roi_cube = roi_cube
+            self.roi_axis_info = roi_axis
             plot_raw_data(self.canvas_raw.fig, roi_cube, roi_axis, cmap=self.combo_cmap.currentText())
             self.canvas_raw.draw()
         except Exception:
@@ -1323,13 +1298,18 @@ class RR2NMFGui(QMainWindow):
 
     def collect_params(self) -> Dict[str, Any]:
         return {
-            "run_conventional": self.chk_conv.isChecked(), "conv_components": self.spin_conv_k.value(),
-            "run_rr": self.chk_rr.isChecked(), "rr_rank": self.spin_rr_rank.value(),
-            "rr_depth": self.spin_rr_depth.value(), "residual_mode": self.combo_residual_mode.currentText(),
+            "run_conventional": self.chk_conv.isChecked(),
+            "conv_components": self.spin_conv_k.value(),
+            "run_rr": self.chk_rr.isChecked(),
+            "rr_rank": self.spin_rr_rank.value(),
+            "rr_depth": self.spin_rr_depth.value(),
+            "residual_mode": self.combo_residual_mode.currentText(),
             "residual_nonnegative": self.combo_residual_nonnegative.currentText(),
             "decompose_residual_branch": self.chk_decompose_residual.isChecked(),
-            "max_iter": self.spin_iter.value(), "init": self.combo_init.currentText(),
-            "solver": self.combo_solver.currentText(), "random_state": self.spin_seed.value(),
+            "max_iter": self.spin_iter.value(),
+            "init": self.combo_init.currentText(),
+            "solver": self.combo_solver.currentText(),
+            "random_state": self.spin_seed.value(),
             "chunk_size": self.spin_chunk.value(),
         }
 
@@ -1338,7 +1318,10 @@ class RR2NMFGui(QMainWindow):
             roi_cube, X, shape, roi_axis = self.get_roi_cube_and_X()
         except Exception as e:
             QMessageBox.warning(self, "ROI/Data error", str(e)); return
-        self.roi_cube = roi_cube; self.X = X; self.image_shape = shape; self.roi_axis_info = roi_axis
+        self.roi_cube = roi_cube
+        self.X = X
+        self.image_shape = shape
+        self.roi_axis_info = roi_axis
         self.btn_run.setEnabled(False)
         self.append_log("Starting analysis on ROI cube=%s, X=%s, image_shape=%s" % (roi_cube.shape, X.shape, shape))
         self.worker = AnalysisWorker(X, shape, self.collect_params())
@@ -1347,7 +1330,8 @@ class RR2NMFGui(QMainWindow):
         self.worker.start()
 
     def on_analysis_finished(self, conv_result: Optional[ConventionalNMFResult], rr_result: Optional[RRNMFResult], logs: str):
-        self.conv_result = conv_result; self.rr_result = rr_result
+        self.conv_result = conv_result
+        self.rr_result = rr_result
         self.append_log(logs)
         self.btn_run.setEnabled(True)
         self.refresh_views()
