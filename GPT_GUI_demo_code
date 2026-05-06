@@ -897,12 +897,14 @@ def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cma
     """
     Wrapped rr-NMF tree view.
 
-    For rank=2, each node is displayed as:
-        image row   : D/N/C0 map | D/N/Residual map | D/N/C1 map
-        spectrum row: D/N/H0     | Residual spectrum | D/N/H1
+    Rank-2 node layout:
+        [ C0 image ] [ C1 image ]
+        [ H0 spec  ] [ H1 spec  ]
+        [      Residual map      ]
+        [   Residual spectrum    ]
 
-    Only the image rows are enlarged. Spectrum rows keep the compact height used
-    before v4.3. Residual maps/spectra are placed between C0 and C1.
+    Component and residual image rows are enlarged, while spectrum rows stay compact.
+    Residual map/spectrum are centered below C0/C1 by spanning the two component columns.
     """
     fig.clear()
     node_summaries_by_depth = rr.node_summaries_by_depth
@@ -916,41 +918,34 @@ def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cma
         ax.axis("off")
         return
 
-    # One node is rendered in 3 columns for rank=2:
-    # C0 | Residual | C1. For rank>2, components are followed by residual.
     max_nodes_per_row = 3 if rank == 2 else 2
-    cols_per_node = 3 if rank == 2 else rank + 1
+    cols_per_node = 2 if rank == 2 else max(2, rank)
+    rows_per_node = 4
 
-    # Each node block has only two visual rows: image row and spectrum row.
-    # The image row is 3x the spectrum row. The spectrum row itself remains compact.
+    depth_label_weight = 0.55
     image_row_weight = 3.0
     spectrum_row_weight = 1.0
-    depth_label_weight = 0.55
     gap_weight = 0.35
 
-    depth_start_rows: List[int] = []
+    depth_row_offsets: List[int] = []
     height_ratios: List[float] = []
     row_cursor = 0
-
     for d in range(num_depths):
         n_nodes = len(node_summaries_by_depth[d])
         n_wrap_rows = max(1, int(np.ceil(float(max(1, n_nodes)) / float(max_nodes_per_row))))
-        depth_start_rows.append(row_cursor)
-
+        depth_row_offsets.append(row_cursor)
         height_ratios.append(depth_label_weight)
         row_cursor += 1
         for _ in range(n_wrap_rows):
-            height_ratios.append(image_row_weight)
-            height_ratios.append(spectrum_row_weight)
-            row_cursor += 2
+            height_ratios.extend([image_row_weight, spectrum_row_weight, image_row_weight, spectrum_row_weight])
+            row_cursor += rows_per_node
         height_ratios.append(gap_weight)
         row_cursor += 1
 
     total_rows = max(1, row_cursor)
     total_cols = max(2, max_nodes_per_row * cols_per_node)
 
-    # Width is based on column count. Height uses weighted rows so images grow,
-    # while spectrum rows keep approximately the pre-v4.3 compact height.
+    # Keep spectrum rows compact. Image rows are enlarged through height ratios only.
     fig_width = max(14.0, total_cols * 3.0)
     fig_height = max(8.0, float(sum(height_ratios)) * 1.65)
     fig.set_size_inches(fig_width, fig_height, forward=True)
@@ -959,7 +954,7 @@ def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cma
 
     for d in range(num_depths):
         nodes = node_summaries_by_depth[d]
-        row_offset = depth_start_rows[d]
+        row_offset = depth_row_offsets[d]
 
         ax_depth = fig.add_subplot(gs[row_offset, :])
         ax_depth.axis("off")
@@ -968,26 +963,28 @@ def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cma
         for i, ns in enumerate(nodes):
             wrap_r = i // max_nodes_per_row
             wrap_c = i % max_nodes_per_row
-            base_r = row_offset + 1 + wrap_r * 2
+            base_r = row_offset + 1 + wrap_r * rows_per_node
             base_c = wrap_c * cols_per_node
 
             if rank == 2:
-                component_cols = {0: base_c, 1: base_c + 2}
-                residual_col = base_c + 1
+                comp_cols = [base_c, base_c + 1]
+                span_start = base_c
+                span_end = base_c + 2
+                n_comp = min(2, len(ns.component_maps))
             else:
-                component_cols = {ci: base_c + ci for ci in range(min(rank, len(ns.component_maps)))}
-                residual_col = base_c + min(rank, cols_per_node - 1)
+                comp_cols = [base_c + ci for ci in range(min(rank, len(ns.component_maps), cols_per_node))]
+                span_start = base_c
+                span_end = min(base_c + cols_per_node, total_cols)
+                n_comp = len(comp_cols)
 
-            n_comp = min(rank, len(ns.component_maps))
+            # Component maps and spectra.
             for ci in range(n_comp):
-                if ci not in component_cols:
-                    continue
-                c = component_cols[ci]
+                c = comp_cols[ci]
                 img = ns.component_maps[ci]
                 spec = ns.component_spectra[ci]
                 x = x_energy if len(x_energy) == len(spec) else np.arange(len(spec), dtype=np.float32)
 
-                ax_img = fig.add_subplot(gs[base_r, c])
+                ax_img = fig.add_subplot(gs[base_r + 0, c])
                 im = ax_img.imshow(img, cmap=cmap, origin="upper", aspect="equal")
                 ax_img.set_title("D%d N%d C%d" % (d, i, ci), fontsize=10)
                 ax_img.set_xticks([])
@@ -1007,13 +1004,10 @@ def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cma
                 ax_sp.tick_params(labelsize=7)
                 ax_sp.grid(True, alpha=0.25)
 
-            # Residual is centered between C0 and C1 for rank=2.
-            if ns.residual_image is not None and ns.residual_spectrum is not None and residual_col < total_cols:
+            # Residual map: centered below C0/C1 by spanning the component columns.
+            if ns.residual_image is not None:
                 res_img = ns.residual_image
-                res_spec = ns.residual_spectrum
-                x = x_energy if len(x_energy) == len(res_spec) else np.arange(len(res_spec), dtype=np.float32)
-
-                ax_rimg = fig.add_subplot(gs[base_r, residual_col])
+                ax_rimg = fig.add_subplot(gs[base_r + 2, span_start:span_end])
                 im = ax_rimg.imshow(res_img, cmap=cmap, origin="upper", aspect="equal")
                 ax_rimg.set_title("D%d N%d Residual" % (d, i), fontsize=10)
                 ax_rimg.set_xticks([])
@@ -1024,25 +1018,27 @@ def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cma
                 except Exception:
                     pass
                 add_colorbar(fig, ax_rimg, im)
+            else:
+                ax_blank = fig.add_subplot(gs[base_r + 2, span_start:span_end])
+                ax_blank.axis("off")
 
-                ax_rsp = fig.add_subplot(gs[base_r + 1, residual_col])
+            # Residual spectrum: centered below residual map by spanning the component columns.
+            if ns.residual_spectrum is not None:
+                res_spec = ns.residual_spectrum
+                x = x_energy if len(x_energy) == len(res_spec) else np.arange(len(res_spec), dtype=np.float32)
+                ax_rsp = fig.add_subplot(gs[base_r + 3, span_start:span_end])
                 ax_rsp.plot(x, res_spec, linewidth=1.0)
                 ax_rsp.set_title("D%d N%d Residual Spectrum" % (d, i), fontsize=9)
                 ax_rsp.set_xlabel(axis_info.energy_label, fontsize=8)
                 ax_rsp.set_ylabel("")
                 ax_rsp.tick_params(labelsize=7)
                 ax_rsp.grid(True, alpha=0.25)
-
-            # Blank any unused columns in this node block.
-            used_cols = set(component_cols.values())
-            used_cols.add(residual_col)
-            for cc in range(base_c, base_c + cols_per_node):
-                if cc < total_cols and cc not in used_cols:
-                    ax_blank = fig.add_subplot(gs[base_r:base_r + 2, cc])
-                    ax_blank.axis("off")
+            else:
+                ax_blank = fig.add_subplot(gs[base_r + 3, span_start:span_end])
+                ax_blank.axis("off")
 
     fig.suptitle("rr-NMF Tree", fontsize=14)
-    fig.subplots_adjust(left=0.03, right=0.985, top=0.965, bottom=0.035, hspace=0.35, wspace=0.22)
+    fig.subplots_adjust(left=0.03, right=0.985, top=0.965, bottom=0.035, hspace=0.40, wspace=0.22)
 
 
 def plot_energy_summary(fig: Figure, conv: Optional[ConventionalNMFResult], rr: Optional[RRNMFResult]):
@@ -1255,9 +1251,6 @@ class RR2NMFGui(QMainWindow):
         splitter.addWidget(control)
         splitter.setStretchFactor(0, 0)
 
-        # -----------------------------
-        # Data / ROI
-        # -----------------------------
         data_group = QGroupBox("Data / ROI")
         data_form = QFormLayout(data_group)
         self.btn_load = QPushButton("Load EELS/EDS Data")
@@ -1302,9 +1295,6 @@ class RR2NMFGui(QMainWindow):
         data_form.addRow("Normalize", self.combo_norm)
         control_layout.addWidget(data_group)
 
-        # -----------------------------
-        # Background correction
-        # -----------------------------
         bg_group = QGroupBox("Background Correction")
         bg_form = QFormLayout(bg_group)
         self.combo_bg_signal_type = QComboBox()
@@ -1340,9 +1330,6 @@ class RR2NMFGui(QMainWindow):
         bg_form.addRow("Status", self.lbl_bg_status)
         control_layout.addWidget(bg_group)
 
-        # -----------------------------
-        # NMF settings
-        # -----------------------------
         nmf_group = QGroupBox("NMF Settings")
         nmf_form = QFormLayout(nmf_group)
         self.chk_conv = QCheckBox("Run conventional NMF"); self.chk_conv.setChecked(True)
@@ -1350,11 +1337,15 @@ class RR2NMFGui(QMainWindow):
         self.chk_rr = QCheckBox("Run recursive NMF"); self.chk_rr.setChecked(True)
         self.spin_rr_rank = QSpinBox(); self.spin_rr_rank.setRange(2, 10); self.spin_rr_rank.setValue(2)
         self.spin_rr_depth = QSpinBox(); self.spin_rr_depth.setRange(0, 8); self.spin_rr_depth.setValue(3)
-        self.combo_residual_mode = QComboBox(); self.combo_residual_mode.addItems(["discard", "redistribute_equal", "explicit_branch"])
+        self.combo_residual_mode = QComboBox()
+        self.combo_residual_mode.addItems(["discard", "redistribute_equal", "explicit_branch"])
+        self.combo_residual_mode.setCurrentText("redistribute_equal")
         self.combo_residual_nonnegative = QComboBox(); self.combo_residual_nonnegative.addItems(["clip", "abs", "shift"])
         self.chk_decompose_residual = QCheckBox("Decompose residual branch"); self.chk_decompose_residual.setChecked(False)
         self.spin_iter = QSpinBox(); self.spin_iter.setRange(10, 10000); self.spin_iter.setValue(300)
-        self.combo_init = QComboBox(); self.combo_init.addItems(["nndsvda", "nndsvd", "random"])
+        self.combo_init = QComboBox()
+        self.combo_init.addItems(["nndsvda", "nndsvd", "random"])
+        self.combo_init.setCurrentText("random")
         self.combo_solver = QComboBox(); self.combo_solver.addItems(["mu", "cd"])
         self.spin_seed = QSpinBox(); self.spin_seed.setRange(0, 999999); self.spin_seed.setValue(0)
         self.spin_chunk = QSpinBox(); self.spin_chunk.setRange(128, 50000); self.spin_chunk.setValue(2048)
@@ -1465,9 +1456,6 @@ class RR2NMFGui(QMainWindow):
     def append_log(self, msg: str):
         self.log.append(str(msg))
 
-    # -------------------------------------------------------------------------
-    # Loading / ROI / background correction
-    # -------------------------------------------------------------------------
     def load_file(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Load EELS/EDS Data", "",
@@ -1541,7 +1529,6 @@ class RR2NMFGui(QMainWindow):
             mn = float(np.nanmin(e_axis)); mx = float(np.nanmax(e_axis)); margin = abs(mx - mn) * 0.1 + 1.0
             self.spin_bg_e0.setRange(mn - margin, mx + margin)
             self.spin_bg_e1.setRange(mn - margin, mx + margin)
-            # Default to first 15% of channels as fitting window; user should adjust to pre-edge/background region.
             l1 = max(3, int(round(l * 0.15)))
             self.spin_bg_e0.setValue(float(e_axis[0]))
             self.spin_bg_e1.setValue(float(e_axis[min(l1, l) - 1]))
@@ -1739,9 +1726,6 @@ class RR2NMFGui(QMainWindow):
         except Exception:
             self.canvas_raw.clear()
 
-    # -------------------------------------------------------------------------
-    # Run / plotting refresh / recombination / export
-    # -------------------------------------------------------------------------
     def collect_params(self) -> Dict[str, Any]:
         return {
             "run_conventional": self.chk_conv.isChecked(),
