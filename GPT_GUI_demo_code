@@ -1,42 +1,20 @@
 """
-rr2_nmf_gui_ver4_1_full.py
+rr2_nmf_gui_ver4_3_full.py
 
 Residual-aware / residual-redistributed recursive NMF GUI for EELS/EDS spectral-imaging data.
 
-Features
---------
-1. Data loading
-   - .npy / .npz
-   - .bcf / .dm3 / .dm4 / .emd / .hspy / .h5 / .hdf5 / .msa via HyperSpy/RosettaSciIO if installed
-
-2. ROI before processing
-   - Spatial ROI: Y start/end, X start/end
-   - Channel ROI: channel start/end
-   - Energy ROI: energy start/end, automatically mapped to nearest channel index
-
-3. Analysis
-   - Conventional NMF
-   - Recursive rank-k NMF
-   - Residual handling modes:
-       discard
-       redistribute_equal: X_child_i = W_i H_i + (X - W H) / rank
-       explicit_branch
-
-4. Quantification
-   - Component energy without constructing full outer matrices
-   - Residual energy and residual summaries calculated chunk-wise
-   - Node/global energy ratios
-   - Conventional NMF W/H correlation matrices
-
-5. Visualization
-   - Raw Data: XY image = sum over spectrum, spectrum = sum over space
-   - rr-NMF Tree: wrapped layout. Component image above spectrum. Residual image/spectrum below components.
-   - Conventional NMF: W image + H spectrum, plus final residual image/spectrum
-   - Energy Summary
-   - Colorbar without text labels
-   - No scale-bar white boxes
-   - No spectrum Y-axis titles
-   - Explicit Zoom + / Zoom - / Fit Width / Reset / pan buttons
+Main additions in v4.3
+----------------------
+1. rr-NMF Tree images enlarged substantially.
+2. Background Correction panel added between Data/ROI and NMF Settings.
+   - Power-law background model: I(E)=A*E^(-r)
+   - Fit r from a selected spatial ROI and energy window.
+   - Apply pixel-wise amplitude A_p to the full loaded cube.
+   - Reset to original loaded data supported.
+3. rr-NMF component recombination panel retained.
+   - Select arbitrary non-residual D/N/C component sets.
+   - Sum selected W_i H_i matrices into a new synthetic dataset.
+   - Preview and export combined dataset as NPZ.
 
 Install
 -------
@@ -409,6 +387,106 @@ def nearest_channel_from_energy(energy_axis: np.ndarray, value: float) -> int:
     if energy_axis.size == 0:
         return 0
     return int(np.argmin(np.abs(energy_axis - float(value))))
+
+
+# =============================================================================
+# Background correction utilities
+# =============================================================================
+
+def safe_powerlaw_energy_axis(energy_axis: np.ndarray) -> np.ndarray:
+    """Return a strictly positive energy axis for log-log power-law fitting."""
+    e = np.asarray(energy_axis, dtype=np.float64).copy()
+    if e.size == 0:
+        return e
+    finite = np.isfinite(e)
+    if not np.any(finite):
+        return np.arange(len(e), dtype=np.float64) + 1.0
+    min_e = float(np.nanmin(e[finite]))
+    if min_e <= 0:
+        e = e - min_e + 1e-6
+    e[e <= 0] = 1e-6
+    return e
+
+
+def fit_powerlaw_exponent_from_roi(
+    cube: np.ndarray,
+    axis_info: AxisInfo,
+    spatial_roi: Tuple[int, int, int, int],
+    channel_roi: Tuple[int, int],
+) -> Dict[str, float]:
+    """
+    Fit a power-law background I(E)=A*E^(-r) from the mean spectrum in a selected ROI.
+    The exponent r is estimated from the selected spatial ROI and fitting energy window.
+    Later, each pixel gets its own amplitude A_p using the same r.
+    """
+    y0, y1, x0, x1 = spatial_roi
+    l0, l1 = channel_roi
+    sub = cube[y0:y1, x0:x1, l0:l1].astype(np.float64, copy=False)
+    if sub.size == 0:
+        raise ValueError("Background fitting ROI is empty.")
+
+    spec = np.nanmean(sub.reshape(-1, sub.shape[-1]), axis=0)
+    e_full = safe_powerlaw_energy_axis(axis_info.energy_axis)
+    e = e_full[l0:l1]
+    if len(e) != len(spec):
+        e = np.arange(len(spec), dtype=np.float64) + 1.0
+
+    mask = np.isfinite(e) & np.isfinite(spec) & (e > 0) & (spec > 0)
+    if np.count_nonzero(mask) < 3:
+        raise ValueError("Not enough positive finite points for power-law background fitting.")
+
+    loge = np.log(e[mask])
+    logy = np.log(spec[mask])
+    slope, intercept = np.polyfit(loge, logy, 1)
+    r = -float(slope)
+    A = float(np.exp(intercept))
+    fit = A * np.power(e[mask], -r)
+    rmse = float(np.sqrt(np.mean((spec[mask] - fit) ** 2)))
+    return {"A_mean": A, "r": r, "rmse": rmse, "n_points": int(np.count_nonzero(mask))}
+
+
+def apply_powerlaw_background_correction(
+    cube: np.ndarray,
+    axis_info: AxisInfo,
+    fit_channel_roi: Tuple[int, int],
+    exponent_r: float,
+    clip_negative: bool = True,
+    chunk_pixels: int = 8192,
+) -> np.ndarray:
+    """
+    Apply pixel-wise amplitude power-law background subtraction using fixed exponent r.
+
+    For each pixel spectrum y_p(E), estimate A_p over the selected fit window:
+        A_p = mean( y_p(E) * E^r )
+    then subtract:
+        B_p(E) = A_p * E^(-r)
+    """
+    h, w, L = cube.shape
+    l0, l1 = fit_channel_roi
+    if l1 <= l0:
+        raise ValueError("Invalid background fit channel range.")
+
+    e = safe_powerlaw_energy_axis(axis_info.energy_axis)
+    if len(e) != L:
+        e = np.arange(L, dtype=np.float64) + 1.0
+    e = np.maximum(e, 1e-6)
+    e_fit = e[l0:l1]
+    basis_full = np.power(e, -float(exponent_r)).astype(np.float32)
+    amp_basis_fit = np.power(e_fit, float(exponent_r)).astype(np.float32)
+
+    X = cube.reshape(h * w, L).astype(np.float32, copy=False)
+    out = np.empty_like(X, dtype=np.float32)
+    for st in range(0, X.shape[0], chunk_pixels):
+        en = min(st + chunk_pixels, X.shape[0])
+        Xc = X[st:en]
+        fit_slice = Xc[:, l0:l1]
+        A = np.nanmean(fit_slice * amp_basis_fit.reshape(1, -1), axis=1).astype(np.float32)
+        bg = A.reshape(-1, 1) * basis_full.reshape(1, -1)
+        corr = Xc - bg
+        if clip_negative:
+            corr = np.clip(corr, 0, None)
+        out[st:en] = corr.astype(np.float32)
+    return out.reshape(h, w, L)
 
 
 # =============================================================================
@@ -817,7 +895,7 @@ def plot_conventional_nmf_enhanced(fig: Figure, conv: ConventionalNMFResult, axi
 
 def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cmap: str = "viridis", max_depth: Optional[int] = None):
     """
-    Wrapped tree view.
+    Wrapped rr-NMF tree view.
     Per node for rank=2:
         row 0: C0 image | C1 image
         row 1: C0 H     | C1 H
@@ -836,7 +914,7 @@ def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cma
         ax.axis("off")
         return
 
-    max_nodes_per_row = 4
+    max_nodes_per_row = 3 if rank == 2 else 2
     cols_per_node = max(2, rank)
     rows_per_node = 4
     gap_rows_per_depth = 1
@@ -851,8 +929,9 @@ def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cma
         total_rows += 1 + n_wrap_rows * rows_per_node + gap_rows_per_depth
     total_rows = max(1, total_rows)
 
-    fig_width = max(14.0, total_cols * 3.0)
-    fig_height = max(8.0, total_rows * 1.65)
+    # v4.3: roughly 3x larger than earlier tree rendering.
+    fig_width = max(24.0, total_cols * 9.0)
+    fig_height = max(18.0, total_rows * 4.95)
     fig.set_size_inches(fig_width, fig_height, forward=True)
     gs = fig.add_gridspec(total_rows, total_cols)
     x_energy = axis_info.energy_axis
@@ -863,7 +942,7 @@ def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cma
 
         ax_depth = fig.add_subplot(gs[row_offset, :])
         ax_depth.axis("off")
-        ax_depth.text(0.0, 0.6, "Depth %d" % d, fontsize=12, fontweight="bold", ha="left", va="center")
+        ax_depth.text(0.0, 0.65, "Depth %d" % d, fontsize=16, fontweight="bold", ha="left", va="center")
 
         for i, ns in enumerate(nodes):
             wrap_r = i // max_nodes_per_row
@@ -876,22 +955,26 @@ def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cma
                 c = base_c + ci
                 img = ns.component_maps[ci]
                 spec = ns.component_spectra[ci]
-                err = ns.component_errors[ci]
                 x = x_energy if len(x_energy) == len(spec) else np.arange(len(spec), dtype=np.float32)
 
                 ax_img = fig.add_subplot(gs[base_r + 0, c])
-                im = ax_img.imshow(img, aspect="equal", cmap=cmap, origin="upper")
-                ax_img.set_title("D%d N%d C%d" % (d, i, ci), fontsize=8)
+                im = ax_img.imshow(img, cmap=cmap, origin="upper", aspect="equal")
+                ax_img.set_title("D%d N%d C%d" % (d, i, ci), fontsize=11)
                 ax_img.set_xticks([])
                 ax_img.set_yticks([])
+                try:
+                    ih, iw = img.shape
+                    ax_img.set_box_aspect(float(ih) / float(iw))
+                except Exception:
+                    pass
                 add_colorbar(fig, ax_img, im)
 
                 ax_sp = fig.add_subplot(gs[base_r + 1, c])
-                ax_sp.plot(x, spec)
-                ax_sp.set_title("D%d N%d H%d" % (d, i, ci), fontsize=8)
-                ax_sp.set_xlabel(axis_info.energy_label, fontsize=7)
-                ax_sp.set_ylabel("", fontsize=7)
-                ax_sp.tick_params(labelsize=6)
+                ax_sp.plot(x, spec, linewidth=1.0)
+                ax_sp.set_title("D%d N%d H%d" % (d, i, ci), fontsize=11)
+                ax_sp.set_xlabel(axis_info.energy_label, fontsize=9)
+                ax_sp.set_ylabel("")
+                ax_sp.tick_params(labelsize=8)
                 ax_sp.grid(True, alpha=0.25)
 
             if ns.residual_image is not None and ns.residual_spectrum is not None:
@@ -900,18 +983,23 @@ def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cma
                 x = x_energy if len(x_energy) == len(res_spec) else np.arange(len(res_spec), dtype=np.float32)
 
                 ax_rimg = fig.add_subplot(gs[base_r + 2, base_c])
-                im = ax_rimg.imshow(res_img, aspect="equal", cmap=cmap, origin="upper")
-                ax_rimg.set_title("D%d N%d Residual" % (d, i), fontsize=8)
+                im = ax_rimg.imshow(res_img, cmap=cmap, origin="upper", aspect="equal")
+                ax_rimg.set_title("D%d N%d Residual" % (d, i), fontsize=11)
                 ax_rimg.set_xticks([])
                 ax_rimg.set_yticks([])
+                try:
+                    ih, iw = res_img.shape
+                    ax_rimg.set_box_aspect(float(ih) / float(iw))
+                except Exception:
+                    pass
                 add_colorbar(fig, ax_rimg, im)
 
                 ax_rsp = fig.add_subplot(gs[base_r + 3, base_c])
-                ax_rsp.plot(x, res_spec)
-                ax_rsp.set_title("D%d N%d Residual Spectrum" % (d, i), fontsize=8)
-                ax_rsp.set_xlabel(axis_info.energy_label, fontsize=7)
-                ax_rsp.set_ylabel("", fontsize=7)
-                ax_rsp.tick_params(labelsize=6)
+                ax_rsp.plot(x, res_spec, linewidth=1.0)
+                ax_rsp.set_title("D%d N%d Residual Spectrum" % (d, i), fontsize=11)
+                ax_rsp.set_xlabel(axis_info.energy_label, fontsize=9)
+                ax_rsp.set_ylabel("")
+                ax_rsp.tick_params(labelsize=8)
                 ax_rsp.grid(True, alpha=0.25)
 
             for cc in range(base_c + n_comp, base_c + cols_per_node):
@@ -919,8 +1007,8 @@ def plot_rr_tree_enhanced(fig: Figure, rr: RRNMFResult, axis_info: AxisInfo, cma
                     ax_blank = fig.add_subplot(gs[base_r:base_r + rows_per_node, cc])
                     ax_blank.axis("off")
 
-    fig.suptitle("rr-NMF Tree (wrapped nodes; residual below components)", fontsize=12)
-    fig.subplots_adjust(left=0.035, right=0.975, top=0.965, bottom=0.035, hspace=0.95, wspace=0.55)
+    fig.suptitle("rr-NMF Tree", fontsize=16)
+    fig.subplots_adjust(left=0.03, right=0.985, top=0.975, bottom=0.025, hspace=0.55, wspace=0.22)
 
 
 def plot_energy_summary(fig: Figure, conv: Optional[ConventionalNMFResult], rr: Optional[RRNMFResult]):
@@ -958,7 +1046,11 @@ def plot_energy_summary(fig: Figure, conv: Optional[ConventionalNMFResult], rr: 
     fig.subplots_adjust(left=0.08, right=0.95, top=0.92, bottom=0.08, hspace=0.45, wspace=0.35)
 
 
-def collect_rr_component_entries(rr: RRNMFResult) -> List[Dict[str, Any]]:
+# =============================================================================
+# Component recombination
+# =============================================================================
+
+def collect_rr_component_entries(rr: Optional[RRNMFResult]) -> List[Dict[str, Any]]:
     """Collect all non-residual rr-NMF component W/H pairs for user-defined recombination."""
     entries: List[Dict[str, Any]] = []
     if rr is None:
@@ -985,8 +1077,8 @@ def build_combined_dataset(component_entries: List[Dict[str, Any]], name: str = 
     h, w = component_entries[0]["W_map"].shape
     L = len(component_entries[0]["H_spec"])
     Xsum = np.zeros((h * w, L), dtype=np.float32)
-
     labels = []
+
     for ent in component_entries:
         wmap = ent["W_map"]
         hspec = ent["H_spec"]
@@ -1003,7 +1095,6 @@ def build_combined_dataset(component_entries: List[Dict[str, Any]], name: str = 
     combined_spec = np.sum(Xsum, axis=0, dtype=np.float64)
     if not name:
         name = "Combined %d component(s)" % len(component_entries)
-
     return {
         "name": name,
         "members": labels,
@@ -1063,12 +1154,10 @@ class AnalysisWorker(QThread):
             if self.params.get("run_conventional", True):
                 logs.append("Running conventional NMF...")
                 conv_result = run_conventional_nmf(
-                    self.X,
-                    self.image_shape,
+                    self.X, self.image_shape,
                     n_components=int(self.params["conv_components"]),
                     max_iter=int(self.params["max_iter"]),
-                    init=self.params["init"],
-                    solver=self.params["solver"],
+                    init=self.params["init"], solver=self.params["solver"],
                     random_state=int(self.params["random_state"]),
                     chunk_size=int(self.params["chunk_size"]),
                 )
@@ -1076,16 +1165,14 @@ class AnalysisWorker(QThread):
             if self.params.get("run_rr", True):
                 logs.append("Running recursive NMF...")
                 rr_result = run_rr_nmf(
-                    self.X,
-                    self.image_shape,
+                    self.X, self.image_shape,
                     rank=int(self.params["rr_rank"]),
                     max_depth=int(self.params["rr_depth"]),
                     residual_mode=self.params["residual_mode"],
                     residual_nonnegative=self.params["residual_nonnegative"],
                     decompose_residual_branch=bool(self.params["decompose_residual_branch"]),
                     max_iter=int(self.params["max_iter"]),
-                    init=self.params["init"],
-                    solver=self.params["solver"],
+                    init=self.params["init"], solver=self.params["solver"],
                     random_state=int(self.params["random_state"]),
                     chunk_size=int(self.params["chunk_size"]),
                 )
@@ -1102,10 +1189,11 @@ class AnalysisWorker(QThread):
 class RR2NMFGui(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Residual-aware rr-NMF Demo for EELS/EDS - v4.2")
-        self.resize(1800, 1050)
+        self.setWindowTitle("Residual-aware rr-NMF Demo for EELS/EDS - v4.3")
+        self.resize(1850, 1080)
 
         self.cube: Optional[np.ndarray] = None
+        self.original_cube: Optional[np.ndarray] = None
         self.roi_cube: Optional[np.ndarray] = None
         self.X: Optional[np.ndarray] = None
         self.image_shape: Optional[Tuple[int, int]] = None
@@ -1133,6 +1221,9 @@ class RR2NMFGui(QMainWindow):
         splitter.addWidget(control)
         splitter.setStretchFactor(0, 0)
 
+        # -----------------------------
+        # Data / ROI
+        # -----------------------------
         data_group = QGroupBox("Data / ROI")
         data_form = QFormLayout(data_group)
         self.btn_load = QPushButton("Load EELS/EDS Data")
@@ -1177,6 +1268,47 @@ class RR2NMFGui(QMainWindow):
         data_form.addRow("Normalize", self.combo_norm)
         control_layout.addWidget(data_group)
 
+        # -----------------------------
+        # Background correction
+        # -----------------------------
+        bg_group = QGroupBox("Background Correction")
+        bg_form = QFormLayout(bg_group)
+        self.combo_bg_signal_type = QComboBox()
+        self.combo_bg_signal_type.addItems(["EELS: power law A*E^-r", "EDS: empirical power law continuum"])
+        self.spin_bg_y0 = QSpinBox(); self.spin_bg_y1 = QSpinBox()
+        self.spin_bg_x0 = QSpinBox(); self.spin_bg_x1 = QSpinBox()
+        for sp in [self.spin_bg_y0, self.spin_bg_y1, self.spin_bg_x0, self.spin_bg_x1]:
+            sp.setRange(0, 10**9)
+        self.spin_bg_e0 = QDoubleSpinBox(); self.spin_bg_e1 = QDoubleSpinBox()
+        for sp in [self.spin_bg_e0, self.spin_bg_e1]:
+            sp.setRange(-1e9, 1e9)
+            sp.setDecimals(6)
+        self.chk_bg_clip = QCheckBox("Clip negative after subtraction")
+        self.chk_bg_clip.setChecked(True)
+        self.btn_bg_use_current_roi = QPushButton("Use Current Spatial ROI")
+        self.btn_bg_use_current_roi.clicked.connect(self.use_current_roi_for_background)
+        self.btn_apply_bg = QPushButton("Apply Power-law Background Correction")
+        self.btn_apply_bg.clicked.connect(self.apply_background_correction)
+        self.btn_reset_bg = QPushButton("Reset to Original Loaded Data")
+        self.btn_reset_bg.clicked.connect(self.reset_background_correction)
+        self.lbl_bg_status = QLabel("Not applied")
+        bg_form.addRow("Signal/model", self.combo_bg_signal_type)
+        bg_form.addRow("Fit Y start", self.spin_bg_y0)
+        bg_form.addRow("Fit Y end", self.spin_bg_y1)
+        bg_form.addRow("Fit X start", self.spin_bg_x0)
+        bg_form.addRow("Fit X end", self.spin_bg_x1)
+        bg_form.addRow("Fit energy start", self.spin_bg_e0)
+        bg_form.addRow("Fit energy end", self.spin_bg_e1)
+        bg_form.addRow(self.chk_bg_clip)
+        bg_form.addRow(self.btn_bg_use_current_roi)
+        bg_form.addRow(self.btn_apply_bg)
+        bg_form.addRow(self.btn_reset_bg)
+        bg_form.addRow("Status", self.lbl_bg_status)
+        control_layout.addWidget(bg_group)
+
+        # -----------------------------
+        # NMF settings
+        # -----------------------------
         nmf_group = QGroupBox("NMF Settings")
         nmf_form = QFormLayout(nmf_group)
         self.chk_conv = QCheckBox("Run conventional NMF"); self.chk_conv.setChecked(True)
@@ -1299,6 +1431,9 @@ class RR2NMFGui(QMainWindow):
     def append_log(self, msg: str):
         self.log.append(str(msg))
 
+    # -------------------------------------------------------------------------
+    # Loading / ROI / background correction
+    # -------------------------------------------------------------------------
     def load_file(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Load EELS/EDS Data", "",
@@ -1310,7 +1445,8 @@ class RR2NMFGui(QMainWindow):
             self.append_log("Loading: %s" % path)
             cube, meta, axis_info = load_hyperspectral_file(path)
             cube = nonnegative(cube, "clip")
-            self.cube = cube
+            self.cube = cube.copy()
+            self.original_cube = cube.copy()
             self.metadata = meta
             self.axis_info = axis_info
             self.roi_axis_info = axis_info
@@ -1321,7 +1457,9 @@ class RR2NMFGui(QMainWindow):
             self.lbl_file.setText(os.path.basename(path))
             self.lbl_shape.setText(str(cube.shape))
             self.lbl_energy_axis.setText(axis_info.energy_label)
+            self.lbl_bg_status.setText("Not applied")
             self.set_roi_full()
+            self.set_background_roi_full()
             self.append_log("Loaded cube shape: %s" % (cube.shape,))
             self.append_log("Metadata: %s" % meta)
             if len(axis_info.energy_axis) > 0:
@@ -1357,6 +1495,101 @@ class RR2NMFGui(QMainWindow):
         self._syncing_energy_channel = False
         self.update_roi_label()
 
+    def set_background_roi_full(self):
+        if self.cube is None:
+            return
+        y, x, l = self.cube.shape
+        for sp, mx, val in [(self.spin_bg_y0, y, 0), (self.spin_bg_y1, y, y), (self.spin_bg_x0, x, 0), (self.spin_bg_x1, x, x)]:
+            sp.setRange(0, mx)
+            sp.setValue(val)
+        e_axis = self.axis_info.energy_axis
+        if len(e_axis) == l:
+            mn = float(np.nanmin(e_axis)); mx = float(np.nanmax(e_axis)); margin = abs(mx - mn) * 0.1 + 1.0
+            self.spin_bg_e0.setRange(mn - margin, mx + margin)
+            self.spin_bg_e1.setRange(mn - margin, mx + margin)
+            # Default to first 15% of channels as fitting window; user should adjust to pre-edge/background region.
+            l1 = max(3, int(round(l * 0.15)))
+            self.spin_bg_e0.setValue(float(e_axis[0]))
+            self.spin_bg_e1.setValue(float(e_axis[min(l1, l) - 1]))
+        else:
+            self.spin_bg_e0.setRange(0, l)
+            self.spin_bg_e1.setRange(0, l)
+            self.spin_bg_e0.setValue(0)
+            self.spin_bg_e1.setValue(max(3, int(round(l * 0.15))))
+
+    def use_current_roi_for_background(self):
+        if self.cube is None:
+            return
+        y, x, _ = self.cube.shape
+        self.spin_bg_y0.setValue(max(0, min(self.spin_y0.value(), y)))
+        self.spin_bg_y1.setValue(max(0, min(self.spin_y1.value(), y)))
+        self.spin_bg_x0.setValue(max(0, min(self.spin_x0.value(), x)))
+        self.spin_bg_x1.setValue(max(0, min(self.spin_x1.value(), x)))
+
+    def _background_channel_range_from_energy(self) -> Tuple[int, int]:
+        if self.cube is None:
+            raise ValueError("No cube loaded")
+        L = self.cube.shape[2]
+        e_axis = self.axis_info.energy_axis
+        if len(e_axis) == L:
+            i0 = nearest_channel_from_energy(e_axis, self.spin_bg_e0.value())
+            i1 = nearest_channel_from_energy(e_axis, self.spin_bg_e1.value())
+            l0 = max(0, min(i0, i1))
+            l1 = min(L, max(i0, i1) + 1)
+        else:
+            l0 = max(0, min(int(round(self.spin_bg_e0.value())), L - 1))
+            l1 = min(L, max(l0 + 1, int(round(self.spin_bg_e1.value()))))
+        if l1 <= l0:
+            raise ValueError("Invalid background energy/channel range")
+        return l0, l1
+
+    def apply_background_correction(self):
+        if self.cube is None:
+            QMessageBox.warning(self, "No data", "Load data first.")
+            return
+        try:
+            y, x, _ = self.cube.shape
+            y0 = max(0, min(self.spin_bg_y0.value(), y))
+            y1 = max(0, min(self.spin_bg_y1.value(), y))
+            x0 = max(0, min(self.spin_bg_x0.value(), x))
+            x1 = max(0, min(self.spin_bg_x1.value(), x))
+            if y1 <= y0 or x1 <= x0:
+                raise ValueError("Invalid background spatial ROI.")
+            l0, l1 = self._background_channel_range_from_energy()
+            fit = fit_powerlaw_exponent_from_roi(self.cube, self.axis_info, (y0, y1, x0, x1), (l0, l1))
+            corrected = apply_powerlaw_background_correction(
+                self.cube,
+                self.axis_info,
+                (l0, l1),
+                exponent_r=fit["r"],
+                clip_negative=self.chk_bg_clip.isChecked(),
+                chunk_pixels=max(512, self.spin_chunk.value()),
+            )
+            self.cube = corrected.astype(np.float32, copy=False)
+            self.conv_result = None
+            self.rr_result = None
+            self.rr_combined_sets = []
+            self.lbl_bg_status.setText("Applied: r=%.4g, A(mean)=%.4g, RMSE=%.4g, n=%d" % (fit["r"], fit["A_mean"], fit["rmse"], fit["n_points"]))
+            self.append_log("Background correction applied. r=%.6g, A_mean=%.6g, RMSE=%.6g, fit channels=%d:%d" % (fit["r"], fit["A_mean"], fit["rmse"], l0, l1))
+            self.refresh_rr_component_list()
+            self.refresh_raw_view()
+        except Exception as e:
+            QMessageBox.critical(self, "Background correction failed", str(e))
+            self.append_log(traceback.format_exc())
+
+    def reset_background_correction(self):
+        if self.original_cube is None:
+            QMessageBox.warning(self, "No original data", "Load data first.")
+            return
+        self.cube = self.original_cube.copy()
+        self.conv_result = None
+        self.rr_result = None
+        self.rr_combined_sets = []
+        self.lbl_bg_status.setText("Reset to original")
+        self.append_log("Background correction reset to original loaded data.")
+        self.refresh_rr_component_list()
+        self.refresh_raw_view()
+
     def on_channel_roi_changed(self):
         if self._syncing_energy_channel:
             return
@@ -1387,10 +1620,12 @@ class RR2NMFGui(QMainWindow):
         l0 = max(0, min(self.spin_l0.value(), L - 1))
         l1_exclusive = max(1, min(self.spin_l1.value(), L))
         l1_idx = max(0, min(l1_exclusive - 1, L - 1))
-        self.spin_e0.blockSignals(True); self.spin_e1.blockSignals(True)
+        self.spin_e0.blockSignals(True)
+        self.spin_e1.blockSignals(True)
         self.spin_e0.setValue(float(e_axis[l0]))
         self.spin_e1.setValue(float(e_axis[l1_idx]))
-        self.spin_e0.blockSignals(False); self.spin_e1.blockSignals(False)
+        self.spin_e0.blockSignals(False)
+        self.spin_e1.blockSignals(False)
 
     def sync_channel_from_energy_roi(self):
         if self.cube is None:
@@ -1403,18 +1638,24 @@ class RR2NMFGui(QMainWindow):
         idx1 = nearest_channel_from_energy(e_axis, self.spin_e1.value())
         lo = max(0, min(min(idx0, idx1), L - 1))
         hi = max(1, min(max(idx0, idx1) + 1, L))
-        self.spin_l0.blockSignals(True); self.spin_l1.blockSignals(True)
-        self.spin_l0.setValue(lo); self.spin_l1.setValue(hi)
-        self.spin_l0.blockSignals(False); self.spin_l1.blockSignals(False)
+        self.spin_l0.blockSignals(True)
+        self.spin_l1.blockSignals(True)
+        self.spin_l0.setValue(lo)
+        self.spin_l1.setValue(hi)
+        self.spin_l0.blockSignals(False)
+        self.spin_l1.blockSignals(False)
 
     def update_roi_label(self):
         if self.cube is None:
             self.lbl_roi_shape.setText("ROI: -")
             return
         y, x, l = self.cube.shape
-        y0, y1 = max(0, min(self.spin_y0.value(), y)), max(0, min(self.spin_y1.value(), y))
-        x0, x1 = max(0, min(self.spin_x0.value(), x)), max(0, min(self.spin_x1.value(), x))
-        l0, l1 = max(0, min(self.spin_l0.value(), l)), max(0, min(self.spin_l1.value(), l))
+        y0, y1 = self.spin_y0.value(), self.spin_y1.value()
+        x0, x1 = self.spin_x0.value(), self.spin_x1.value()
+        l0, l1 = self.spin_l0.value(), self.spin_l1.value()
+        y0, y1 = max(0, min(y0, y)), max(0, min(y1, y))
+        x0, x1 = max(0, min(x0, x)), max(0, min(x1, x))
+        l0, l1 = max(0, min(l0, l)), max(0, min(l1, l))
         if y1 <= y0 or x1 <= x0 or l1 <= l0:
             self.lbl_roi_shape.setText("Invalid ROI")
             return
@@ -1464,6 +1705,9 @@ class RR2NMFGui(QMainWindow):
         except Exception:
             self.canvas_raw.clear()
 
+    # -------------------------------------------------------------------------
+    # Run / plotting refresh / recombination / export
+    # -------------------------------------------------------------------------
     def collect_params(self) -> Dict[str, Any]:
         return {
             "run_conventional": self.chk_conv.isChecked(),
