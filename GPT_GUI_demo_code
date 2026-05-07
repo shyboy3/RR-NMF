@@ -66,6 +66,8 @@ class ConventionalNMFResult:
     residual_image: np.ndarray
     residual_spectrum: np.ndarray
     energy_records: pd.DataFrame
+    h_corr: np.ndarray
+    w_corr: np.ndarray
 
 
 @dataclass
