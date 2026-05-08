@@ -25,7 +25,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton, QComboBox,
     QSpinBox, QDoubleSpinBox, QCheckBox, QTabWidget, QTableWidget, QTableWidgetItem,
     QTextEdit, QSplitter, QGroupBox, QFormLayout, QScrollArea, QSizePolicy,
-    QListWidget, QListWidgetItem, QLineEdit,
+    QListWidget, QListWidgetItem, QLineEdit, QDialog,
 )
 
 import matplotlib
@@ -216,16 +216,39 @@ EDS_PRESETS = {
 }
 
 
-PERIODIC_POSITIONS = {
-    "B": (2, 13), "C": (2, 14), "N": (2, 15), "O": (2, 16), "F": (2, 17),
-    "Na": (3, 1), "Mg": (3, 2), "Al": (3, 13), "Si": (3, 14), "P": (3, 15), "S": (3, 16), "Cl": (3, 17),
-    "K": (4, 1), "Ca": (4, 2), "Ti": (4, 4), "V": (4, 5), "Cr": (4, 6), "Mn": (4, 7),
-    "Fe": (4, 8), "Co": (4, 9), "Ni": (4, 10), "Cu": (4, 11), "Zn": (4, 12),
-    "Ga": (4, 13), "Ge": (4, 14), "As": (4, 15), "Se": (4, 16),
-    "Y": (5, 3), "Zr": (5, 4), "Nb": (5, 5), "Mo": (5, 6), "In": (5, 13), "Sn": (5, 14), "Te": (5, 16),
-    "La": (6, 3), "Hf": (6, 4), "Ta": (6, 5), "W": (6, 6),
-    "Gd": (8, 8),
+FULL_PERIODIC_ELEMENTS = [
+    "H", "He",
+    "Li", "Be", "B", "C", "N", "O", "F", "Ne",
+    "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar",
+    "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge", "As", "Se", "Br", "Kr",
+    "Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "In", "Sn", "Sb", "Te", "I", "Xe",
+    "Cs", "Ba", "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu",
+    "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg", "Tl", "Pb", "Bi", "Po", "At", "Rn",
+    "Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm", "Md", "No", "Lr",
+    "Rf", "Db", "Sg", "Bh", "Hs", "Mt", "Ds", "Rg", "Cn", "Nh", "Fl", "Mc", "Lv", "Ts", "Og",
+]
+
+FULL_PERIODIC_POSITIONS = {
+    "H": (1, 1), "He": (1, 18),
+    "Li": (2, 1), "Be": (2, 2), "B": (2, 13), "C": (2, 14), "N": (2, 15), "O": (2, 16), "F": (2, 17), "Ne": (2, 18),
+    "Na": (3, 1), "Mg": (3, 2), "Al": (3, 13), "Si": (3, 14), "P": (3, 15), "S": (3, 16), "Cl": (3, 17), "Ar": (3, 18),
+    "K": (4, 1), "Ca": (4, 2), "Sc": (4, 3), "Ti": (4, 4), "V": (4, 5), "Cr": (4, 6), "Mn": (4, 7), "Fe": (4, 8), "Co": (4, 9), "Ni": (4, 10), "Cu": (4, 11), "Zn": (4, 12), "Ga": (4, 13), "Ge": (4, 14), "As": (4, 15), "Se": (4, 16), "Br": (4, 17), "Kr": (4, 18),
+    "Rb": (5, 1), "Sr": (5, 2), "Y": (5, 3), "Zr": (5, 4), "Nb": (5, 5), "Mo": (5, 6), "Tc": (5, 7), "Ru": (5, 8), "Rh": (5, 9), "Pd": (5, 10), "Ag": (5, 11), "Cd": (5, 12), "In": (5, 13), "Sn": (5, 14), "Sb": (5, 15), "Te": (5, 16), "I": (5, 17), "Xe": (5, 18),
+    "Cs": (6, 1), "Ba": (6, 2), "La": (8, 3), "Ce": (8, 4), "Pr": (8, 5), "Nd": (8, 6), "Pm": (8, 7), "Sm": (8, 8), "Eu": (8, 9), "Gd": (8, 10), "Tb": (8, 11), "Dy": (8, 12), "Ho": (8, 13), "Er": (8, 14), "Tm": (8, 15), "Yb": (8, 16), "Lu": (8, 17),
+    "Hf": (6, 4), "Ta": (6, 5), "W": (6, 6), "Re": (6, 7), "Os": (6, 8), "Ir": (6, 9), "Pt": (6, 10), "Au": (6, 11), "Hg": (6, 12), "Tl": (6, 13), "Pb": (6, 14), "Bi": (6, 15), "Po": (6, 16), "At": (6, 17), "Rn": (6, 18),
+    "Fr": (7, 1), "Ra": (7, 2), "Ac": (9, 3), "Th": (9, 4), "Pa": (9, 5), "U": (9, 6), "Np": (9, 7), "Pu": (9, 8), "Am": (9, 9), "Cm": (9, 10), "Bk": (9, 11), "Cf": (9, 12), "Es": (9, 13), "Fm": (9, 14), "Md": (9, 15), "No": (9, 16), "Lr": (9, 17),
+    "Rf": (7, 4), "Db": (7, 5), "Sg": (7, 6), "Bh": (7, 7), "Hs": (7, 8), "Mt": (7, 9), "Ds": (7, 10), "Rg": (7, 11), "Cn": (7, 12), "Nh": (7, 13), "Fl": (7, 14), "Mc": (7, 15), "Lv": (7, 16), "Ts": (7, 17), "Og": (7, 18),
 }
+
+# Backward-compatible alias used by older helper code.
+PERIODIC_POSITIONS = FULL_PERIODIC_POSITIONS
+
+EELS_ELEMENT_PRESETS: Dict[str, List[str]] = {
+    group: sorted({EELS_EDGE_DB[name]["element"] for name in edge_names if name in EELS_EDGE_DB})
+    for group, edge_names in EELS_GROUPS.items()
+}
+if "All" not in EELS_ELEMENT_PRESETS:
+    EELS_ELEMENT_PRESETS["All"] = sorted({row["element"] for row in EELS_EDGE_DB.values()})
 
 
 def fro_energy(A):
@@ -811,6 +834,118 @@ def plot_combined(fig, combined, axis, cmap="viridis"):
     fig.tight_layout()
 
 
+
+class PeriodicTableSelectorDialog(QDialog):
+    """Independent full periodic-table selector with preset preselection."""
+
+    def __init__(self, title: str, selected_elements: List[str], preset_groups: Dict[str, List[str]], available_elements: Optional[set] = None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(1050, 620)
+        self.selected = set(selected_elements or [])
+        self.preset_groups = preset_groups or {}
+        self.available_elements = set(available_elements or [])
+        self.buttons: Dict[str, QPushButton] = {}
+
+        root = QVBoxLayout(self)
+
+        top = QHBoxLayout()
+        top.addWidget(QLabel("Preset field"))
+        self.combo_preset = QComboBox()
+        self.combo_preset.addItems(list(self.preset_groups.keys()))
+        top.addWidget(self.combo_preset, 1)
+
+        self.btn_preselect = QPushButton("Preselect candidates")
+        self.btn_preselect.clicked.connect(self.preselect_candidates)
+        top.addWidget(self.btn_preselect)
+
+        self.btn_clear = QPushButton("Clear")
+        self.btn_clear.clicked.connect(self.clear_selection)
+        top.addWidget(self.btn_clear)
+
+        root.addLayout(top)
+
+        hint = QLabel("Click elements to toggle final selection. Gray buttons are elements without built-in EDS/EELS reference lines/edges in the current database, but they can still be selected.")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        grid = QGridLayout()
+        grid.setSpacing(3)
+        group_headers = ["1", "2"] + [""] * 10 + ["13", "14", "15", "16", "17", "18"]
+        for col, txt in enumerate(group_headers):
+            lab = QLabel(txt)
+            lab.setAlignment(Qt.AlignCenter)
+            lab.setStyleSheet("font-weight: bold; color: #555;")
+            grid.addWidget(lab, 0, col)
+
+        lan_label = QLabel("Lanthanides")
+        lan_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        grid.addWidget(lan_label, 8, 0, 1, 2)
+        act_label = QLabel("Actinides")
+        act_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        grid.addWidget(act_label, 9, 0, 1, 2)
+
+        for elem in FULL_PERIODIC_ELEMENTS:
+            row, col = FULL_PERIODIC_POSITIONS.get(elem, (10, 1))
+            btn = QPushButton(elem)
+            btn.setCheckable(True)
+            btn.setFixedSize(48, 34)
+            btn.clicked.connect(lambda checked=False, e=elem: self.toggle_element(e))
+            self.buttons[elem] = btn
+            grid.addWidget(btn, row, col - 1)
+
+        root.addLayout(grid)
+
+        bottom = QHBoxLayout()
+        self.lbl_selected = QLabel("")
+        bottom.addWidget(self.lbl_selected, 1)
+
+        btn_apply = QPushButton("Apply selected elements")
+        btn_apply.clicked.connect(self.accept)
+        bottom.addWidget(btn_apply)
+
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        bottom.addWidget(btn_cancel)
+        root.addLayout(bottom)
+
+        self.refresh_buttons()
+
+    def toggle_element(self, elem: str):
+        if elem in self.selected:
+            self.selected.remove(elem)
+        else:
+            self.selected.add(elem)
+        self.refresh_buttons()
+
+    def preselect_candidates(self):
+        name = self.combo_preset.currentText()
+        self.selected = set(self.preset_groups.get(name, []))
+        self.refresh_buttons()
+
+    def clear_selection(self):
+        self.selected = set()
+        self.refresh_buttons()
+
+    def refresh_buttons(self):
+        for elem, btn in self.buttons.items():
+            is_selected = elem in self.selected
+            is_available = (not self.available_elements) or (elem in self.available_elements)
+            btn.blockSignals(True)
+            btn.setChecked(is_selected)
+            btn.blockSignals(False)
+            if is_selected:
+                btn.setStyleSheet("QPushButton { background-color: #66c2a5; font-weight: bold; border: 2px solid #1b7f5a; }")
+            elif is_available:
+                btn.setStyleSheet("QPushButton { background-color: #f5f5f5; color: #111; }")
+            else:
+                btn.setStyleSheet("QPushButton { background-color: #e6e6e6; color: #777; }")
+        shown = ", ".join(sorted(self.selected))
+        self.lbl_selected.setText("Selected: " + (shown if shown else "(none)"))
+
+    def selected_elements(self) -> List[str]:
+        return sorted(self.selected)
+
 class AnalysisWorker(QThread):
     finished_ok=pyqtSignal(object,object,str); failed=pyqtSignal(str)
     def __init__(self,X,shape,params):
@@ -937,10 +1072,20 @@ class RR2NMFGui(QMainWindow):
     def _build_eds_tab(self):
         page=QWidget(); outer=QVBoxLayout(page); top=QHBoxLayout(); outer.addLayout(top)
         g1=QGroupBox("Spectrum source"); l1=QVBoxLayout(g1); self.list_eds_src=QListWidget(); l1.addWidget(self.list_eds_src); b=QPushButton("Refresh spectra"); b.clicked.connect(self.refresh_spectrum_sources); l1.addWidget(b); top.addWidget(g1,2)
-        g2=QGroupBox("Elements"); l2=QVBoxLayout(g2); row=QHBoxLayout(); self.combo_eds_preset=QComboBox(); self.combo_eds_preset.addItems(list(EDS_PRESETS)); bp=QPushButton("Add preset"); bp.clicked.connect(self.add_eds_preset); row.addWidget(self.combo_eds_preset); row.addWidget(bp); l2.addLayout(row)
-        grid=QGridLayout()
-        self._add_periodic_table_buttons(grid, EDS_ELEMENTS, self.toggle_eds_element)
-        l2.addLayout(grid); self.list_eds_elements=QListWidget(); l2.addWidget(self.list_eds_elements); bc=QPushButton("Clear"); bc.clicked.connect(self.clear_eds_elements); l2.addWidget(bc); top.addWidget(g2,3)
+
+        g2=QGroupBox("Elements"); l2=QVBoxLayout(g2)
+        row=QHBoxLayout()
+        self.combo_eds_preset=QComboBox(); self.combo_eds_preset.addItems(list(EDS_PRESETS))
+        row.addWidget(QLabel("Field"))
+        row.addWidget(self.combo_eds_preset, 1)
+        self.btn_open_eds_periodic=QPushButton("Open full periodic table...")
+        self.btn_open_eds_periodic.clicked.connect(self.open_eds_periodic_selector)
+        row.addWidget(self.btn_open_eds_periodic)
+        l2.addLayout(row)
+        self.list_eds_elements=QListWidget(); l2.addWidget(self.list_eds_elements)
+        bc=QPushButton("Clear selected elements"); bc.clicked.connect(self.clear_eds_elements); l2.addWidget(bc)
+        top.addWidget(g2,3)
+
         g3=QGroupBox("Settings"); f=QFormLayout(g3); self.combo_eds_norm=QComboBox(); self.combo_eds_norm.addItems(["none","max","area"]); self.combo_eds_line=QComboBox(); self.combo_eds_line.addItems(["Major + minor","Major only"]); self.spin_eds_tol=QDoubleSpinBox(); self.spin_eds_tol.setRange(.001,1); self.spin_eds_tol.setDecimals(4); self.spin_eds_tol.setValue(.05); self.spin_eds_prom=QDoubleSpinBox(); self.spin_eds_prom.setRange(.001,1); self.spin_eds_prom.setDecimals(4); self.spin_eds_prom.setValue(.03); self.spin_eds_dist=QSpinBox(); self.spin_eds_dist.setRange(1,200); self.spin_eds_dist.setValue(3); br=QPushButton("Detect peaks + match"); br.clicked.connect(self.run_eds_analysis)
         for lab,w in [("Normalize",self.combo_eds_norm),("Line filter",self.combo_eds_line),("Tolerance keV",self.spin_eds_tol),("Min prominence",self.spin_eds_prom),("Min distance ch",self.spin_eds_dist),(None,br)]: f.addRow(w) if lab is None else f.addRow(lab,w)
         top.addWidget(g3,2); outer.addWidget(PlotPanel(self.canvas_eds),4); self.table_eds=QTableWidget(); outer.addWidget(self.table_eds,2); return page
@@ -963,21 +1108,26 @@ class RR2NMFGui(QMainWindow):
         g2 = QGroupBox("Elements / edge groups")
         l2 = QVBoxLayout(g2)
 
-        l2.addWidget(QLabel("Elements of interest"))
-        grid = QGridLayout()
-        self._add_periodic_table_buttons(grid, EELS_ELEMENTS, self.toggle_eels_element)
-        l2.addLayout(grid)
+        row = QHBoxLayout()
+        self.combo_eels_preset = QComboBox()
+        self.combo_eels_preset.addItems(list(EELS_ELEMENT_PRESETS))
+        row.addWidget(QLabel("Field"))
+        row.addWidget(self.combo_eels_preset, 1)
+        self.btn_open_eels_periodic = QPushButton("Open full periodic table...")
+        self.btn_open_eels_periodic.clicked.connect(self.open_eels_periodic_selector)
+        row.addWidget(self.btn_open_eels_periodic)
+        l2.addLayout(row)
 
         self.list_eels_elements = QListWidget()
         l2.addWidget(self.list_eels_elements)
 
         eels_btn_row = QHBoxLayout()
-        btn_clear_elements = QPushButton("Clear elements")
+        btn_clear_elements = QPushButton("Clear selected elements")
         btn_clear_elements.clicked.connect(self.clear_eels_elements)
         eels_btn_row.addWidget(btn_clear_elements)
         l2.addLayout(eels_btn_row)
 
-        l2.addWidget(QLabel("Edge/material groups"))
+        l2.addWidget(QLabel("Additional edge/material group filter"))
         self.list_eels_groups = QListWidget()
         self.list_eels_groups.setSelectionMode(QListWidget.MultiSelection)
         for g in EELS_GROUPS:
@@ -1020,6 +1170,7 @@ class RR2NMFGui(QMainWindow):
         return page
 
 
+    
     def append_log(self,msg): self.log.append(str(msg))
 
     def load_file(self):
@@ -1196,9 +1347,37 @@ class RR2NMFGui(QMainWindow):
             if self.sources:
                 self.list_eds_src.setCurrentRow(0); self.list_eels_src.setCurrentRow(0)
 
+
+    def open_eds_periodic_selector(self):
+        dlg = PeriodicTableSelectorDialog(
+            "EDS element selector",
+            self.eds_elements,
+            EDS_PRESETS,
+            available_elements=set(EDS_XRAY_LINE_DB.keys()),
+            parent=self,
+        )
+        if hasattr(self, "combo_eds_preset"):
+            dlg.combo_preset.setCurrentText(self.combo_eds_preset.currentText())
+        if dlg.exec_() == QDialog.Accepted:
+            self.eds_elements = dlg.selected_elements()
+            self.refresh_eds_elements()
+
+    def open_eels_periodic_selector(self):
+        dlg = PeriodicTableSelectorDialog(
+            "EELS element selector",
+            self.eels_elements,
+            EELS_ELEMENT_PRESETS,
+            available_elements=set(EELS_ELEMENTS),
+            parent=self,
+        )
+        if hasattr(self, "combo_eels_preset"):
+            dlg.combo_preset.setCurrentText(self.combo_eels_preset.currentText())
+        if dlg.exec_() == QDialog.Accepted:
+            self.eels_elements = dlg.selected_elements()
+            self.refresh_eels_elements()
+
     def add_eds_preset(self):
-        for e in EDS_PRESETS[self.combo_eds_preset.currentText()]:
-            if e not in self.eds_elements: self.eds_elements.append(e)
+        self.eds_elements = list(EDS_PRESETS.get(self.combo_eds_preset.currentText(), []))
         self.refresh_eds_elements()
 
     def toggle_eds_element(self,e):
