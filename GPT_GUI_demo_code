@@ -501,6 +501,77 @@ def detect_simple_peaks(x, y, min_prom_rel=0.03, min_distance_channels=3):
     return out
 
 
+
+
+def weighted_raw_spectrum_by_map(X_raw: np.ndarray, w_map: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    """Extract an actual-data spectrum from X_raw using a component W-map as spatial weights."""
+    X = np.asarray(X_raw, dtype=np.float64)
+    w = np.asarray(w_map, dtype=np.float64).reshape(-1)
+    if X.ndim != 2:
+        X = X.reshape(-1, X.shape[-1])
+    w = np.nan_to_num(w, nan=0.0, posinf=0.0, neginf=0.0)
+    w = np.clip(w, 0, None)
+    denom = float(np.sum(w))
+    if denom <= eps:
+        return np.nanmean(X, axis=0)
+    return (w.reshape(1, -1) @ X).reshape(-1) / denom
+
+
+def _difference_penalty_matrix(n: int, order: int = 2) -> np.ndarray:
+    """Return D.T @ D for 1st- or 2nd-order finite differences over spectrum channels."""
+    if n <= 2:
+        return np.eye(n, dtype=np.float64)
+    if order == 1:
+        D = np.zeros((n - 1, n), dtype=np.float64)
+        for i in range(n - 1):
+            D[i, i] = -1.0
+            D[i, i + 1] = 1.0
+    else:
+        D = np.zeros((n - 2, n), dtype=np.float64)
+        for i in range(n - 2):
+            D[i, i] = 1.0
+            D[i, i + 1] = -2.0
+            D[i, i + 2] = 1.0
+    return D.T @ D
+
+
+def smooth_refit_h_with_fixed_w(
+    X_raw: np.ndarray,
+    W_maps: List[np.ndarray],
+    lam: float = 1e-2,
+    order: int = 2,
+    eps: float = 1e-8,
+) -> np.ndarray:
+    """
+    Refit H with W fixed:
+        min_H ||X - W H||_F^2 + lam ||D H||_F^2, then clip H >= 0.
+    This is an interpretation-only spectrum; it does not change the rr-NMF tree.
+    """
+    X = np.asarray(X_raw, dtype=np.float64)
+    if X.ndim != 2:
+        X = X.reshape(-1, X.shape[-1])
+    W = np.stack([np.asarray(m, dtype=np.float64).reshape(-1) for m in W_maps], axis=1)
+    W = np.nan_to_num(W, nan=0.0, posinf=0.0, neginf=0.0)
+    W = np.clip(W, 0, None)
+    k = W.shape[1]
+    L = X.shape[1]
+    A = W.T @ W + eps * np.eye(k, dtype=np.float64)
+    C = W.T @ X
+    lam = float(max(0.0, lam))
+    if lam <= 0:
+        H = np.linalg.solve(A, C)
+        return np.clip(H, 0, None).astype(np.float32)
+
+    B = lam * _difference_penalty_matrix(L, order=order)
+    try:
+        from scipy.linalg import solve_sylvester
+        H = solve_sylvester(A, B, C)
+    except Exception:
+        # Fallback: no spectral coupling, but still W-fixed NNLS-like least squares.
+        H = np.linalg.solve(A, C)
+    return np.clip(H, 0, None).astype(np.float32)
+
+
 def match_eds_lines_to_peaks(peaks, selected_elements, tolerance_keV=0.05, line_filter="Major + minor"):
     hits = []
     include_minor = line_filter != "Major only"
@@ -778,11 +849,22 @@ def plot_energy(fig, conv, rr):
     fig.tight_layout()
 
 
-def plot_interpretation(fig, energy, spec, markers, title, xlabel, norm="none"):
+def plot_interpretation(fig, energy, spec, markers, title, xlabel, norm="none", source_image=None, cmap="viridis"):
     fig.clear()
-    # 1.5x larger than the previous 12.5 x 5 plot.
-    fig.set_size_inches(18.75, 7.5, forward=True)
-    ax = fig.add_subplot(111)
+    # Left: source image/map; right: selected spectrum and matched markers.
+    fig.set_size_inches(20.0, 7.8, forward=True)
+    if source_image is not None:
+        gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 2.6])
+        ax_img = fig.add_subplot(gs[0, 0])
+        ax = fig.add_subplot(gs[0, 1])
+        im = ax_img.imshow(source_image, cmap=cmap, origin="upper", aspect="equal")
+        ax_img.set_title("Source image / W-map", fontsize=18)
+        ax_img.set_xticks([])
+        ax_img.set_yticks([])
+        add_colorbar(fig, ax_img, im)
+    else:
+        ax = fig.add_subplot(111)
+
     y = normalize_1d(spec, norm)
     ax.plot(energy, y, label=title, lw=2.0)
 
@@ -801,8 +883,8 @@ def plot_interpretation(fig, energy, spec, markers, title, xlabel, norm="none"):
     ax.set_ylabel("", fontsize=18)
     ax.tick_params(labelsize=14)
     ax.grid(True, alpha=0.25)
-    ax.legend(fontsize=16)
-    fig.subplots_adjust(left=0.07, right=0.985, top=0.90, bottom=0.14)
+    ax.legend(fontsize=15)
+    fig.subplots_adjust(left=0.04, right=0.985, top=0.90, bottom=0.14, wspace=0.22)
 
 
 def collect_rr_component_entries(rr):
@@ -966,7 +1048,7 @@ class AnalysisWorker(QThread):
 
 class RR2NMFGui(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v4.5 full from v4.4"); self.resize(1850,1080)
+        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v4.6 full from v4.4"); self.resize(1850,1080)
         self.cube=None; self.original_cube=None; self.roi_cube=None; self.X=None; self.image_shape=None
         self.axis_info=make_default_axis_info((1,1,1)); self.roi_axis_info=make_default_axis_info((1,1,1))
         self.conv_result=None; self.rr_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]
@@ -1086,8 +1168,8 @@ class RR2NMFGui(QMainWindow):
         bc=QPushButton("Clear selected elements"); bc.clicked.connect(self.clear_eds_elements); l2.addWidget(bc)
         top.addWidget(g2,3)
 
-        g3=QGroupBox("Settings"); f=QFormLayout(g3); self.combo_eds_norm=QComboBox(); self.combo_eds_norm.addItems(["none","max","area"]); self.combo_eds_line=QComboBox(); self.combo_eds_line.addItems(["Major + minor","Major only"]); self.spin_eds_tol=QDoubleSpinBox(); self.spin_eds_tol.setRange(.001,1); self.spin_eds_tol.setDecimals(4); self.spin_eds_tol.setValue(.05); self.spin_eds_prom=QDoubleSpinBox(); self.spin_eds_prom.setRange(.001,1); self.spin_eds_prom.setDecimals(4); self.spin_eds_prom.setValue(.03); self.spin_eds_dist=QSpinBox(); self.spin_eds_dist.setRange(1,200); self.spin_eds_dist.setValue(3); br=QPushButton("Detect peaks + match"); br.clicked.connect(self.run_eds_analysis)
-        for lab,w in [("Normalize",self.combo_eds_norm),("Line filter",self.combo_eds_line),("Tolerance keV",self.spin_eds_tol),("Min prominence",self.spin_eds_prom),("Min distance ch",self.spin_eds_dist),(None,br)]: f.addRow(w) if lab is None else f.addRow(lab,w)
+        g3=QGroupBox("Settings"); f=QFormLayout(g3); self.combo_eds_norm=QComboBox(); self.combo_eds_norm.addItems(["none","max","area"]); self.combo_eds_line=QComboBox(); self.combo_eds_line.addItems(["Major + minor","Major only"]); self.spin_eds_tol=QDoubleSpinBox(); self.spin_eds_tol.setRange(.001,1); self.spin_eds_tol.setDecimals(4); self.spin_eds_tol.setValue(.05); self.spin_eds_prom=QDoubleSpinBox(); self.spin_eds_prom.setRange(.001,1); self.spin_eds_prom.setDecimals(4); self.spin_eds_prom.setValue(.03); self.spin_eds_dist=QSpinBox(); self.spin_eds_dist.setRange(1,200); self.spin_eds_dist.setValue(3); self.spin_eds_smooth=QDoubleSpinBox(); self.spin_eds_smooth.setRange(0.0,1000.0); self.spin_eds_smooth.setDecimals(6); self.spin_eds_smooth.setValue(0.01); self.spin_eds_smooth.valueChanged.connect(lambda _: self.refresh_spectrum_sources()); br=QPushButton("Detect peaks + match"); br.clicked.connect(self.run_eds_analysis)
+        for lab,w in [("Normalize",self.combo_eds_norm),("Line filter",self.combo_eds_line),("Tolerance keV",self.spin_eds_tol),("Min prominence",self.spin_eds_prom),("Min distance ch",self.spin_eds_dist),("Smooth-refit λ",self.spin_eds_smooth),(None,br)]: f.addRow(w) if lab is None else f.addRow(lab,w)
         top.addWidget(g3,2); outer.addWidget(PlotPanel(self.canvas_eds),4); self.table_eds=QTableWidget(); outer.addWidget(self.table_eds,2); return page
 
     def _build_eels_tab(self):
@@ -1159,6 +1241,7 @@ class RR2NMFGui(QMainWindow):
             ("Tolerance eV", self.spin_eels_tol),
             ("Min prominence", self.spin_eels_prom),
             ("Min distance ch", self.spin_eels_dist),
+            ("Smooth-refit λ", self.spin_eels_smooth),
             (None, br),
         ]:
             f.addRow(w) if lab is None else f.addRow(lab, w)
@@ -1254,7 +1337,7 @@ class RR2NMFGui(QMainWindow):
             y,x,_=self.cube.shape; y0,y1=max(0,min(self.bg_y0.value(),y)),max(0,min(self.bg_y1.value(),y)); x0,x1=max(0,min(self.bg_x0.value(),x)),max(0,min(self.bg_x1.value(),x)); l0,l1=self.background_channel_range()
             fit=fit_powerlaw_exponent_from_roi(self.cube,self.axis_info,(y0,y1,x0,x1),(l0,l1))
             self.cube=apply_powerlaw_background_correction(self.cube,self.axis_info,(l0,l1),fit["r"],self.chk_bg_clip.isChecked(),max(512,self.spin_chunk.value()))
-            self.conv_result=None; self.rr_result=None; self.lbl_bg.setText(f'Applied r={fit["r"]:.4g}, RMSE={fit["rmse"]:.4g}'); self.refresh_views(); self.refresh_spectrum_sources()
+            self.conv_result=None; self.rr_result=None; self.lbl_bg.setText(f'Applied: global r={fit["r"]:.4g}, pixelwise A, RMSE={fit["rmse"]:.4g}'); self.refresh_views(); self.refresh_spectrum_sources()
         except Exception as e: QMessageBox.critical(self,"Background failed",str(e)); self.append_log(traceback.format_exc())
 
     def reset_background_correction(self):
@@ -1323,20 +1406,104 @@ class RR2NMFGui(QMainWindow):
         c=self.rr_combined_sets[row]; np.savez_compressed(path,matrix=c["matrix"],image=c["image"],spectrum=c["spectrum"],members=np.array(c["members"],dtype=object),name=np.array(c["name"],dtype=object),energy_axis=self.roi_axis_info.energy_axis)
 
     def collect_spectrum_sources(self):
-        sources=[]
+        sources = []
         if self.cube is not None:
             try:
-                roi,_,_,axis=self.get_roi_cube_and_X(); sources.append({"label":"Raw ROI Sum","spectrum":np.sum(roi,axis=(0,1)),"axis":axis})
-            except Exception: pass
+                roi, Xraw, shape, axis = self.get_roi_cube_and_X()
+                raw_img = np.sum(roi, axis=2)
+                raw_spec = np.sum(roi, axis=(0, 1))
+                sources.append({"label": "Raw ROI Sum", "spectrum": raw_spec, "axis": axis, "image": raw_img})
+            except Exception:
+                Xraw = None
+        else:
+            Xraw = None
+
+        if getattr(self, "X", None) is not None:
+            X_for_weight = self.X
+        else:
+            try:
+                _, X_for_weight, _, _ = self.get_roi_cube_and_X()
+            except Exception:
+                X_for_weight = None
+
+        lam = 0.01
+        if hasattr(self, "spin_eds_smooth"):
+            lam = float(self.spin_eds_smooth.value())
+
         if self.rr_result is not None:
-            for d,nodes in enumerate(self.rr_result.node_summaries_by_depth):
-                for n,ns in enumerate(nodes):
-                    for c,spec in enumerate(ns.component_spectra): sources.append({"label":f"rr D{d} N{n} H{c}","spectrum":np.asarray(spec),"axis":self.roi_axis_info})
+            for d, nodes in enumerate(self.rr_result.node_summaries_by_depth):
+                for n, ns in enumerate(nodes):
+                    Wmaps = list(ns.component_maps)
+                    H_smooth = None
+                    if X_for_weight is not None and len(Wmaps) > 0:
+                        try:
+                            H_smooth = smooth_refit_h_with_fixed_w(X_for_weight, Wmaps, lam=lam, order=2)
+                        except Exception:
+                            H_smooth = None
+
+                    for c, spec in enumerate(ns.component_spectra):
+                        wmap = ns.component_maps[c]
+                        sources.append({
+                            "label": f"rr D{d} N{n} H{c} (NMF basis)",
+                            "spectrum": np.asarray(spec),
+                            "axis": self.roi_axis_info,
+                            "image": wmap,
+                        })
+                        if X_for_weight is not None:
+                            sources.append({
+                                "label": f"rr D{d} N{n} weighted raw by W{c}",
+                                "spectrum": weighted_raw_spectrum_by_map(X_for_weight, wmap),
+                                "axis": self.roi_axis_info,
+                                "image": wmap,
+                            })
+                        if H_smooth is not None and c < H_smooth.shape[0]:
+                            sources.append({
+                                "label": f"rr D{d} N{n} H{c} smooth-refit",
+                                "spectrum": np.asarray(H_smooth[c]),
+                                "axis": self.roi_axis_info,
+                                "image": wmap,
+                            })
+
         if self.conv_result is not None:
-            for c,spec in enumerate(self.conv_result.H_spectra): sources.append({"label":f"Conv H{c}","spectrum":np.asarray(spec),"axis":self.roi_axis_info})
+            Wmaps = list(self.conv_result.W_images)
+            H_smooth = None
+            if X_for_weight is not None and len(Wmaps) > 0:
+                try:
+                    H_smooth = smooth_refit_h_with_fixed_w(X_for_weight, Wmaps, lam=lam, order=2)
+                except Exception:
+                    H_smooth = None
+            for c, spec in enumerate(self.conv_result.H_spectra):
+                wmap = self.conv_result.W_images[c]
+                sources.append({
+                    "label": f"Conv H{c} (NMF basis)",
+                    "spectrum": np.asarray(spec),
+                    "axis": self.roi_axis_info,
+                    "image": wmap,
+                })
+                if X_for_weight is not None:
+                    sources.append({
+                        "label": f"Conv weighted raw by W{c}",
+                        "spectrum": weighted_raw_spectrum_by_map(X_for_weight, wmap),
+                        "axis": self.roi_axis_info,
+                        "image": wmap,
+                    })
+                if H_smooth is not None and c < H_smooth.shape[0]:
+                    sources.append({
+                        "label": f"Conv H{c} smooth-refit",
+                        "spectrum": np.asarray(H_smooth[c]),
+                        "axis": self.roi_axis_info,
+                        "image": wmap,
+                    })
+
         for idx, combined in enumerate(getattr(self, "rr_combined_sets", [])):
-            sources.append({"label": f"Combined {idx + 1}: {combined.get('name', 'Combined')}", "spectrum": np.asarray(combined["spectrum"]), "axis": self.roi_axis_info})
+            sources.append({
+                "label": f"Combined {idx + 1}: {combined.get('name', 'Combined')}",
+                "spectrum": np.asarray(combined["spectrum"]),
+                "axis": self.roi_axis_info,
+                "image": combined.get("image", None),
+            })
         return sources
+
 
     def refresh_spectrum_sources(self):
         self.sources=self.collect_spectrum_sources()
@@ -1419,7 +1586,7 @@ class RR2NMFGui(QMainWindow):
         peaks=detect_simple_peaks(x,spec,self.spin_eds_prom.value(),self.spin_eds_dist.value())
         hits=match_eds_lines_to_peaks(peaks,self.eds_elements,self.spin_eds_tol.value(),self.combo_eds_line.currentText())
         markers=[(row["line_keV"],f'{row["element"]} {row["line"]}') for row in hits] or [(r["energy_keV"],f'{el} {r["line"]}') for el in self.eds_elements for r in EDS_XRAY_LINE_DB.get(el,[])]
-        plot_interpretation(self.canvas_eds.fig,x,spec,markers,"EDS Analysis: "+src["label"],"Energy (keV)",self.combo_eds_norm.currentText()); self.canvas_eds.set_base(); self.canvas_eds.draw()
+        plot_interpretation(self.canvas_eds.fig,x,spec,markers,"EDS Analysis: "+src["label"],"Energy (keV)",self.combo_eds_norm.currentText(),source_image=src.get("image", None),cmap=self.combo_cmap.currentText()); self.canvas_eds.set_base(); self.canvas_eds.draw()
         self.eds_hits=hits; self.dataframe_to_table(pd.DataFrame(hits),self.table_eds)
 
     def run_eels_analysis(self):
@@ -1451,7 +1618,9 @@ class RR2NMFGui(QMainWindow):
         plot_interpretation(
             self.canvas_eels.fig, x, spec, markers,
             "EELS Interpretation: " + src["label"], "Energy (eV)",
-            self.combo_eels_norm.currentText()
+            self.combo_eels_norm.currentText(),
+            source_image=src.get("image", None),
+            cmap=self.combo_cmap.currentText()
         )
         self.canvas_eels.set_base()
         self.canvas_eels.draw()
