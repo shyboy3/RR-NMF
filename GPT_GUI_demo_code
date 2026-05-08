@@ -1234,6 +1234,11 @@ class RR2NMFGui(QMainWindow):
         self.spin_eels_dist = QSpinBox()
         self.spin_eels_dist.setRange(1, 500)
         self.spin_eels_dist.setValue(3)
+        self.spin_eels_smooth = QDoubleSpinBox()
+        self.spin_eels_smooth.setRange(0.0, 1000.0)
+        self.spin_eels_smooth.setDecimals(6)
+        self.spin_eels_smooth.setValue(0.01)
+        self.spin_eels_smooth.valueChanged.connect(lambda _: self.refresh_spectrum_sources())
         br = QPushButton("Detect features + match edges")
         br.clicked.connect(self.run_eels_analysis)
         for lab, w in [
@@ -1429,6 +1434,8 @@ class RR2NMFGui(QMainWindow):
         lam = 0.01
         if hasattr(self, "spin_eds_smooth"):
             lam = float(self.spin_eds_smooth.value())
+        elif hasattr(self, "spin_eels_smooth"):
+            lam = float(self.spin_eels_smooth.value())
 
         if self.rr_result is not None:
             for d, nodes in enumerate(self.rr_result.node_summaries_by_depth):
