@@ -1,240 +1,3 @@
-"""
-rr2_nmf_gui_ver4_5_full_eels_eds.py
-
-Integrated residual-aware recursive NMF GUI for EELS/EDS spectral imaging.
-
-v4.5 additions
---------------
-- EELS Interpretation tab added.
-- EDS Analysis tab retained.
-- Spectrum sources shared by EELS/EDS tabs:
-  Raw ROI Sum, rr-NMF component spectra, conventional NMF component spectra.
-- Built-in EELS edge DB and EDS X-ray line DB for semiconductor, high-k, and 2D/TMD workflows.
-- Default residual mode: redistribute_equal.
-- Default NMF init: random.
-
-Install
--------
-pip install numpy pandas scikit-learn matplotlib PyQt5
-
-Optional file loaders
----------------------
-pip install hyperspy exspy rosettasciio
-"""
-
-import os
-import sys
-import traceback
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
-
-import numpy as np
-import pandas as pd
-from sklearn.decomposition import NMF
-
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QFileDialog, QMessageBox,
-    QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
-    QSpinBox, QDoubleSpinBox, QCheckBox, QTabWidget, QTableWidget,
-    QTableWidgetItem, QTextEdit, QSplitter, QGroupBox, QFormLayout,
-    QScrollArea, QSizePolicy, QListWidget, QListWidgetItem, QLineEdit,
-    QGridLayout,
-)
-
-import matplotlib
-matplotlib.use("Qt5Agg")
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-
-if sys.version_info < (3, 8):
-    raise RuntimeError("This GUI requires Python >= 3.8")
-
-
-# =============================================================================
-# Data containers
-# =============================================================================
-
-@dataclass
-class AxisInfo:
-    energy_axis: np.ndarray
-    energy_unit: str = "channel"
-    energy_label: str = "Channel"
-    x_scale: float = 1.0
-    y_scale: float = 1.0
-    spatial_unit: str = "px"
-    x_label: str = "X"
-    y_label: str = "Y"
-
-
-@dataclass
-class RRNodeSummary:
-    depth: int
-    node_id: int
-    parent_id: int
-    path: str
-    component_maps: List[np.ndarray] = field(default_factory=list)
-    component_spectra: List[np.ndarray] = field(default_factory=list)
-    component_errors: List[float] = field(default_factory=list)
-    component_energies: List[float] = field(default_factory=list)
-    residual_image: Optional[np.ndarray] = None
-    residual_spectrum: Optional[np.ndarray] = None
-    residual_energy: float = np.nan
-    recon_ratio: float = np.nan
-
-
-@dataclass
-class ConventionalNMFResult:
-    W: np.ndarray
-    H: np.ndarray
-    R_energy: float
-    W_images: List[np.ndarray]
-    H_spectra: List[np.ndarray]
-    residual_image: np.ndarray
-    residual_spectrum: np.ndarray
-    energy_records: pd.DataFrame
-    recon_ratio: float
-    h_corr: np.ndarray
-    w_corr: np.ndarray
-
-
-@dataclass
-class RRNMFResult:
-    W_images_by_depth: List[List[np.ndarray]]
-    H_spectra_by_depth: List[List[np.ndarray]]
-    errors_by_depth: List[List[float]]
-    energy_records: pd.DataFrame
-    node_records: pd.DataFrame
-    node_summaries_by_depth: List[List[RRNodeSummary]]
-    rank: int
-
-
-# =============================================================================
-# Built-in databases
-# =============================================================================
-
-EELS_EDGE_DB: Dict[str, Dict[str, Any]] = {
-    "B-K": {"element": "B", "edge": "K", "energy_eV": 188.0, "groups": ["2D", "hBN", "semiconductor"]},
-    "C-K": {"element": "C", "edge": "K", "energy_eV": 284.0, "groups": ["2D", "graphene", "carbon", "contamination", "MXene"]},
-    "N-K": {"element": "N", "edge": "K", "energy_eV": 401.0, "groups": ["2D", "hBN", "nitride", "semiconductor", "high-k"]},
-    "O-K": {"element": "O", "edge": "K", "energy_eV": 532.0, "groups": ["oxide", "high-k", "semiconductor"]},
-    "F-K": {"element": "F", "edge": "K", "energy_eV": 685.0, "groups": ["MXene", "fluoride"]},
-    "Al-L2,3": {"element": "Al", "edge": "L2,3", "energy_eV": 73.0, "groups": ["semiconductor", "high-k", "Al2O3"]},
-    "Al-K": {"element": "Al", "edge": "K", "energy_eV": 1560.0, "groups": ["semiconductor", "high-k", "Al2O3"]},
-    "Si-L2,3": {"element": "Si", "edge": "L2,3", "energy_eV": 99.0, "groups": ["semiconductor", "high-k", "Si", "SiO2", "silicate"]},
-    "Si-K": {"element": "Si", "edge": "K", "energy_eV": 1839.0, "groups": ["semiconductor", "Si", "SiO2"]},
-    "P-L2,3": {"element": "P", "edge": "L2,3", "energy_eV": 132.0, "groups": ["semiconductor", "dopant", "2D"]},
-    "P-K": {"element": "P", "edge": "K", "energy_eV": 2146.0, "groups": ["semiconductor", "dopant", "2D"]},
-    "S-L2,3": {"element": "S", "edge": "L2,3", "energy_eV": 165.0, "groups": ["2D", "TMD", "MoS2", "WS2"]},
-    "S-K": {"element": "S", "edge": "K", "energy_eV": 2472.0, "groups": ["2D", "TMD", "MoS2", "WS2"]},
-    "Ti-L3": {"element": "Ti", "edge": "L3", "energy_eV": 456.0, "groups": ["high-k", "TiO2", "MXene", "2D"]},
-    "Ti-L2": {"element": "Ti", "edge": "L2", "energy_eV": 462.0, "groups": ["high-k", "TiO2", "MXene", "2D"]},
-    "V-L3": {"element": "V", "edge": "L3", "energy_eV": 513.0, "groups": ["2D", "MXene"]},
-    "V-L2": {"element": "V", "edge": "L2", "energy_eV": 521.0, "groups": ["2D", "MXene"]},
-    "Zr-M4,5": {"element": "Zr", "edge": "M4,5", "energy_eV": 180.0, "groups": ["high-k", "ZrO2"]},
-    "Zr-L3": {"element": "Zr", "edge": "L3", "energy_eV": 2222.0, "groups": ["high-k", "ZrO2"]},
-    "La-N4,5": {"element": "La", "edge": "N4,5", "energy_eV": 99.0, "groups": ["high-k", "La2O3"]},
-    "La-M5": {"element": "La", "edge": "M5", "energy_eV": 832.0, "groups": ["high-k", "La2O3"]},
-    "La-M4": {"element": "La", "edge": "M4", "energy_eV": 849.0, "groups": ["high-k", "La2O3"]},
-    "Gd-N4,5": {"element": "Gd", "edge": "N4,5", "energy_eV": 140.0, "groups": ["high-k", "Gd2O3"]},
-    "Gd-M5": {"element": "Gd", "edge": "M5", "energy_eV": 1185.0, "groups": ["high-k", "Gd2O3"]},
-    "Gd-M4": {"element": "Gd", "edge": "M4", "energy_eV": 1217.0, "groups": ["high-k", "Gd2O3"]},
-    "Hf-N5": {"element": "Hf", "edge": "N5", "energy_eV": 214.0, "groups": ["high-k", "HfO2", "gate_stack"]},
-    "Hf-N4": {"element": "Hf", "edge": "N4", "energy_eV": 224.0, "groups": ["high-k", "HfO2", "gate_stack"]},
-    "Hf-M5": {"element": "Hf", "edge": "M5", "energy_eV": 1662.0, "groups": ["high-k", "HfO2", "gate_stack"]},
-    "Hf-M4": {"element": "Hf", "edge": "M4", "energy_eV": 1716.0, "groups": ["high-k", "HfO2", "gate_stack"]},
-    "Ta-N5": {"element": "Ta", "edge": "N5", "energy_eV": 229.0, "groups": ["high-k", "Ta2O5"]},
-    "Ta-N4": {"element": "Ta", "edge": "N4", "energy_eV": 241.0, "groups": ["high-k", "Ta2O5"]},
-    "Mo-M4,5": {"element": "Mo", "edge": "M4,5", "energy_eV": 227.0, "groups": ["2D", "TMD", "MoS2", "MoSe2"]},
-    "Mo-L3": {"element": "Mo", "edge": "L3", "energy_eV": 2520.0, "groups": ["2D", "TMD"]},
-    "W-N5": {"element": "W", "edge": "N5", "energy_eV": 245.0, "groups": ["2D", "TMD", "WS2", "WSe2"]},
-    "W-N4": {"element": "W", "edge": "N4", "energy_eV": 255.0, "groups": ["2D", "TMD", "WS2", "WSe2"]},
-    "W-M5": {"element": "W", "edge": "M5", "energy_eV": 1809.0, "groups": ["2D", "TMD"]},
-    "W-M4": {"element": "W", "edge": "M4", "energy_eV": 1872.0, "groups": ["2D", "TMD"]},
-    "Ga-M4,5": {"element": "Ga", "edge": "M4,5", "energy_eV": 103.0, "groups": ["semiconductor", "III-V"]},
-    "Ga-L3": {"element": "Ga", "edge": "L3", "energy_eV": 1115.0, "groups": ["semiconductor", "III-V"]},
-    "Ge-M4,5": {"element": "Ge", "edge": "M4,5", "energy_eV": 29.0, "groups": ["semiconductor", "Ge", "SiGe"]},
-    "Ge-L3": {"element": "Ge", "edge": "L3", "energy_eV": 1217.0, "groups": ["semiconductor", "Ge", "SiGe"]},
-    "As-M4,5": {"element": "As", "edge": "M4,5", "energy_eV": 41.0, "groups": ["semiconductor", "III-V"]},
-    "As-L3": {"element": "As", "edge": "L3", "energy_eV": 1323.0, "groups": ["semiconductor", "III-V"]},
-    "In-M4,5": {"element": "In", "edge": "M4,5", "energy_eV": 443.0, "groups": ["semiconductor", "III-V", "ITO"]},
-    "Sn-M4,5": {"element": "Sn", "edge": "M4,5", "energy_eV": 485.0, "groups": ["semiconductor", "oxide", "ITO"]},
-    "Se-M4,5": {"element": "Se", "edge": "M4,5", "energy_eV": 57.0, "groups": ["2D", "TMD"]},
-    "Se-L3": {"element": "Se", "edge": "L3", "energy_eV": 1436.0, "groups": ["2D", "TMD"]},
-    "Te-M4,5": {"element": "Te", "edge": "M4,5", "energy_eV": 572.0, "groups": ["2D", "TMD"]},
-    "Te-L3": {"element": "Te", "edge": "L3", "energy_eV": 4341.0, "groups": ["2D", "TMD"]},
-    "Nb-M4,5": {"element": "Nb", "edge": "M4,5", "energy_eV": 205.0, "groups": ["2D", "MXene"]},
-}
-
-EELS_EDGE_GROUPS: Dict[str, List[str]] = {
-    "All": list(EELS_EDGE_DB.keys()),
-    "Semiconductor": [name for name, row in EELS_EDGE_DB.items() if "semiconductor" in row.get("groups", [])],
-    "High-k": [name for name, row in EELS_EDGE_DB.items() if "high-k" in row.get("groups", [])],
-    "2D": [name for name, row in EELS_EDGE_DB.items() if "2D" in row.get("groups", [])],
-    "TMD": [name for name, row in EELS_EDGE_DB.items() if "TMD" in row.get("groups", [])],
-    "MXene": [name for name, row in EELS_EDGE_DB.items() if "MXene" in row.get("groups", [])],
-}
-
-EDS_XRAY_LINE_DB: Dict[str, List[Dict[str, Any]]] = {
-    "B": [{"line": "Kα", "energy_keV": 0.183, "type": "major"}],
-    "C": [{"line": "Kα", "energy_keV": 0.277, "type": "major"}],
-    "N": [{"line": "Kα", "energy_keV": 0.392, "type": "major"}],
-    "O": [{"line": "Kα", "energy_keV": 0.525, "type": "major"}],
-    "F": [{"line": "Kα", "energy_keV": 0.677, "type": "major"}],
-    "Na": [{"line": "Kα", "energy_keV": 1.041, "type": "major"}, {"line": "Kβ", "energy_keV": 1.071, "type": "minor"}],
-    "Mg": [{"line": "Kα", "energy_keV": 1.254, "type": "major"}, {"line": "Kβ", "energy_keV": 1.302, "type": "minor"}],
-    "Al": [{"line": "Kα", "energy_keV": 1.487, "type": "major"}, {"line": "Kβ", "energy_keV": 1.557, "type": "minor"}],
-    "Si": [{"line": "Kα", "energy_keV": 1.740, "type": "major"}, {"line": "Kβ", "energy_keV": 1.836, "type": "minor"}],
-    "P": [{"line": "Kα", "energy_keV": 2.014, "type": "major"}, {"line": "Kβ", "energy_keV": 2.139, "type": "minor"}],
-    "S": [{"line": "Kα", "energy_keV": 2.307, "type": "major"}, {"line": "Kβ", "energy_keV": 2.464, "type": "minor"}],
-    "Cl": [{"line": "Kα", "energy_keV": 2.622, "type": "major"}, {"line": "Kβ", "energy_keV": 2.815, "type": "minor"}],
-    "K": [{"line": "Kα", "energy_keV": 3.312, "type": "major"}, {"line": "Kβ", "energy_keV": 3.590, "type": "minor"}],
-    "Ca": [{"line": "Kα", "energy_keV": 3.690, "type": "major"}, {"line": "Kβ", "energy_keV": 4.012, "type": "minor"}],
-    "Ti": [{"line": "Lα", "energy_keV": 0.452, "type": "minor"}, {"line": "Kα", "energy_keV": 4.511, "type": "major"}, {"line": "Kβ", "energy_keV": 4.932, "type": "minor"}],
-    "V": [{"line": "Lα", "energy_keV": 0.511, "type": "minor"}, {"line": "Kα", "energy_keV": 4.952, "type": "major"}, {"line": "Kβ", "energy_keV": 5.427, "type": "minor"}],
-    "Cr": [{"line": "Lα", "energy_keV": 0.572, "type": "minor"}, {"line": "Kα", "energy_keV": 5.415, "type": "major"}, {"line": "Kβ", "energy_keV": 5.947, "type": "minor"}],
-    "Mn": [{"line": "Lα", "energy_keV": 0.637, "type": "minor"}, {"line": "Kα", "energy_keV": 5.899, "type": "major"}, {"line": "Kβ", "energy_keV": 6.490, "type": "minor"}],
-    "Fe": [{"line": "Lα", "energy_keV": 0.705, "type": "minor"}, {"line": "Kα", "energy_keV": 6.404, "type": "major"}, {"line": "Kβ", "energy_keV": 7.058, "type": "minor"}],
-    "Co": [{"line": "Lα", "energy_keV": 0.776, "type": "minor"}, {"line": "Kα", "energy_keV": 6.930, "type": "major"}, {"line": "Kβ", "energy_keV": 7.649, "type": "minor"}],
-    "Ni": [{"line": "Lα", "energy_keV": 0.851, "type": "minor"}, {"line": "Kα", "energy_keV": 7.478, "type": "major"}, {"line": "Kβ", "energy_keV": 8.265, "type": "minor"}],
-    "Cu": [{"line": "Lα", "energy_keV": 0.930, "type": "minor"}, {"line": "Kα", "energy_keV": 8.048, "type": "major"}, {"line": "Kβ", "energy_keV": 8.905, "type": "minor"}],
-    "Zn": [{"line": "Lα", "energy_keV": 1.012, "type": "minor"}, {"line": "Kα", "energy_keV": 8.638, "type": "major"}, {"line": "Kβ", "energy_keV": 9.572, "type": "minor"}],
-    "Ga": [{"line": "Lα", "energy_keV": 1.098, "type": "major"}, {"line": "Lβ", "energy_keV": 1.125, "type": "minor"}, {"line": "Kα", "energy_keV": 9.251, "type": "major"}],
-    "Ge": [{"line": "Lα", "energy_keV": 1.188, "type": "major"}, {"line": "Lβ", "energy_keV": 1.218, "type": "minor"}, {"line": "Kα", "energy_keV": 9.886, "type": "major"}],
-    "As": [{"line": "Lα", "energy_keV": 1.282, "type": "major"}, {"line": "Lβ", "energy_keV": 1.317, "type": "minor"}, {"line": "Kα", "energy_keV": 10.543, "type": "major"}],
-    "Se": [{"line": "Lα", "energy_keV": 1.379, "type": "major"}, {"line": "Lβ", "energy_keV": 1.419, "type": "minor"}, {"line": "Kα", "energy_keV": 11.222, "type": "major"}],
-    "Y": [{"line": "Lα", "energy_keV": 1.922, "type": "major"}, {"line": "Lβ", "energy_keV": 1.996, "type": "minor"}, {"line": "Kα", "energy_keV": 14.958, "type": "major"}],
-    "Zr": [{"line": "Lα", "energy_keV": 2.042, "type": "major"}, {"line": "Lβ", "energy_keV": 2.124, "type": "minor"}, {"line": "Kα", "energy_keV": 15.775, "type": "major"}],
-    "Nb": [{"line": "Lα", "energy_keV": 2.166, "type": "major"}, {"line": "Lβ", "energy_keV": 2.257, "type": "minor"}, {"line": "Kα", "energy_keV": 16.615, "type": "major"}],
-    "Mo": [{"line": "Lα", "energy_keV": 2.293, "type": "major"}, {"line": "Lβ", "energy_keV": 2.395, "type": "minor"}, {"line": "Kα", "energy_keV": 17.480, "type": "major"}],
-    "In": [{"line": "Mα", "energy_keV": 0.376, "type": "minor"}, {"line": "Lα", "energy_keV": 3.286, "type": "major"}, {"line": "Lβ", "energy_keV": 3.487, "type": "minor"}],
-    "Sn": [{"line": "Mα", "energy_keV": 0.392, "type": "minor"}, {"line": "Lα", "energy_keV": 3.444, "type": "major"}, {"line": "Lβ", "energy_keV": 3.663, "type": "minor"}],
-    "Te": [{"line": "Mα", "energy_keV": 0.464, "type": "minor"}, {"line": "Lα", "energy_keV": 3.769, "type": "major"}, {"line": "Lβ", "energy_keV": 4.030, "type": "minor"}],
-    "La": [{"line": "Mα", "energy_keV": 0.833, "type": "major"}, {"line": "Lα", "energy_keV": 4.651, "type": "major"}, {"line": "Lβ", "energy_keV": 5.042, "type": "minor"}],
-    "Gd": [{"line": "Mα", "energy_keV": 1.181, "type": "major"}, {"line": "Lα", "energy_keV": 6.057, "type": "major"}, {"line": "Lβ", "energy_keV": 6.713, "type": "minor"}],
-    "Hf": [{"line": "Mα", "energy_keV": 1.644, "type": "major"}, {"line": "Mβ", "energy_keV": 1.725, "type": "minor"}, {"line": "Lα", "energy_keV": 7.899, "type": "major"}, {"line": "Lβ", "energy_keV": 9.023, "type": "minor"}],
-    "Ta": [{"line": "Mα", "energy_keV": 1.710, "type": "major"}, {"line": "Mβ", "energy_keV": 1.781, "type": "minor"}, {"line": "Lα", "energy_keV": 8.146, "type": "major"}, {"line": "Lβ", "energy_keV": 9.343, "type": "minor"}],
-    "W": [{"line": "Mα", "energy_keV": 1.775, "type": "major"}, {"line": "Mβ", "energy_keV": 1.835, "type": "minor"}, {"line": "Lα", "energy_keV": 8.398, "type": "major"}, {"line": "Lβ", "energy_keV": 9.672, "type": "minor"}],
-}
-
-EDS_PERIODIC_ELEMENTS = [
-    "B", "C", "N", "O", "F", "Na", "Mg", "Al", "Si", "P", "S", "Cl", "K", "Ca",
-    "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge", "As", "Se",
-    "Y", "Zr", "Nb", "Mo", "In", "Sn", "Te", "La", "Gd", "Hf", "Ta", "W",
-]
-
-EDS_PRESET_GROUPS = {
-    "Semiconductor": ["B", "C", "N", "O", "Al", "Si", "P", "Ga", "Ge", "As", "In", "Sn"],
-    "High-k": ["O", "N", "Al", "Si", "Ti", "Y", "Zr", "La", "Gd", "Hf", "Ta"],
-    "2D/TMD": ["B", "C", "N", "O", "S", "Se", "Te", "Ti", "V", "Nb", "Mo", "W"],
-}
-The canvas contains a manually edited Python file whose contents are incomplete/truncated around `run_conventional_nmf` at the line `
-
-
-
-
-
 
 """
 rr2_nmf_gui_ver4_5_full_from_v44.py
@@ -315,21 +78,102 @@ class RRNMFResult:
     rank: int
 
 
-EELS_EDGE_DB = {
-    "B-K":188, "C-K":284, "N-K":401, "O-K":532, "F-K":685,
-    "Al-L2,3":73, "Al-K":1560, "Si-L2,3":99, "Si-K":1839, "P-L2,3":132, "S-L2,3":165,
-    "Ti-L3":456, "Ti-L2":462, "V-L3":513, "V-L2":521,
-    "Zr-M4,5":180, "Hf-N5":214, "Hf-N4":224, "Hf-M5":1662, "Hf-M4":1716,
-    "Ta-N5":229, "Ta-N4":241, "Mo-M4,5":227, "W-N5":245, "W-N4":255,
-    "Ga-L3":1115, "Ge-L3":1217, "As-L3":1323, "In-M4,5":443, "Sn-M4,5":485,
-    "Se-M4,5":57, "Te-M4,5":572, "Nb-M4,5":205,
+EELS_EDGE_DB: Dict[str, Dict[str, Any]] = {
+    "B-K": {"element": "B", "edge": "K", "energy_eV": 188.0, "groups": ["2D", "semiconductor", "hBN", "boride"]},
+    "C-K": {"element": "C", "edge": "K", "energy_eV": 284.0, "groups": ["2D", "graphene", "carbon", "contamination", "MXene"]},
+    "N-K": {"element": "N", "edge": "K", "energy_eV": 401.0, "groups": ["2D", "hBN", "nitride", "semiconductor", "high-k"]},
+    "O-K": {"element": "O", "edge": "K", "energy_eV": 532.0, "groups": ["oxide", "high-k", "semiconductor"]},
+    "F-K": {"element": "F", "edge": "K", "energy_eV": 685.0, "groups": ["MXene", "fluoride", "surface_termination"]},
+
+    "Al-L2,3": {"element": "Al", "edge": "L2,3", "energy_eV": 73.0, "groups": ["semiconductor", "high-k", "Al2O3", "III-V"]},
+    "Al-L1": {"element": "Al", "edge": "L1", "energy_eV": 118.0, "groups": ["semiconductor", "high-k", "Al2O3", "III-V"]},
+    "Al-K": {"element": "Al", "edge": "K", "energy_eV": 1560.0, "groups": ["semiconductor", "high-k", "Al2O3", "III-V"]},
+
+    "Si-L2,3": {"element": "Si", "edge": "L2,3", "energy_eV": 99.0, "groups": ["semiconductor", "high-k", "Si", "SiO2", "silicate"]},
+    "Si-L1": {"element": "Si", "edge": "L1", "energy_eV": 149.0, "groups": ["semiconductor", "high-k", "Si", "SiO2", "silicate"]},
+    "Si-K": {"element": "Si", "edge": "K", "energy_eV": 1839.0, "groups": ["semiconductor", "high-k", "Si", "SiO2", "silicate"]},
+
+    "P-L2,3": {"element": "P", "edge": "L2,3", "energy_eV": 132.0, "groups": ["semiconductor", "dopant", "2D", "black_phosphorus"]},
+    "P-K": {"element": "P", "edge": "K", "energy_eV": 2146.0, "groups": ["semiconductor", "dopant", "2D", "black_phosphorus"]},
+
+    "Ga-M4,5": {"element": "Ga", "edge": "M4,5", "energy_eV": 103.0, "groups": ["semiconductor", "III-V", "GaN", "GaAs", "Ga2O3"]},
+    "Ga-L3": {"element": "Ga", "edge": "L3", "energy_eV": 1115.0, "groups": ["semiconductor", "III-V", "GaN", "GaAs", "Ga2O3"]},
+    "Ga-L2": {"element": "Ga", "edge": "L2", "energy_eV": 1142.0, "groups": ["semiconductor", "III-V", "GaN", "GaAs", "Ga2O3"]},
+
+    "Ge-M4,5": {"element": "Ge", "edge": "M4,5", "energy_eV": 29.0, "groups": ["semiconductor", "Ge", "SiGe"]},
+    "Ge-L3": {"element": "Ge", "edge": "L3", "energy_eV": 1217.0, "groups": ["semiconductor", "Ge", "SiGe"]},
+    "Ge-L2": {"element": "Ge", "edge": "L2", "energy_eV": 1248.0, "groups": ["semiconductor", "Ge", "SiGe"]},
+
+    "As-M4,5": {"element": "As", "edge": "M4,5", "energy_eV": 41.0, "groups": ["semiconductor", "III-V", "GaAs", "InAs"]},
+    "As-L3": {"element": "As", "edge": "L3", "energy_eV": 1323.0, "groups": ["semiconductor", "III-V", "GaAs", "InAs"]},
+
+    "In-M4,5": {"element": "In", "edge": "M4,5", "energy_eV": 443.0, "groups": ["semiconductor", "III-V", "InP", "InAs", "InGaAs", "ITO"]},
+    "In-L3": {"element": "In", "edge": "L3", "energy_eV": 3730.0, "groups": ["semiconductor", "III-V", "InP", "InAs", "InGaAs", "ITO"]},
+
+    "Sn-M4,5": {"element": "Sn", "edge": "M4,5", "energy_eV": 485.0, "groups": ["semiconductor", "oxide", "ITO", "2D"]},
+    "Sn-L3": {"element": "Sn", "edge": "L3", "energy_eV": 3929.0, "groups": ["semiconductor", "oxide", "ITO", "2D"]},
+
+    "Ti-L3": {"element": "Ti", "edge": "L3", "energy_eV": 456.0, "groups": ["high-k", "TiO2", "MXene", "2D"]},
+    "Ti-L2": {"element": "Ti", "edge": "L2", "energy_eV": 462.0, "groups": ["high-k", "TiO2", "MXene", "2D"]},
+
+    "Y-M4,5": {"element": "Y", "edge": "M4,5", "energy_eV": 157.0, "groups": ["high-k", "Y2O3"]},
+    "Y-L3": {"element": "Y", "edge": "L3", "energy_eV": 2080.0, "groups": ["high-k", "Y2O3"]},
+
+    "Zr-M4,5": {"element": "Zr", "edge": "M4,5", "energy_eV": 180.0, "groups": ["high-k", "ZrO2", "zirconate"]},
+    "Zr-M3": {"element": "Zr", "edge": "M3", "energy_eV": 330.0, "groups": ["high-k", "ZrO2", "zirconate"]},
+    "Zr-L3": {"element": "Zr", "edge": "L3", "energy_eV": 2222.0, "groups": ["high-k", "ZrO2", "zirconate"]},
+
+    "La-N4,5": {"element": "La", "edge": "N4,5", "energy_eV": 99.0, "groups": ["high-k", "La2O3", "lanthanide_oxide"]},
+    "La-M5": {"element": "La", "edge": "M5", "energy_eV": 832.0, "groups": ["high-k", "La2O3", "lanthanide_oxide"]},
+    "La-M4": {"element": "La", "edge": "M4", "energy_eV": 849.0, "groups": ["high-k", "La2O3", "lanthanide_oxide"]},
+
+    "Gd-N4,5": {"element": "Gd", "edge": "N4,5", "energy_eV": 140.0, "groups": ["high-k", "Gd2O3", "lanthanide_oxide"]},
+    "Gd-M5": {"element": "Gd", "edge": "M5", "energy_eV": 1185.0, "groups": ["high-k", "Gd2O3", "lanthanide_oxide"]},
+    "Gd-M4": {"element": "Gd", "edge": "M4", "energy_eV": 1217.0, "groups": ["high-k", "Gd2O3", "lanthanide_oxide"]},
+
+    "Hf-N5": {"element": "Hf", "edge": "N5", "energy_eV": 214.0, "groups": ["high-k", "HfO2", "hafnate", "gate_stack"]},
+    "Hf-N4": {"element": "Hf", "edge": "N4", "energy_eV": 224.0, "groups": ["high-k", "HfO2", "hafnate", "gate_stack"]},
+    "Hf-M5": {"element": "Hf", "edge": "M5", "energy_eV": 1662.0, "groups": ["high-k", "HfO2", "hafnate", "gate_stack"]},
+    "Hf-M4": {"element": "Hf", "edge": "M4", "energy_eV": 1716.0, "groups": ["high-k", "HfO2", "hafnate", "gate_stack"]},
+
+    "Ta-N5": {"element": "Ta", "edge": "N5", "energy_eV": 229.0, "groups": ["high-k", "Ta2O5", "tantalate"]},
+    "Ta-N4": {"element": "Ta", "edge": "N4", "energy_eV": 241.0, "groups": ["high-k", "Ta2O5", "tantalate"]},
+    "Ta-M5": {"element": "Ta", "edge": "M5", "energy_eV": 1735.0, "groups": ["high-k", "Ta2O5", "tantalate"]},
+    "Ta-M4": {"element": "Ta", "edge": "M4", "energy_eV": 1793.0, "groups": ["high-k", "Ta2O5", "tantalate"]},
+
+    "S-L2,3": {"element": "S", "edge": "L2,3", "energy_eV": 165.0, "groups": ["2D", "TMD", "MoS2", "WS2", "sulfide"]},
+    "S-K": {"element": "S", "edge": "K", "energy_eV": 2472.0, "groups": ["2D", "TMD", "MoS2", "WS2", "sulfide"]},
+
+    "Se-M4,5": {"element": "Se", "edge": "M4,5", "energy_eV": 57.0, "groups": ["2D", "TMD", "MoSe2", "WSe2", "selenide"]},
+    "Se-L3": {"element": "Se", "edge": "L3", "energy_eV": 1436.0, "groups": ["2D", "TMD", "MoSe2", "WSe2", "selenide"]},
+
+    "Te-M4,5": {"element": "Te", "edge": "M4,5", "energy_eV": 572.0, "groups": ["2D", "TMD", "MoTe2", "WTe2", "telluride"]},
+    "Te-L3": {"element": "Te", "edge": "L3", "energy_eV": 4341.0, "groups": ["2D", "TMD", "MoTe2", "WTe2", "telluride"]},
+
+    "Mo-M4,5": {"element": "Mo", "edge": "M4,5", "energy_eV": 227.0, "groups": ["2D", "TMD", "MoS2", "MoSe2", "MoTe2"]},
+    "Mo-M3": {"element": "Mo", "edge": "M3", "energy_eV": 392.0, "groups": ["2D", "TMD", "MoS2", "MoSe2", "MoTe2"]},
+    "Mo-L3": {"element": "Mo", "edge": "L3", "energy_eV": 2520.0, "groups": ["2D", "TMD", "MoS2", "MoSe2", "MoTe2"]},
+
+    "W-N5": {"element": "W", "edge": "N5", "energy_eV": 245.0, "groups": ["2D", "TMD", "WS2", "WSe2", "WTe2"]},
+    "W-N4": {"element": "W", "edge": "N4", "energy_eV": 255.0, "groups": ["2D", "TMD", "WS2", "WSe2", "WTe2"]},
+    "W-M5": {"element": "W", "edge": "M5", "energy_eV": 1809.0, "groups": ["2D", "TMD", "WS2", "WSe2", "WTe2"]},
+    "W-M4": {"element": "W", "edge": "M4", "energy_eV": 1872.0, "groups": ["2D", "TMD", "WS2", "WSe2", "WTe2"]},
+
+    "Nb-M4,5": {"element": "Nb", "edge": "M4,5", "energy_eV": 205.0, "groups": ["2D", "MXene", "NbS2", "NbSe2"]},
+    "V-L3": {"element": "V", "edge": "L3", "energy_eV": 513.0, "groups": ["2D", "MXene", "VS2", "VSe2"]},
+    "V-L2": {"element": "V", "edge": "L2", "energy_eV": 521.0, "groups": ["2D", "MXene", "VS2", "VSe2"]},
 }
-EELS_GROUPS = {
-    "All": list(EELS_EDGE_DB),
-    "Semiconductor": ["B-K","C-K","N-K","O-K","Al-L2,3","Al-K","Si-L2,3","Si-K","P-L2,3","Ga-L3","Ge-L3","As-L3","In-M4,5","Sn-M4,5"],
-    "High-k": ["O-K","N-K","Al-L2,3","Si-L2,3","Ti-L3","Ti-L2","Zr-M4,5","Hf-N5","Hf-N4","Hf-M5","Hf-M4","Ta-N5","Ta-N4"],
-    "2D/TMD": ["B-K","C-K","N-K","O-K","S-L2,3","Se-M4,5","Te-M4,5","Mo-M4,5","W-N5","W-N4","Nb-M4,5","Ti-L3","Ti-L2","V-L3","V-L2"],
+
+EELS_GROUPS: Dict[str, List[str]] = {
+    "All": list(EELS_EDGE_DB.keys()),
+    "Semiconductor": [name for name, row in EELS_EDGE_DB.items() if "semiconductor" in row.get("groups", [])],
+    "High-k": [name for name, row in EELS_EDGE_DB.items() if "high-k" in row.get("groups", [])],
+    "2D/TMD": [name for name, row in EELS_EDGE_DB.items() if ("2D" in row.get("groups", []) or "TMD" in row.get("groups", []))],
+    "TMD": [name for name, row in EELS_EDGE_DB.items() if "TMD" in row.get("groups", [])],
+    "MXene": [name for name, row in EELS_EDGE_DB.items() if "MXene" in row.get("groups", [])],
 }
+
+EELS_ELEMENTS = sorted({row["element"] for row in EELS_EDGE_DB.values()})
 EDS_XRAY_LINE_DB = {
     "B":[("Kα",0.183,"major")], "C":[("Kα",0.277,"major")], "N":[("Kα",0.392,"major")],
     "O":[("Kα",0.525,"major")], "F":[("Kα",0.677,"major")],
@@ -369,6 +213,18 @@ EDS_PRESETS = {
     "Semiconductor": ["B","C","N","O","Al","Si","P","Ga","Ge","As","In","Sn"],
     "High-k": ["O","N","Al","Si","Ti","Y","Zr","La","Gd","Hf","Ta"],
     "2D/TMD": ["B","C","N","O","S","Se","Te","Ti","V","Nb","Mo","W"],
+}
+
+
+PERIODIC_POSITIONS = {
+    "B": (2, 13), "C": (2, 14), "N": (2, 15), "O": (2, 16), "F": (2, 17),
+    "Na": (3, 1), "Mg": (3, 2), "Al": (3, 13), "Si": (3, 14), "P": (3, 15), "S": (3, 16), "Cl": (3, 17),
+    "K": (4, 1), "Ca": (4, 2), "Ti": (4, 4), "V": (4, 5), "Cr": (4, 6), "Mn": (4, 7),
+    "Fe": (4, 8), "Co": (4, 9), "Ni": (4, 10), "Cu": (4, 11), "Zn": (4, 12),
+    "Ga": (4, 13), "Ge": (4, 14), "As": (4, 15), "Se": (4, 16),
+    "Y": (5, 3), "Zr": (5, 4), "Nb": (5, 5), "Mo": (5, 6), "In": (5, 13), "Sn": (5, 14), "Te": (5, 16),
+    "La": (6, 3), "Hf": (6, 4), "Ta": (6, 5), "W": (6, 6),
+    "Gd": (8, 8),
 }
 
 
@@ -637,22 +493,35 @@ def match_eds_lines_to_peaks(peaks, selected_elements, tolerance_keV=0.05, line_
     return sorted(hits, key=lambda r: (r["peak_keV"], abs(r["delta_keV"])))
 
 
-def match_eels_edges_to_features(features, tolerance_eV=5.0, groups=None):
+def match_eels_edges_to_features(features, tolerance_eV=5.0, groups=None, elements=None):
+    group_set = set(groups or [])
+    element_set = set(elements or [])
     names = []
-    if not groups or "All" in groups:
-        names = list(EELS_EDGE_DB)
-    else:
-        for g in groups:
-            names += EELS_GROUPS.get(g, [])
-    names = sorted(set(names))
+    for name, row in EELS_EDGE_DB.items():
+        row_groups = set(row.get("groups", []))
+        if group_set and "All" not in group_set and not (group_set & row_groups):
+            continue
+        if element_set and row.get("element") not in element_set:
+            continue
+        names.append(name)
+
     hits = []
     for ft in features:
         fe = float(ft["energy"])
         for name in names:
-            d = fe - float(EELS_EDGE_DB[name])
+            row = EELS_EDGE_DB[name]
+            d = fe - float(row["energy_eV"])
             if abs(d) <= float(tolerance_eV):
-                elem = name.split("-")[0]
-                hits.append({"feature_eV": fe, "feature_intensity": float(ft["intensity"]), "edge": name, "element": elem, "edge_eV": EELS_EDGE_DB[name], "delta_eV": d})
+                hits.append({
+                    "feature_eV": fe,
+                    "feature_intensity": float(ft["intensity"]),
+                    "edge": name,
+                    "element": row.get("element", ""),
+                    "edge_type": row.get("edge", ""),
+                    "edge_eV": float(row["energy_eV"]),
+                    "delta_eV": d,
+                    "groups": ", ".join(row.get("groups", [])),
+                })
     return sorted(hits, key=lambda r: (r["feature_eV"], abs(r["delta_eV"])))
 
 
@@ -802,32 +671,74 @@ def plot_conv(fig, conv, axis, cmap="viridis", maxn=20):
 def plot_rr(fig, rr, axis, cmap="viridis"):
     fig.clear()
     depths = rr.node_summaries_by_depth
-    max_nodes = 3; cols_node = 2; rows_node = 4
-    ratios=[]; starts=[]; cur=0
-    for d,nodes in enumerate(depths):
-        wraps=max(1,int(np.ceil(max(1,len(nodes))/max_nodes)))
-        starts.append(cur); ratios.append(.55); cur+=1
-        for _ in range(wraps): ratios.extend([3,1,3,1]); cur+=4
-        ratios.append(.35); cur+=1
-    total_cols=max_nodes*cols_node
-    fig.set_size_inches(max(14,total_cols*3), max(8,sum(ratios)*1.65), forward=True)
-    gs=fig.add_gridspec(cur,total_cols,height_ratios=ratios)
-    for d,nodes in enumerate(depths):
-        axd=fig.add_subplot(gs[starts[d],:]); axd.axis("off"); axd.text(0,.5,f"Depth {d}",fontweight="bold",fontsize=12,va="center")
-        for i,ns in enumerate(nodes):
-            wr=i//max_nodes; wc=i%max_nodes; br=starts[d]+1+wr*rows_node; bc=wc*cols_node
-            for ci in range(min(2,len(ns.component_maps))):
-                ax=fig.add_subplot(gs[br,bc+ci]); sp=fig.add_subplot(gs[br+1,bc+ci])
-                im=ax.imshow(ns.component_maps[ci],cmap=cmap,origin="upper",aspect="equal"); ax.set_title(f"D{d} N{i} C{ci}",fontsize=10); ax.set_xticks([]); ax.set_yticks([]); add_colorbar(fig,ax,im)
-                spec=ns.component_spectra[ci]; x=axis.energy_axis if len(axis.energy_axis)==len(spec) else np.arange(len(spec))
-                sp.plot(x,spec); sp.set_title(f"H{ci}",fontsize=9); sp.set_xlabel(axis.energy_label,fontsize=8); sp.grid(True,alpha=.25); sp.tick_params(labelsize=7)
+    # Four nodes per row keeps depth-2 rank-2 results as 8 component maps in one visual row.
+    max_nodes = 4
+    cols_node = 2
+    rows_node = 4
+    ratios = []
+    starts = []
+    cur = 0
+    for d, nodes in enumerate(depths):
+        wraps = max(1, int(np.ceil(max(1, len(nodes)) / max_nodes)))
+        starts.append(cur)
+        ratios.append(0.45)
+        cur += 1
+        for _ in range(wraps):
+            ratios.extend([3.0, 1.0, 3.0, 1.0])
+            cur += rows_node
+        ratios.append(0.20)
+        cur += 1
+
+    total_cols = max_nodes * cols_node
+    # Use a wide figure so a sub-window can use nearly all available horizontal space.
+    fig.set_size_inches(max(24, total_cols * 3.2), max(8, sum(ratios) * 1.55), forward=True)
+    gs = fig.add_gridspec(cur, total_cols, height_ratios=ratios)
+
+    for d, nodes in enumerate(depths):
+        axd = fig.add_subplot(gs[starts[d], :])
+        axd.axis("off")
+        axd.text(0, 0.5, f"Depth {d}", fontweight="bold", fontsize=13, va="center")
+        for i, ns in enumerate(nodes):
+            wr = i // max_nodes
+            wc = i % max_nodes
+            br = starts[d] + 1 + wr * rows_node
+            bc = wc * cols_node
+            for ci in range(min(2, len(ns.component_maps))):
+                ax = fig.add_subplot(gs[br, bc + ci])
+                sp = fig.add_subplot(gs[br + 1, bc + ci])
+                im = ax.imshow(ns.component_maps[ci], cmap=cmap, origin="upper", aspect="equal")
+                ax.set_title(f"D{d} N{i} C{ci}", fontsize=10)
+                ax.set_xticks([])
+                ax.set_yticks([])
+                add_colorbar(fig, ax, im)
+
+                spec = ns.component_spectra[ci]
+                x = axis.energy_axis if len(axis.energy_axis) == len(spec) else np.arange(len(spec))
+                sp.plot(x, spec, linewidth=1.0)
+                sp.set_title(f"H{ci}", fontsize=9)
+                sp.set_xlabel(axis.energy_label, fontsize=8)
+                sp.grid(True, alpha=0.25)
+                sp.tick_params(labelsize=7)
+
             if ns.residual_image is not None:
-                ax=fig.add_subplot(gs[br+2,bc:bc+2]); im=ax.imshow(ns.residual_image,cmap=cmap,origin="upper",aspect="equal"); ax.set_title(f"D{d} N{i} Residual",fontsize=10); ax.set_xticks([]); ax.set_yticks([]); add_colorbar(fig,ax,im)
+                ax = fig.add_subplot(gs[br + 2, bc:bc + 2])
+                im = ax.imshow(ns.residual_image, cmap=cmap, origin="upper", aspect="equal")
+                ax.set_title(f"D{d} N{i} Residual", fontsize=10)
+                ax.set_xticks([])
+                ax.set_yticks([])
+                add_colorbar(fig, ax, im)
+
             if ns.residual_spectrum is not None:
-                sp=fig.add_subplot(gs[br+3,bc:bc+2]); x=axis.energy_axis if len(axis.energy_axis)==len(ns.residual_spectrum) else np.arange(len(ns.residual_spectrum))
-                sp.plot(x,ns.residual_spectrum); sp.set_title("Residual spectrum",fontsize=9); sp.set_xlabel(axis.energy_label,fontsize=8); sp.grid(True,alpha=.25); sp.tick_params(labelsize=7)
-    fig.suptitle("rr-NMF Tree")
-    fig.subplots_adjust(left=.03,right=.985,top=.965,bottom=.035,hspace=.4,wspace=.22)
+                sp = fig.add_subplot(gs[br + 3, bc:bc + 2])
+                x = axis.energy_axis if len(axis.energy_axis) == len(ns.residual_spectrum) else np.arange(len(ns.residual_spectrum))
+                sp.plot(x, ns.residual_spectrum, linewidth=1.0)
+                sp.set_title("Residual spectrum", fontsize=9)
+                sp.set_xlabel(axis.energy_label, fontsize=8)
+                sp.grid(True, alpha=0.25)
+                sp.tick_params(labelsize=7)
+
+    fig.suptitle("rr-NMF Tree", fontsize=14)
+    fig.subplots_adjust(left=0.015, right=0.995, top=0.965, bottom=0.025, hspace=0.32, wspace=0.12)
 
 
 def plot_energy(fig, conv, rr):
@@ -845,13 +756,30 @@ def plot_energy(fig, conv, rr):
 
 
 def plot_interpretation(fig, energy, spec, markers, title, xlabel, norm="none"):
-    fig.clear(); fig.set_size_inches(12.5,5, forward=True)
-    ax=fig.add_subplot(111); y=normalize_1d(spec,norm); ax.plot(energy,y,label=title,lw=1)
-    ymin=float(np.nanmin(y)) if y.size else 0; ymax=float(np.nanmax(y)) if y.size else 1; span=max(1e-12,ymax-ymin)
-    for x,label in markers[:150]:
-        if energy.size and (x < float(np.nanmin(energy)) or x > float(np.nanmax(energy))): continue
-        ax.axvline(x,lw=.8,alpha=.55); ax.text(x,ymin+span*.92,label,rotation=90,fontsize=7,va="top",ha="center")
-    ax.set_title(title); ax.set_xlabel(xlabel); ax.grid(True,alpha=.25); ax.legend(fontsize=8); fig.tight_layout()
+    fig.clear()
+    # 1.5x larger than the previous 12.5 x 5 plot.
+    fig.set_size_inches(18.75, 7.5, forward=True)
+    ax = fig.add_subplot(111)
+    y = normalize_1d(spec, norm)
+    ax.plot(energy, y, label=title, lw=2.0)
+
+    ymin = float(np.nanmin(y)) if y.size else 0.0
+    ymax = float(np.nanmax(y)) if y.size else 1.0
+    span = max(1e-12, ymax - ymin)
+
+    for x, label in markers[:150]:
+        if energy.size and (x < float(np.nanmin(energy)) or x > float(np.nanmax(energy))):
+            continue
+        ax.axvline(x, lw=1.4, alpha=0.55)
+        ax.text(x, ymin + span * 0.92, label, rotation=90, fontsize=14, va="top", ha="center")
+
+    ax.set_title(title, fontsize=20)
+    ax.set_xlabel(xlabel, fontsize=18)
+    ax.set_ylabel("", fontsize=18)
+    ax.tick_params(labelsize=14)
+    ax.grid(True, alpha=0.25)
+    ax.legend(fontsize=16)
+    fig.subplots_adjust(left=0.07, right=0.985, top=0.90, bottom=0.14)
 
 
 def collect_rr_component_entries(rr):
@@ -907,7 +835,7 @@ class RR2NMFGui(QMainWindow):
         self.cube=None; self.original_cube=None; self.roi_cube=None; self.X=None; self.image_shape=None
         self.axis_info=make_default_axis_info((1,1,1)); self.roi_axis_info=make_default_axis_info((1,1,1))
         self.conv_result=None; self.rr_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]
-        self.eds_elements=[]; self.eds_sources=[]; self.eels_sources=[]; self.eds_hits=[]; self.eels_hits=[]
+        self.eds_elements=[]; self.eels_elements=[]; self.eds_sources=[]; self.eels_sources=[]; self.eds_hits=[]; self.eels_hits=[]
         self._syncing=False; self._build_ui()
 
     def _build_ui(self):
@@ -990,27 +918,107 @@ class RR2NMFGui(QMainWindow):
         self.canvas_combined=Canvas(10,4); l.addLayout(left,2); l.addLayout(mid,1); l.addWidget(self.list_rr_combined,2); l.addWidget(PlotPanel(self.canvas_combined),4)
         return box
 
+
+    def _add_periodic_table_buttons(self, layout, elements, callback):
+        """Add compact buttons in a real periodic-table-like layout."""
+        headers = ["1", "2"] + [""] * 10 + ["13", "14", "15", "16", "17", "18"]
+        for col, txt in enumerate(headers):
+            if txt:
+                lab = QLabel(txt)
+                lab.setAlignment(Qt.AlignCenter)
+                layout.addWidget(lab, 0, col)
+        for elem in elements:
+            row, col = PERIODIC_POSITIONS.get(elem, (9, 1))
+            btn = QPushButton(elem)
+            btn.setFixedWidth(42)
+            btn.clicked.connect(lambda checked=False, e=elem: callback(e))
+            layout.addWidget(btn, row, col - 1)
+
     def _build_eds_tab(self):
         page=QWidget(); outer=QVBoxLayout(page); top=QHBoxLayout(); outer.addLayout(top)
         g1=QGroupBox("Spectrum source"); l1=QVBoxLayout(g1); self.list_eds_src=QListWidget(); l1.addWidget(self.list_eds_src); b=QPushButton("Refresh spectra"); b.clicked.connect(self.refresh_spectrum_sources); l1.addWidget(b); top.addWidget(g1,2)
         g2=QGroupBox("Elements"); l2=QVBoxLayout(g2); row=QHBoxLayout(); self.combo_eds_preset=QComboBox(); self.combo_eds_preset.addItems(list(EDS_PRESETS)); bp=QPushButton("Add preset"); bp.clicked.connect(self.add_eds_preset); row.addWidget(self.combo_eds_preset); row.addWidget(bp); l2.addLayout(row)
-        grid=QGridLayout(); 
-        for i,el in enumerate(EDS_ELEMENTS):
-            btn=QPushButton(el); btn.setFixedWidth(42); btn.clicked.connect(lambda _,e=el:self.toggle_eds_element(e)); grid.addWidget(btn,i//10,i%10)
+        grid=QGridLayout()
+        self._add_periodic_table_buttons(grid, EDS_ELEMENTS, self.toggle_eds_element)
         l2.addLayout(grid); self.list_eds_elements=QListWidget(); l2.addWidget(self.list_eds_elements); bc=QPushButton("Clear"); bc.clicked.connect(self.clear_eds_elements); l2.addWidget(bc); top.addWidget(g2,3)
         g3=QGroupBox("Settings"); f=QFormLayout(g3); self.combo_eds_norm=QComboBox(); self.combo_eds_norm.addItems(["none","max","area"]); self.combo_eds_line=QComboBox(); self.combo_eds_line.addItems(["Major + minor","Major only"]); self.spin_eds_tol=QDoubleSpinBox(); self.spin_eds_tol.setRange(.001,1); self.spin_eds_tol.setDecimals(4); self.spin_eds_tol.setValue(.05); self.spin_eds_prom=QDoubleSpinBox(); self.spin_eds_prom.setRange(.001,1); self.spin_eds_prom.setDecimals(4); self.spin_eds_prom.setValue(.03); self.spin_eds_dist=QSpinBox(); self.spin_eds_dist.setRange(1,200); self.spin_eds_dist.setValue(3); br=QPushButton("Detect peaks + match"); br.clicked.connect(self.run_eds_analysis)
         for lab,w in [("Normalize",self.combo_eds_norm),("Line filter",self.combo_eds_line),("Tolerance keV",self.spin_eds_tol),("Min prominence",self.spin_eds_prom),("Min distance ch",self.spin_eds_dist),(None,br)]: f.addRow(w) if lab is None else f.addRow(lab,w)
         top.addWidget(g3,2); outer.addWidget(PlotPanel(self.canvas_eds),4); self.table_eds=QTableWidget(); outer.addWidget(self.table_eds,2); return page
 
     def _build_eels_tab(self):
-        page=QWidget(); outer=QVBoxLayout(page); top=QHBoxLayout(); outer.addLayout(top)
-        g1=QGroupBox("Spectrum source"); l1=QVBoxLayout(g1); self.list_eels_src=QListWidget(); l1.addWidget(self.list_eels_src); b=QPushButton("Refresh spectra"); b.clicked.connect(self.refresh_spectrum_sources); l1.addWidget(b); top.addWidget(g1,2)
-        g2=QGroupBox("Edge groups"); l2=QVBoxLayout(g2); self.list_eels_groups=QListWidget(); self.list_eels_groups.setSelectionMode(QListWidget.MultiSelection)
-        for g in EELS_GROUPS: self.list_eels_groups.addItem(g)
-        self.list_eels_groups.item(0).setSelected(True); l2.addWidget(self.list_eels_groups); top.addWidget(g2,2)
-        g3=QGroupBox("Settings"); f=QFormLayout(g3); self.combo_eels_norm=QComboBox(); self.combo_eels_norm.addItems(["none","max","area"]); self.spin_eels_tol=QDoubleSpinBox(); self.spin_eels_tol.setRange(.1,100); self.spin_eels_tol.setDecimals(2); self.spin_eels_tol.setValue(5); self.spin_eels_prom=QDoubleSpinBox(); self.spin_eels_prom.setRange(.001,1); self.spin_eels_prom.setDecimals(4); self.spin_eels_prom.setValue(.03); self.spin_eels_dist=QSpinBox(); self.spin_eels_dist.setRange(1,500); self.spin_eels_dist.setValue(3); br=QPushButton("Detect features + match edges"); br.clicked.connect(self.run_eels_analysis)
-        for lab,w in [("Normalize",self.combo_eels_norm),("Tolerance eV",self.spin_eels_tol),("Min prominence",self.spin_eels_prom),("Min distance ch",self.spin_eels_dist),(None,br)]: f.addRow(w) if lab is None else f.addRow(lab,w)
-        top.addWidget(g3,2); outer.addWidget(PlotPanel(self.canvas_eels),4); self.table_eels=QTableWidget(); outer.addWidget(self.table_eels,2); return page
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        top = QHBoxLayout()
+        outer.addLayout(top)
+
+        g1 = QGroupBox("Spectrum source")
+        l1 = QVBoxLayout(g1)
+        self.list_eels_src = QListWidget()
+        l1.addWidget(self.list_eels_src)
+        b = QPushButton("Refresh spectra")
+        b.clicked.connect(self.refresh_spectrum_sources)
+        l1.addWidget(b)
+        top.addWidget(g1, 2)
+
+        g2 = QGroupBox("Elements / edge groups")
+        l2 = QVBoxLayout(g2)
+
+        l2.addWidget(QLabel("Elements of interest"))
+        grid = QGridLayout()
+        self._add_periodic_table_buttons(grid, EELS_ELEMENTS, self.toggle_eels_element)
+        l2.addLayout(grid)
+
+        self.list_eels_elements = QListWidget()
+        l2.addWidget(self.list_eels_elements)
+
+        eels_btn_row = QHBoxLayout()
+        btn_clear_elements = QPushButton("Clear elements")
+        btn_clear_elements.clicked.connect(self.clear_eels_elements)
+        eels_btn_row.addWidget(btn_clear_elements)
+        l2.addLayout(eels_btn_row)
+
+        l2.addWidget(QLabel("Edge/material groups"))
+        self.list_eels_groups = QListWidget()
+        self.list_eels_groups.setSelectionMode(QListWidget.MultiSelection)
+        for g in EELS_GROUPS:
+            self.list_eels_groups.addItem(g)
+        self.list_eels_groups.item(0).setSelected(True)
+        l2.addWidget(self.list_eels_groups)
+
+        top.addWidget(g2, 3)
+
+        g3 = QGroupBox("Settings")
+        f = QFormLayout(g3)
+        self.combo_eels_norm = QComboBox()
+        self.combo_eels_norm.addItems(["none", "max", "area"])
+        self.spin_eels_tol = QDoubleSpinBox()
+        self.spin_eels_tol.setRange(.1, 100)
+        self.spin_eels_tol.setDecimals(2)
+        self.spin_eels_tol.setValue(5)
+        self.spin_eels_prom = QDoubleSpinBox()
+        self.spin_eels_prom.setRange(.001, 1)
+        self.spin_eels_prom.setDecimals(4)
+        self.spin_eels_prom.setValue(.03)
+        self.spin_eels_dist = QSpinBox()
+        self.spin_eels_dist.setRange(1, 500)
+        self.spin_eels_dist.setValue(3)
+        br = QPushButton("Detect features + match edges")
+        br.clicked.connect(self.run_eels_analysis)
+        for lab, w in [
+            ("Normalize", self.combo_eels_norm),
+            ("Tolerance eV", self.spin_eels_tol),
+            ("Min prominence", self.spin_eels_prom),
+            ("Min distance ch", self.spin_eels_dist),
+            (None, br),
+        ]:
+            f.addRow(w) if lab is None else f.addRow(lab, w)
+        top.addWidget(g3, 2)
+
+        outer.addWidget(PlotPanel(self.canvas_eels), 4)
+        self.table_eels = QTableWidget()
+        outer.addWidget(self.table_eels, 2)
+        return page
+
 
     def append_log(self,msg): self.log.append(str(msg))
 
@@ -1148,7 +1156,7 @@ class RR2NMFGui(QMainWindow):
     def create_combined_rr_set(self):
         sel=self.selected_rr_entries()
         if not sel: QMessageBox.warning(self,"No selection","Select rr-NMF components first."); return
-        c=build_combined_dataset(sel,self.edit_combined_name.text().strip() or f"Combined {len(self.rr_combined_sets)+1}"); self.rr_combined_sets.append(c); self.refresh_rr_component_list(); self.list_rr_combined.setCurrentRow(len(self.rr_combined_sets)-1)
+        c=build_combined_dataset(sel,self.edit_combined_name.text().strip() or f"Combined {len(self.rr_combined_sets)+1}"); self.rr_combined_sets.append(c); self.refresh_rr_component_list(); self.list_rr_combined.setCurrentRow(len(self.rr_combined_sets)-1); self.refresh_spectrum_sources()
 
     def preview_combined_rr_set(self,*_):
         row=self.list_rr_combined.currentRow()
@@ -1175,6 +1183,8 @@ class RR2NMFGui(QMainWindow):
                     for c,spec in enumerate(ns.component_spectra): sources.append({"label":f"rr D{d} N{n} H{c}","spectrum":np.asarray(spec),"axis":self.roi_axis_info})
         if self.conv_result is not None:
             for c,spec in enumerate(self.conv_result.H_spectra): sources.append({"label":f"Conv H{c}","spectrum":np.asarray(spec),"axis":self.roi_axis_info})
+        for idx, combined in enumerate(getattr(self, "rr_combined_sets", [])):
+            sources.append({"label": f"Combined {idx + 1}: {combined.get('name', 'Combined')}", "spectrum": np.asarray(combined["spectrum"]), "axis": self.roi_axis_info})
         return sources
 
     def refresh_spectrum_sources(self):
@@ -1203,6 +1213,25 @@ class RR2NMFGui(QMainWindow):
         self.list_eds_elements.clear()
         for e in sorted(self.eds_elements): self.list_eds_elements.addItem(e)
 
+
+    def toggle_eels_element(self, e):
+        if e in self.eels_elements:
+            self.eels_elements.remove(e)
+        else:
+            self.eels_elements.append(e)
+        self.refresh_eels_elements()
+
+    def clear_eels_elements(self):
+        self.eels_elements = []
+        self.refresh_eels_elements()
+
+    def refresh_eels_elements(self):
+        if not hasattr(self, "list_eels_elements"):
+            return
+        self.list_eels_elements.clear()
+        for e in sorted(self.eels_elements):
+            self.list_eels_elements.addItem(e)
+
     def run_eds_analysis(self):
         row=self.list_eds_src.currentRow()
         if row<0 or row>=len(self.sources): QMessageBox.warning(self,"No spectrum","Select a spectrum source."); return
@@ -1215,19 +1244,41 @@ class RR2NMFGui(QMainWindow):
         self.eds_hits=hits; self.dataframe_to_table(pd.DataFrame(hits),self.table_eds)
 
     def run_eels_analysis(self):
-        row=self.list_eels_src.currentRow()
-        if row<0 or row>=len(self.sources): QMessageBox.warning(self,"No spectrum","Select a spectrum source."); return
-        groups=[i.text() for i in self.list_eels_groups.selectedItems()] or ["All"]
-        src=self.sources[row]; spec=np.asarray(src["spectrum"],dtype=np.float64); x=energy_axis_as_eV(src["axis"],len(spec))
-        feats=detect_simple_peaks(x,spec,self.spin_eels_prom.value(),self.spin_eels_dist.value())
-        hits=match_eels_edges_to_features(feats,self.spin_eels_tol.value(),groups)
-        names=[]
-        if "All" in groups: names=list(EELS_EDGE_DB)
-        else:
-            for g in groups: names += EELS_GROUPS.get(g,[])
-        markers=[(EELS_EDGE_DB[n],n) for n in sorted(set(names))]
-        plot_interpretation(self.canvas_eels.fig,x,spec,markers,"EELS Interpretation: "+src["label"],"Energy (eV)",self.combo_eels_norm.currentText()); self.canvas_eels.set_base(); self.canvas_eels.draw()
-        self.eels_hits=hits; self.dataframe_to_table(pd.DataFrame(hits),self.table_eels)
+        row = self.list_eels_src.currentRow()
+        if row < 0 or row >= len(self.sources):
+            QMessageBox.warning(self, "No spectrum", "Select a spectrum source.")
+            return
+
+        groups = [i.text() for i in self.list_eels_groups.selectedItems()] or ["All"]
+        elements = list(getattr(self, "eels_elements", []))
+
+        src = self.sources[row]
+        spec = np.asarray(src["spectrum"], dtype=np.float64)
+        x = energy_axis_as_eV(src["axis"], len(spec))
+        feats = detect_simple_peaks(x, spec, self.spin_eels_prom.value(), self.spin_eels_dist.value())
+        hits = match_eels_edges_to_features(feats, self.spin_eels_tol.value(), groups, elements)
+
+        markers = []
+        group_set = set(groups)
+        element_set = set(elements)
+        for name, rowdata in EELS_EDGE_DB.items():
+            row_groups = set(rowdata.get("groups", []))
+            if group_set and "All" not in group_set and not (group_set & row_groups):
+                continue
+            if element_set and rowdata.get("element") not in element_set:
+                continue
+            markers.append((float(rowdata["energy_eV"]), name))
+
+        plot_interpretation(
+            self.canvas_eels.fig, x, spec, markers,
+            "EELS Interpretation: " + src["label"], "Energy (eV)",
+            self.combo_eels_norm.currentText()
+        )
+        self.canvas_eels.set_base()
+        self.canvas_eels.draw()
+        self.eels_hits = hits
+        self.dataframe_to_table(pd.DataFrame(hits), self.table_eels)
+
 
     def dataframe_to_table(self,df,table,max_rows=2000):
         if df is None or df.empty: table.clear(); table.setRowCount(0); table.setColumnCount(0); return
