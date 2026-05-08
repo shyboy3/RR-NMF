@@ -1,3 +1,240 @@
+"""
+rr2_nmf_gui_ver4_5_full_eels_eds.py
+
+Integrated residual-aware recursive NMF GUI for EELS/EDS spectral imaging.
+
+v4.5 additions
+--------------
+- EELS Interpretation tab added.
+- EDS Analysis tab retained.
+- Spectrum sources shared by EELS/EDS tabs:
+  Raw ROI Sum, rr-NMF component spectra, conventional NMF component spectra.
+- Built-in EELS edge DB and EDS X-ray line DB for semiconductor, high-k, and 2D/TMD workflows.
+- Default residual mode: redistribute_equal.
+- Default NMF init: random.
+
+Install
+-------
+pip install numpy pandas scikit-learn matplotlib PyQt5
+
+Optional file loaders
+---------------------
+pip install hyperspy exspy rosettasciio
+"""
+
+import os
+import sys
+import traceback
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+from sklearn.decomposition import NMF
+
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QFileDialog, QMessageBox,
+    QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
+    QSpinBox, QDoubleSpinBox, QCheckBox, QTabWidget, QTableWidget,
+    QTableWidgetItem, QTextEdit, QSplitter, QGroupBox, QFormLayout,
+    QScrollArea, QSizePolicy, QListWidget, QListWidgetItem, QLineEdit,
+    QGridLayout,
+)
+
+import matplotlib
+matplotlib.use("Qt5Agg")
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+if sys.version_info < (3, 8):
+    raise RuntimeError("This GUI requires Python >= 3.8")
+
+
+# =============================================================================
+# Data containers
+# =============================================================================
+
+@dataclass
+class AxisInfo:
+    energy_axis: np.ndarray
+    energy_unit: str = "channel"
+    energy_label: str = "Channel"
+    x_scale: float = 1.0
+    y_scale: float = 1.0
+    spatial_unit: str = "px"
+    x_label: str = "X"
+    y_label: str = "Y"
+
+
+@dataclass
+class RRNodeSummary:
+    depth: int
+    node_id: int
+    parent_id: int
+    path: str
+    component_maps: List[np.ndarray] = field(default_factory=list)
+    component_spectra: List[np.ndarray] = field(default_factory=list)
+    component_errors: List[float] = field(default_factory=list)
+    component_energies: List[float] = field(default_factory=list)
+    residual_image: Optional[np.ndarray] = None
+    residual_spectrum: Optional[np.ndarray] = None
+    residual_energy: float = np.nan
+    recon_ratio: float = np.nan
+
+
+@dataclass
+class ConventionalNMFResult:
+    W: np.ndarray
+    H: np.ndarray
+    R_energy: float
+    W_images: List[np.ndarray]
+    H_spectra: List[np.ndarray]
+    residual_image: np.ndarray
+    residual_spectrum: np.ndarray
+    energy_records: pd.DataFrame
+    recon_ratio: float
+    h_corr: np.ndarray
+    w_corr: np.ndarray
+
+
+@dataclass
+class RRNMFResult:
+    W_images_by_depth: List[List[np.ndarray]]
+    H_spectra_by_depth: List[List[np.ndarray]]
+    errors_by_depth: List[List[float]]
+    energy_records: pd.DataFrame
+    node_records: pd.DataFrame
+    node_summaries_by_depth: List[List[RRNodeSummary]]
+    rank: int
+
+
+# =============================================================================
+# Built-in databases
+# =============================================================================
+
+EELS_EDGE_DB: Dict[str, Dict[str, Any]] = {
+    "B-K": {"element": "B", "edge": "K", "energy_eV": 188.0, "groups": ["2D", "hBN", "semiconductor"]},
+    "C-K": {"element": "C", "edge": "K", "energy_eV": 284.0, "groups": ["2D", "graphene", "carbon", "contamination", "MXene"]},
+    "N-K": {"element": "N", "edge": "K", "energy_eV": 401.0, "groups": ["2D", "hBN", "nitride", "semiconductor", "high-k"]},
+    "O-K": {"element": "O", "edge": "K", "energy_eV": 532.0, "groups": ["oxide", "high-k", "semiconductor"]},
+    "F-K": {"element": "F", "edge": "K", "energy_eV": 685.0, "groups": ["MXene", "fluoride"]},
+    "Al-L2,3": {"element": "Al", "edge": "L2,3", "energy_eV": 73.0, "groups": ["semiconductor", "high-k", "Al2O3"]},
+    "Al-K": {"element": "Al", "edge": "K", "energy_eV": 1560.0, "groups": ["semiconductor", "high-k", "Al2O3"]},
+    "Si-L2,3": {"element": "Si", "edge": "L2,3", "energy_eV": 99.0, "groups": ["semiconductor", "high-k", "Si", "SiO2", "silicate"]},
+    "Si-K": {"element": "Si", "edge": "K", "energy_eV": 1839.0, "groups": ["semiconductor", "Si", "SiO2"]},
+    "P-L2,3": {"element": "P", "edge": "L2,3", "energy_eV": 132.0, "groups": ["semiconductor", "dopant", "2D"]},
+    "P-K": {"element": "P", "edge": "K", "energy_eV": 2146.0, "groups": ["semiconductor", "dopant", "2D"]},
+    "S-L2,3": {"element": "S", "edge": "L2,3", "energy_eV": 165.0, "groups": ["2D", "TMD", "MoS2", "WS2"]},
+    "S-K": {"element": "S", "edge": "K", "energy_eV": 2472.0, "groups": ["2D", "TMD", "MoS2", "WS2"]},
+    "Ti-L3": {"element": "Ti", "edge": "L3", "energy_eV": 456.0, "groups": ["high-k", "TiO2", "MXene", "2D"]},
+    "Ti-L2": {"element": "Ti", "edge": "L2", "energy_eV": 462.0, "groups": ["high-k", "TiO2", "MXene", "2D"]},
+    "V-L3": {"element": "V", "edge": "L3", "energy_eV": 513.0, "groups": ["2D", "MXene"]},
+    "V-L2": {"element": "V", "edge": "L2", "energy_eV": 521.0, "groups": ["2D", "MXene"]},
+    "Zr-M4,5": {"element": "Zr", "edge": "M4,5", "energy_eV": 180.0, "groups": ["high-k", "ZrO2"]},
+    "Zr-L3": {"element": "Zr", "edge": "L3", "energy_eV": 2222.0, "groups": ["high-k", "ZrO2"]},
+    "La-N4,5": {"element": "La", "edge": "N4,5", "energy_eV": 99.0, "groups": ["high-k", "La2O3"]},
+    "La-M5": {"element": "La", "edge": "M5", "energy_eV": 832.0, "groups": ["high-k", "La2O3"]},
+    "La-M4": {"element": "La", "edge": "M4", "energy_eV": 849.0, "groups": ["high-k", "La2O3"]},
+    "Gd-N4,5": {"element": "Gd", "edge": "N4,5", "energy_eV": 140.0, "groups": ["high-k", "Gd2O3"]},
+    "Gd-M5": {"element": "Gd", "edge": "M5", "energy_eV": 1185.0, "groups": ["high-k", "Gd2O3"]},
+    "Gd-M4": {"element": "Gd", "edge": "M4", "energy_eV": 1217.0, "groups": ["high-k", "Gd2O3"]},
+    "Hf-N5": {"element": "Hf", "edge": "N5", "energy_eV": 214.0, "groups": ["high-k", "HfO2", "gate_stack"]},
+    "Hf-N4": {"element": "Hf", "edge": "N4", "energy_eV": 224.0, "groups": ["high-k", "HfO2", "gate_stack"]},
+    "Hf-M5": {"element": "Hf", "edge": "M5", "energy_eV": 1662.0, "groups": ["high-k", "HfO2", "gate_stack"]},
+    "Hf-M4": {"element": "Hf", "edge": "M4", "energy_eV": 1716.0, "groups": ["high-k", "HfO2", "gate_stack"]},
+    "Ta-N5": {"element": "Ta", "edge": "N5", "energy_eV": 229.0, "groups": ["high-k", "Ta2O5"]},
+    "Ta-N4": {"element": "Ta", "edge": "N4", "energy_eV": 241.0, "groups": ["high-k", "Ta2O5"]},
+    "Mo-M4,5": {"element": "Mo", "edge": "M4,5", "energy_eV": 227.0, "groups": ["2D", "TMD", "MoS2", "MoSe2"]},
+    "Mo-L3": {"element": "Mo", "edge": "L3", "energy_eV": 2520.0, "groups": ["2D", "TMD"]},
+    "W-N5": {"element": "W", "edge": "N5", "energy_eV": 245.0, "groups": ["2D", "TMD", "WS2", "WSe2"]},
+    "W-N4": {"element": "W", "edge": "N4", "energy_eV": 255.0, "groups": ["2D", "TMD", "WS2", "WSe2"]},
+    "W-M5": {"element": "W", "edge": "M5", "energy_eV": 1809.0, "groups": ["2D", "TMD"]},
+    "W-M4": {"element": "W", "edge": "M4", "energy_eV": 1872.0, "groups": ["2D", "TMD"]},
+    "Ga-M4,5": {"element": "Ga", "edge": "M4,5", "energy_eV": 103.0, "groups": ["semiconductor", "III-V"]},
+    "Ga-L3": {"element": "Ga", "edge": "L3", "energy_eV": 1115.0, "groups": ["semiconductor", "III-V"]},
+    "Ge-M4,5": {"element": "Ge", "edge": "M4,5", "energy_eV": 29.0, "groups": ["semiconductor", "Ge", "SiGe"]},
+    "Ge-L3": {"element": "Ge", "edge": "L3", "energy_eV": 1217.0, "groups": ["semiconductor", "Ge", "SiGe"]},
+    "As-M4,5": {"element": "As", "edge": "M4,5", "energy_eV": 41.0, "groups": ["semiconductor", "III-V"]},
+    "As-L3": {"element": "As", "edge": "L3", "energy_eV": 1323.0, "groups": ["semiconductor", "III-V"]},
+    "In-M4,5": {"element": "In", "edge": "M4,5", "energy_eV": 443.0, "groups": ["semiconductor", "III-V", "ITO"]},
+    "Sn-M4,5": {"element": "Sn", "edge": "M4,5", "energy_eV": 485.0, "groups": ["semiconductor", "oxide", "ITO"]},
+    "Se-M4,5": {"element": "Se", "edge": "M4,5", "energy_eV": 57.0, "groups": ["2D", "TMD"]},
+    "Se-L3": {"element": "Se", "edge": "L3", "energy_eV": 1436.0, "groups": ["2D", "TMD"]},
+    "Te-M4,5": {"element": "Te", "edge": "M4,5", "energy_eV": 572.0, "groups": ["2D", "TMD"]},
+    "Te-L3": {"element": "Te", "edge": "L3", "energy_eV": 4341.0, "groups": ["2D", "TMD"]},
+    "Nb-M4,5": {"element": "Nb", "edge": "M4,5", "energy_eV": 205.0, "groups": ["2D", "MXene"]},
+}
+
+EELS_EDGE_GROUPS: Dict[str, List[str]] = {
+    "All": list(EELS_EDGE_DB.keys()),
+    "Semiconductor": [name for name, row in EELS_EDGE_DB.items() if "semiconductor" in row.get("groups", [])],
+    "High-k": [name for name, row in EELS_EDGE_DB.items() if "high-k" in row.get("groups", [])],
+    "2D": [name for name, row in EELS_EDGE_DB.items() if "2D" in row.get("groups", [])],
+    "TMD": [name for name, row in EELS_EDGE_DB.items() if "TMD" in row.get("groups", [])],
+    "MXene": [name for name, row in EELS_EDGE_DB.items() if "MXene" in row.get("groups", [])],
+}
+
+EDS_XRAY_LINE_DB: Dict[str, List[Dict[str, Any]]] = {
+    "B": [{"line": "Kα", "energy_keV": 0.183, "type": "major"}],
+    "C": [{"line": "Kα", "energy_keV": 0.277, "type": "major"}],
+    "N": [{"line": "Kα", "energy_keV": 0.392, "type": "major"}],
+    "O": [{"line": "Kα", "energy_keV": 0.525, "type": "major"}],
+    "F": [{"line": "Kα", "energy_keV": 0.677, "type": "major"}],
+    "Na": [{"line": "Kα", "energy_keV": 1.041, "type": "major"}, {"line": "Kβ", "energy_keV": 1.071, "type": "minor"}],
+    "Mg": [{"line": "Kα", "energy_keV": 1.254, "type": "major"}, {"line": "Kβ", "energy_keV": 1.302, "type": "minor"}],
+    "Al": [{"line": "Kα", "energy_keV": 1.487, "type": "major"}, {"line": "Kβ", "energy_keV": 1.557, "type": "minor"}],
+    "Si": [{"line": "Kα", "energy_keV": 1.740, "type": "major"}, {"line": "Kβ", "energy_keV": 1.836, "type": "minor"}],
+    "P": [{"line": "Kα", "energy_keV": 2.014, "type": "major"}, {"line": "Kβ", "energy_keV": 2.139, "type": "minor"}],
+    "S": [{"line": "Kα", "energy_keV": 2.307, "type": "major"}, {"line": "Kβ", "energy_keV": 2.464, "type": "minor"}],
+    "Cl": [{"line": "Kα", "energy_keV": 2.622, "type": "major"}, {"line": "Kβ", "energy_keV": 2.815, "type": "minor"}],
+    "K": [{"line": "Kα", "energy_keV": 3.312, "type": "major"}, {"line": "Kβ", "energy_keV": 3.590, "type": "minor"}],
+    "Ca": [{"line": "Kα", "energy_keV": 3.690, "type": "major"}, {"line": "Kβ", "energy_keV": 4.012, "type": "minor"}],
+    "Ti": [{"line": "Lα", "energy_keV": 0.452, "type": "minor"}, {"line": "Kα", "energy_keV": 4.511, "type": "major"}, {"line": "Kβ", "energy_keV": 4.932, "type": "minor"}],
+    "V": [{"line": "Lα", "energy_keV": 0.511, "type": "minor"}, {"line": "Kα", "energy_keV": 4.952, "type": "major"}, {"line": "Kβ", "energy_keV": 5.427, "type": "minor"}],
+    "Cr": [{"line": "Lα", "energy_keV": 0.572, "type": "minor"}, {"line": "Kα", "energy_keV": 5.415, "type": "major"}, {"line": "Kβ", "energy_keV": 5.947, "type": "minor"}],
+    "Mn": [{"line": "Lα", "energy_keV": 0.637, "type": "minor"}, {"line": "Kα", "energy_keV": 5.899, "type": "major"}, {"line": "Kβ", "energy_keV": 6.490, "type": "minor"}],
+    "Fe": [{"line": "Lα", "energy_keV": 0.705, "type": "minor"}, {"line": "Kα", "energy_keV": 6.404, "type": "major"}, {"line": "Kβ", "energy_keV": 7.058, "type": "minor"}],
+    "Co": [{"line": "Lα", "energy_keV": 0.776, "type": "minor"}, {"line": "Kα", "energy_keV": 6.930, "type": "major"}, {"line": "Kβ", "energy_keV": 7.649, "type": "minor"}],
+    "Ni": [{"line": "Lα", "energy_keV": 0.851, "type": "minor"}, {"line": "Kα", "energy_keV": 7.478, "type": "major"}, {"line": "Kβ", "energy_keV": 8.265, "type": "minor"}],
+    "Cu": [{"line": "Lα", "energy_keV": 0.930, "type": "minor"}, {"line": "Kα", "energy_keV": 8.048, "type": "major"}, {"line": "Kβ", "energy_keV": 8.905, "type": "minor"}],
+    "Zn": [{"line": "Lα", "energy_keV": 1.012, "type": "minor"}, {"line": "Kα", "energy_keV": 8.638, "type": "major"}, {"line": "Kβ", "energy_keV": 9.572, "type": "minor"}],
+    "Ga": [{"line": "Lα", "energy_keV": 1.098, "type": "major"}, {"line": "Lβ", "energy_keV": 1.125, "type": "minor"}, {"line": "Kα", "energy_keV": 9.251, "type": "major"}],
+    "Ge": [{"line": "Lα", "energy_keV": 1.188, "type": "major"}, {"line": "Lβ", "energy_keV": 1.218, "type": "minor"}, {"line": "Kα", "energy_keV": 9.886, "type": "major"}],
+    "As": [{"line": "Lα", "energy_keV": 1.282, "type": "major"}, {"line": "Lβ", "energy_keV": 1.317, "type": "minor"}, {"line": "Kα", "energy_keV": 10.543, "type": "major"}],
+    "Se": [{"line": "Lα", "energy_keV": 1.379, "type": "major"}, {"line": "Lβ", "energy_keV": 1.419, "type": "minor"}, {"line": "Kα", "energy_keV": 11.222, "type": "major"}],
+    "Y": [{"line": "Lα", "energy_keV": 1.922, "type": "major"}, {"line": "Lβ", "energy_keV": 1.996, "type": "minor"}, {"line": "Kα", "energy_keV": 14.958, "type": "major"}],
+    "Zr": [{"line": "Lα", "energy_keV": 2.042, "type": "major"}, {"line": "Lβ", "energy_keV": 2.124, "type": "minor"}, {"line": "Kα", "energy_keV": 15.775, "type": "major"}],
+    "Nb": [{"line": "Lα", "energy_keV": 2.166, "type": "major"}, {"line": "Lβ", "energy_keV": 2.257, "type": "minor"}, {"line": "Kα", "energy_keV": 16.615, "type": "major"}],
+    "Mo": [{"line": "Lα", "energy_keV": 2.293, "type": "major"}, {"line": "Lβ", "energy_keV": 2.395, "type": "minor"}, {"line": "Kα", "energy_keV": 17.480, "type": "major"}],
+    "In": [{"line": "Mα", "energy_keV": 0.376, "type": "minor"}, {"line": "Lα", "energy_keV": 3.286, "type": "major"}, {"line": "Lβ", "energy_keV": 3.487, "type": "minor"}],
+    "Sn": [{"line": "Mα", "energy_keV": 0.392, "type": "minor"}, {"line": "Lα", "energy_keV": 3.444, "type": "major"}, {"line": "Lβ", "energy_keV": 3.663, "type": "minor"}],
+    "Te": [{"line": "Mα", "energy_keV": 0.464, "type": "minor"}, {"line": "Lα", "energy_keV": 3.769, "type": "major"}, {"line": "Lβ", "energy_keV": 4.030, "type": "minor"}],
+    "La": [{"line": "Mα", "energy_keV": 0.833, "type": "major"}, {"line": "Lα", "energy_keV": 4.651, "type": "major"}, {"line": "Lβ", "energy_keV": 5.042, "type": "minor"}],
+    "Gd": [{"line": "Mα", "energy_keV": 1.181, "type": "major"}, {"line": "Lα", "energy_keV": 6.057, "type": "major"}, {"line": "Lβ", "energy_keV": 6.713, "type": "minor"}],
+    "Hf": [{"line": "Mα", "energy_keV": 1.644, "type": "major"}, {"line": "Mβ", "energy_keV": 1.725, "type": "minor"}, {"line": "Lα", "energy_keV": 7.899, "type": "major"}, {"line": "Lβ", "energy_keV": 9.023, "type": "minor"}],
+    "Ta": [{"line": "Mα", "energy_keV": 1.710, "type": "major"}, {"line": "Mβ", "energy_keV": 1.781, "type": "minor"}, {"line": "Lα", "energy_keV": 8.146, "type": "major"}, {"line": "Lβ", "energy_keV": 9.343, "type": "minor"}],
+    "W": [{"line": "Mα", "energy_keV": 1.775, "type": "major"}, {"line": "Mβ", "energy_keV": 1.835, "type": "minor"}, {"line": "Lα", "energy_keV": 8.398, "type": "major"}, {"line": "Lβ", "energy_keV": 9.672, "type": "minor"}],
+}
+
+EDS_PERIODIC_ELEMENTS = [
+    "B", "C", "N", "O", "F", "Na", "Mg", "Al", "Si", "P", "S", "Cl", "K", "Ca",
+    "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge", "As", "Se",
+    "Y", "Zr", "Nb", "Mo", "In", "Sn", "Te", "La", "Gd", "Hf", "Ta", "W",
+]
+
+EDS_PRESET_GROUPS = {
+    "Semiconductor": ["B", "C", "N", "O", "Al", "Si", "P", "Ga", "Ge", "As", "In", "Sn"],
+    "High-k": ["O", "N", "Al", "Si", "Ti", "Y", "Zr", "La", "Gd", "Hf", "Ta"],
+    "2D/TMD": ["B", "C", "N", "O", "S", "Se", "Te", "Ti", "V", "Nb", "Mo", "W"],
+}
+The canvas contains a manually edited Python file whose contents are incomplete/truncated around `run_conventional_nmf` at the line `
+
+
+
+
+
 
 """
 rr2_nmf_gui_ver4_5_full_from_v44.py
