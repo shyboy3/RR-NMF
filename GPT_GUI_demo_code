@@ -554,41 +554,59 @@ def get_source_pair_label(label: str) -> Optional[str]:
 
 def apply_reference_bg_low_energy_scaling(
     cube: np.ndarray,
+    axis_info: AxisInfo,
     spatial_roi: Tuple[int, int, int, int],
+    fit_channel_roi: Tuple[int, int],
     scale_channel_roi: Tuple[int, int],
     after_mode: str = "shift_min",
     chunk_pixels: int = 8192,
     eps: float = 1e-12,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """
-    Reference BG subtraction:
-        BG_ref(E) = mean spectrum from selected spatial ROI
-        alpha_p = mean(X_p[scale_start:scale_end]) / mean(BG_ref[scale_start:scale_end])
-        Xcorr_p(E) = X_p(E) - alpha_p * BG_ref(E)
+    Fitted reference BG subtraction:
+        1. Fit a global reference background curve from selected spatial ROI and fitting channel range:
+             BG_ref(E) = A_ref * E^(-r_ref)
+        2. For each pixel, compute alpha_p from low-energy reference channels:
+             alpha_p = mean(X_p[scale_start:scale_end]) / mean(BG_ref[scale_start:scale_end])
+        3. Subtract:
+             Xcorr_p(E) = X_p(E) - alpha_p * BG_ref(E)
 
-    after_mode:
-        shift_min : subtract each corrected pixel spectrum's minimum so min becomes 0
-        clip      : clip values below 0
-        keep      : keep signed values
+    This matches the user's older workflow more closely than using the raw ROI mean spectrum as BG_ref.
     """
     h, w, L = cube.shape
     y0, y1, x0, x1 = spatial_roi
+    f0, f1 = fit_channel_roi
     s0, s1 = scale_channel_roi
+
+    f0 = max(0, min(int(f0), L - 1))
+    f1 = max(f0 + 1, min(int(f1), L))
     s0 = max(0, min(int(s0), L - 1))
     s1 = max(s0 + 1, min(int(s1), L))
-    sub = cube[y0:y1, x0:x1, :].astype(np.float64, copy=False)
-    if sub.size == 0:
-        raise ValueError("Reference BG ROI is empty.")
-    bg_ref = np.nanmean(sub.reshape(-1, L), axis=0).astype(np.float64)
+
+    # Fit global reference BG curve from selected spatial ROI + fit range.
+    fit_info = fit_powerlaw_exponent_from_roi(
+        cube,
+        axis_info,
+        spatial_roi=(y0, y1, x0, x1),
+        channel_roi=(f0, f1),
+    )
+    r_ref = float(fit_info["r"])
+    A_ref = float(fit_info["A_mean"])
+
+    e = safe_powerlaw_energy_axis(axis_info.energy_axis)
+    if len(e) != L:
+        e = np.arange(L, dtype=np.float64) + 1.0
+    e = np.maximum(e, 1e-6)
+    bg_ref = A_ref * np.power(e, -r_ref)
     bg_scale = float(np.nanmean(bg_ref[s0:s1]))
     if not np.isfinite(bg_scale) or abs(bg_scale) <= eps:
-        raise ValueError("Reference BG scale window is zero or invalid.")
+        raise ValueError("Fitted reference BG scale window is zero or invalid.")
 
     X = cube.reshape(h * w, L).astype(np.float32, copy=False)
     out = np.empty_like(X, dtype=np.float32)
     alpha_min, alpha_max, alpha_sum, n_alpha = np.inf, -np.inf, 0.0, 0
-
     bg32 = bg_ref.astype(np.float32)
+
     for st in range(0, X.shape[0], int(chunk_pixels)):
         en = min(st + int(chunk_pixels), X.shape[0])
         Xc = X[st:en].astype(np.float32, copy=False)
@@ -611,6 +629,11 @@ def apply_reference_bg_low_energy_scaling(
             n_alpha += int(alpha.size)
 
     meta = {
+        "A_ref": A_ref,
+        "r_ref": r_ref,
+        "fit_rmse": float(fit_info.get("rmse", np.nan)),
+        "fit_start": float(f0),
+        "fit_end": float(f1),
         "bg_scale": bg_scale,
         "scale_start": float(s0),
         "scale_end": float(s1),
@@ -1374,7 +1397,7 @@ class RR2NMFGui(QMainWindow):
 
         bg=QGroupBox("Background Correction"); bf=QFormLayout(bg)
         self.combo_bg_mode=QComboBox()
-        self.combo_bg_mode.addItems(["Power-law: global r + pixelwise A", "Reference BG × low-energy scaling"])
+        self.combo_bg_mode.addItems(["Power-law: global r + pixelwise A", "Fitted reference BG × low-energy scaling"])
         self.bg_y0=QSpinBox(); self.bg_y1=QSpinBox(); self.bg_x0=QSpinBox(); self.bg_x1=QSpinBox()
         for sp in [self.bg_y0,self.bg_y1,self.bg_x0,self.bg_x1]: sp.setRange(0,10**9)
         self.bg_e0=QDoubleSpinBox(); self.bg_e1=QDoubleSpinBox()
@@ -1538,6 +1561,24 @@ class RR2NMFGui(QMainWindow):
         f = QFormLayout(g3)
         self.combo_eels_norm = QComboBox()
         self.combo_eels_norm.addItems(["none", "max", "area"])
+
+        self.combo_eels_mode = QComboBox()
+        self.combo_eels_mode.addItems(["Candidate screening", "Edge analysis"])
+
+        self.combo_eels_compare = QComboBox()
+        self.combo_eels_compare.addItems(["Single spectrum", "Basis vs weighted raw stacked"])
+
+        self.combo_eels_line_display = QComboBox()
+        self.combo_eels_line_display.addItems([
+            "Selected elements/groups",
+            "All candidate edges in current energy range",
+            "Matched edges only",
+            "Selected edge only",
+        ])
+
+        self.combo_eels_edge = QComboBox()
+        self.combo_eels_edge.addItems(sorted(EELS_EDGE_DB.keys()))
+
         self.spin_eels_tol = QDoubleSpinBox()
         self.spin_eels_tol.setRange(.1, 100)
         self.spin_eels_tol.setDecimals(2)
@@ -1549,19 +1590,31 @@ class RR2NMFGui(QMainWindow):
         self.spin_eels_dist = QSpinBox()
         self.spin_eels_dist.setRange(1, 500)
         self.spin_eels_dist.setValue(3)
-        self.spin_eels_smooth = QDoubleSpinBox()
-        self.spin_eels_smooth.setRange(0.0, 1000.0)
-        self.spin_eels_smooth.setDecimals(6)
-        self.spin_eels_smooth.setValue(0.01)
-        self.spin_eels_smooth.valueChanged.connect(lambda _: self.refresh_spectrum_sources())
-        br = QPushButton("Detect features + match edges")
+
+        self.spin_eels_pre0 = QDoubleSpinBox()
+        self.spin_eels_pre1 = QDoubleSpinBox()
+        self.spin_eels_int0 = QDoubleSpinBox()
+        self.spin_eels_int1 = QDoubleSpinBox()
+        for sp in [self.spin_eels_pre0, self.spin_eels_pre1, self.spin_eels_int0, self.spin_eels_int1]:
+            sp.setRange(-1e9, 1e9)
+            sp.setDecimals(4)
+            sp.setValue(0.0)
+
+        br = QPushButton("Run EELS interpretation")
         br.clicked.connect(self.run_eels_analysis)
         for lab, w in [
             ("Normalize", self.combo_eels_norm),
+            ("Mode", self.combo_eels_mode),
+            ("Compare view", self.combo_eels_compare),
+            ("Edge line display", self.combo_eels_line_display),
+            ("Selected edge", self.combo_eels_edge),
             ("Tolerance eV", self.spin_eels_tol),
             ("Min prominence", self.spin_eels_prom),
             ("Min distance ch", self.spin_eels_dist),
-            ("Smooth-refit λ", self.spin_eels_smooth),
+            ("Pre-edge start eV", self.spin_eels_pre0),
+            ("Pre-edge end eV", self.spin_eels_pre1),
+            ("Integration start eV", self.spin_eels_int0),
+            ("Integration end eV", self.spin_eels_int1),
             (None, br),
         ]:
             f.addRow(w) if lab is None else f.addRow(lab, w)
@@ -1573,7 +1626,7 @@ class RR2NMFGui(QMainWindow):
         return page
 
 
-    
+
     def append_log(self,msg): self.log.append(str(msg))
 
     def load_file(self):
@@ -1665,17 +1718,21 @@ class RR2NMFGui(QMainWindow):
             if mode.startswith("Reference BG"):
                 s0 = max(0, min(self.bg_ref_ch0.value(), L - 1))
                 s1 = max(s0 + 1, min(self.bg_ref_ch1.value(), L))
+                l0, l1 = self.background_channel_range()
                 corrected, meta = apply_reference_bg_low_energy_scaling(
                     self.cube,
+                    self.axis_info,
                     spatial_roi=(y0, y1, x0, x1),
+                    fit_channel_roi=(l0, l1),
                     scale_channel_roi=(s0, s1),
                     after_mode=self.combo_bg_after.currentText(),
                     chunk_pixels=max(512, self.spin_chunk.value()),
                 )
                 self.cube = corrected
                 self.lbl_bg.setText(
-                    "Applied: reference BG × low-energy scale "
-                    f"ch[{s0}:{s1}], after={self.combo_bg_after.currentText()}, "
+                    "Applied: fitted reference BG × low-energy scale "
+                    f"fit_ch[{l0}:{l1}], scale_ch[{s0}:{s1}], "
+                    f"r={meta['r_ref']:.4g}, after={self.combo_bg_after.currentText()}, "
                     f"alpha mean={meta['alpha_mean']:.4g}"
                 )
             else:
@@ -2001,7 +2058,7 @@ class RR2NMFGui(QMainWindow):
 
         rows = list(hits)
 
-        if self.combo_eels_mode.currentText() == "Edge analysis" and selected_edge:
+        if getattr(self, "combo_eels_mode", None) is not None and self.combo_eels_mode.currentText() == "Edge analysis" and selected_edge:
             edge_e = float(EELS_EDGE_DB[selected_edge]["energy_eV"])
             # If the user has not filled ranges, make a conservative default around the selected edge.
             pre0 = self.spin_eels_pre0.value()
