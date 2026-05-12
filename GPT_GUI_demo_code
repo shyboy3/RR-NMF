@@ -877,13 +877,33 @@ def run_conventional_nmf(X, image_shape, n_components=20, max_iter=300, init="ra
     return ConventionalNMFResult(W, H, Wimgs, Hspecs, rimg, rspec, pd.DataFrame(recs), corrH, corrW)
 
 
-def run_rr_nmf(X, image_shape, rank=2, max_depth=3, residual_mode="redistribute_equal", residual_nonnegative="clip", decompose_residual_branch=False, max_iter=300, init="random", solver="mu", random_state=0, chunk_size=2048):
+def run_rr_nmf(X, image_shape, rank=2, max_depth=3, residual_mode="redistribute_equal", residual_nonnegative="clip", decompose_residual_branch=False, max_iter=300, init="random", solver="mu", random_state=0, chunk_size=2048, manual_groups=None):
     X = nonnegative(X, "clip").astype(np.float32)
     ih, iw = image_shape
     GE = fro_energy(X)
     erecs, nrecs, summaries = [], [], []
     nodes = [{"X": X, "node_id": 0, "parent_id": -1, "path": "root", "node_type": "root"}]
     nid = 1
+    manual_groups = manual_groups or {}
+    prepared_manual_groups = {}
+    for md, groups in manual_groups.items():
+        try:
+            md_int = int(md)
+        except Exception:
+            continue
+        prepared = []
+        for gi, g in enumerate(groups or []):
+            Xg = g.get("X", g.get("matrix", None)) if isinstance(g, dict) else g
+            if Xg is None:
+                continue
+            Xg = nonnegative(np.asarray(Xg, dtype=np.float32), residual_nonnegative)
+            if Xg.ndim != 2 or Xg.shape != X.shape:
+                continue
+            name = g.get("name", f"manual_group_{gi+1}") if isinstance(g, dict) else f"manual_group_{gi+1}"
+            members = g.get("members", []) if isinstance(g, dict) else []
+            prepared.append({"X": Xg, "name": name, "members": members})
+        if prepared:
+            prepared_manual_groups[md_int] = prepared
     for d in range(max_depth+1):
         slist, nxt = [], []
         for li, node in enumerate(nodes):
@@ -921,7 +941,23 @@ def run_rr_nmf(X, image_shape, rank=2, max_depth=3, residual_mode="redistribute_
                 nid += 1
             slist.append(ns)
         summaries.append(slist)
-        nodes = nxt if d < max_depth else []
+        if d < max_depth:
+            next_depth = d + 1
+            if next_depth in prepared_manual_groups:
+                nodes = []
+                for gi, g in enumerate(prepared_manual_groups[next_depth]):
+                    nodes.append({
+                        "X": g["X"],
+                        "node_id": nid,
+                        "parent_id": -1,
+                        "path": f"manualD{next_depth}/G{gi+1}:{g['name']}",
+                        "node_type": "manual_combined",
+                    })
+                    nid += 1
+            else:
+                nodes = nxt
+        else:
+            nodes = []
     return RRNMFResult(summaries, pd.DataFrame(erecs), pd.DataFrame(nrecs), rank)
 
 
@@ -986,13 +1022,23 @@ def plot_raw(fig, cube, axis, cmap="viridis", full_cube=None, spatial_roi=None, 
     show_cube = full_cube if full_cube is not None else cube
     img = np.sum(show_cube, axis=2)
     im = ax.imshow(img, cmap=cmap, origin="upper", aspect="equal")
-    ax.set_title("Raw sum image with selected spatial ROI")
+    ax.set_title("Raw sum image with selected spatial ROI", pad=22)
     ax.set_xlabel("X"); ax.set_ylabel("Y")
     if spatial_roi is not None:
         y0,y1,x0,x1 = spatial_roi
         rect = Rectangle((x0, y0), max(1, x1-x0), max(1, y1-y0), fill=False, linewidth=2.0)
         ax.add_patch(rect)
-        ax.text(x0, max(0, y0-2), f"ROI x[{x0}:{x1}] y[{y0}:{y1}]", fontsize=9, va="bottom")
+        label_y = y0 - max(6, int(0.04 * img.shape[0]))
+        if label_y < 0:
+            label_y = y0 + max(6, int(0.04 * img.shape[0]))
+            va = "top"
+        else:
+            va = "bottom"
+        ax.text(
+            x0, label_y, f"ROI x[{x0}:{x1}] y[{y0}:{y1}]",
+            fontsize=10, va=va, ha="left", clip_on=False,
+            bbox=dict(facecolor="white", alpha=0.75, edgecolor="none", pad=1.5),
+        )
     add_colorbar(fig, ax, im)
 
     src = raw_roi_before_bg if raw_roi_before_bg is not None else cube
@@ -1009,7 +1055,7 @@ def plot_raw(fig, cube, axis, cmap="viridis", full_cube=None, spatial_roi=None, 
     sp.set_title("Final ROI spectrum: mean / deviation")
     sp.set_xlabel(axis.energy_label); sp.set_ylabel("Intensity")
     sp.grid(True, alpha=.3); sp.legend(fontsize=8)
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
 
 def plot_conv(fig, conv, axis, cmap="viridis", maxn=20):
     fig.clear()
@@ -1065,7 +1111,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
         cur += 1
 
     total_cols = max_nodes * cols_node
-    fig.set_size_inches(max(24, total_cols * 3.0), max(8, sum(ratios) * 1.55), forward=True)
+    fig.set_size_inches(max(28, total_cols * 3.9), max(8, sum(ratios) * 1.55), forward=True)
     gs = fig.add_gridspec(cur, total_cols, height_ratios=ratios)
 
     for d, nodes in enumerate(depths):
@@ -1101,7 +1147,8 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                         corr_txt = f", corr({overlay_mode})={corr:.3f}" if np.isfinite(corr) else ", corr=nan"
                         line1, = sp.plot(x, hspec, linewidth=1.0, label="H basis (left)")
                         sp2 = sp.twinx()
-                        line2, = sp2.plot(x, wspec, linewidth=1.0, linestyle="--", label="weighted raw (right)")
+                        line2, = sp2.plot(x, wspec, linewidth=1.2, linestyle="-", color="red", label="weighted raw (right)")
+                        sp2.spines["right"].set_position(("outward", 52))
                         sp.set_ylabel("H basis", fontsize=7)
                         sp2.set_ylabel("weighted raw", fontsize=7)
                         sp2.tick_params(labelsize=7)
@@ -1143,7 +1190,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                 sp.tick_params(labelsize=7)
 
     fig.suptitle(f"rr-NMF Tree rank={rank}: H basis with weighted raw overlay", fontsize=14)
-    fig.subplots_adjust(left=0.015, right=0.995, top=0.965, bottom=0.025, hspace=0.32, wspace=0.12)
+    fig.subplots_adjust(left=0.015, right=0.965, top=0.965, bottom=0.025, hspace=0.36, wspace=0.85)
 
 
 def plot_energy(fig, conv, rr):
@@ -1448,7 +1495,7 @@ class AnalysisWorker(QThread):
                 conv=run_conventional_nmf(self.X,self.shape,self.params["conv_components"],self.params["max_iter"],self.params["init"],self.params["solver"],self.params["random_state"],self.params["chunk_size"])
             if self.params["run_rr"]:
                 logs.append("Running recursive NMF...")
-                rr=run_rr_nmf(self.X,self.shape,self.params["rr_rank"],self.params["rr_depth"],self.params["residual_mode"],self.params["residual_nonnegative"],self.params["decompose_residual_branch"],self.params["max_iter"],self.params["init"],self.params["solver"],self.params["random_state"],self.params["chunk_size"])
+                rr=run_rr_nmf(self.X,self.shape,self.params["rr_rank"],self.params["rr_depth"],self.params["residual_mode"],self.params["residual_nonnegative"],self.params["decompose_residual_branch"],self.params["max_iter"],self.params["init"],self.params["solver"],self.params["random_state"],self.params["chunk_size"],self.params.get("manual_groups"))
             self.finished_ok.emit(conv,rr,"\n".join(logs))
         except Exception:
             self.failed.emit(traceback.format_exc())
@@ -1456,7 +1503,7 @@ class AnalysisWorker(QThread):
 
 class RR2NMFGui(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v4.8 integrated"); self.resize(1850,1080)
+        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v4.9 integrated"); self.resize(1850,1080)
         self.cube=None; self.original_cube=None; self.roi_cube=None; self.X=None; self.image_shape=None
         self.axis_info=make_default_axis_info((1,1,1)); self.roi_axis_info=make_default_axis_info((1,1,1))
         self.conv_result=None; self.rr_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.bg_applied=False; self._raw_mouse_press=None
@@ -1519,6 +1566,8 @@ class RR2NMFGui(QMainWindow):
         self.chk_rr=QCheckBox("Run recursive NMF"); self.chk_rr.setChecked(True)
         self.spin_rank=QSpinBox(); self.spin_rank.setRange(2,10); self.spin_rank.setValue(2)
         self.spin_depth=QSpinBox(); self.spin_depth.setRange(0,8); self.spin_depth.setValue(3)
+        self.chk_manual_depth=QCheckBox("Manual depth: use Combined Sets as next-depth nodes")
+        self.spin_manual_depth=QSpinBox(); self.spin_manual_depth.setRange(1,8); self.spin_manual_depth.setValue(2)
         self.combo_res_mode=QComboBox(); self.combo_res_mode.addItems(["discard","redistribute_equal","explicit_branch"]); self.combo_res_mode.setCurrentText("redistribute_equal")
         self.combo_res_nn=QComboBox(); self.combo_res_nn.addItems(["clip","abs","shift"])
         self.chk_decomp_res=QCheckBox("Decompose residual branch")
@@ -1527,7 +1576,7 @@ class RR2NMFGui(QMainWindow):
         self.combo_solver=QComboBox(); self.combo_solver.addItems(["mu","cd"])
         self.spin_seed=QSpinBox(); self.spin_seed.setRange(0,999999); self.spin_seed.setValue(0)
         self.spin_chunk=QSpinBox(); self.spin_chunk.setRange(128,50000); self.spin_chunk.setValue(2048)
-        for lab,w in [(None,self.chk_conv),("Conventional k",self.spin_k),(None,self.chk_rr),("Recursive rank",self.spin_rank),("Recursive depth",self.spin_depth),("Residual mode",self.combo_res_mode),("Residual nonnegative",self.combo_res_nn),(None,self.chk_decomp_res),("Max iter",self.spin_iter),("Init",self.combo_init),("Solver",self.combo_solver),("Random seed",self.spin_seed),("Chunk size",self.spin_chunk)]:
+        for lab,w in [(None,self.chk_conv),("Conventional k",self.spin_k),(None,self.chk_rr),("Recursive rank",self.spin_rank),("Recursive depth",self.spin_depth),(None,self.chk_manual_depth),("Manual apply depth",self.spin_manual_depth),("Residual mode",self.combo_res_mode),("Residual nonnegative",self.combo_res_nn),(None,self.chk_decomp_res),("Max iter",self.spin_iter),("Init",self.combo_init),("Solver",self.combo_solver),("Random seed",self.spin_seed),("Chunk size",self.spin_chunk)]:
             nf.addRow(w) if lab is None else nf.addRow(lab,w)
         cl.addWidget(ng)
 
@@ -1554,9 +1603,10 @@ class RR2NMFGui(QMainWindow):
         mid=QVBoxLayout(); self.edit_combined_name=QLineEdit(); self.edit_combined_name.setPlaceholderText("Optional name")
         self.btn_create_combined=QPushButton("Create Combined Set"); self.btn_create_combined.clicked.connect(self.create_combined_rr_set)
         self.btn_preview_selected=QPushButton("Preview Selected"); self.btn_preview_selected.clicked.connect(self.preview_selected_rr_components)
+        self.btn_delete_combined=QPushButton("Delete Selected Combined Set"); self.btn_delete_combined.clicked.connect(self.delete_combined_rr_set)
         self.btn_export_combined=QPushButton("Export Selected Combined NPZ"); self.btn_export_combined.clicked.connect(self.export_combined_rr_set)
-        self.btn_run_combined=QPushButton("Run rr-NMF from Combined Set"); self.btn_run_combined.clicked.connect(self.run_rr_from_combined_set)
-        for w in [self.edit_combined_name,self.btn_create_combined,self.btn_preview_selected,self.btn_export_combined,self.btn_run_combined]: mid.addWidget(w)
+        hint=QLabel("Manual depth option uses the Combined Sets as nodes at the selected depth during Run Analysis."); hint.setWordWrap(True)
+        for w in [self.edit_combined_name,self.btn_create_combined,self.btn_preview_selected,self.btn_delete_combined,self.btn_export_combined,hint]: mid.addWidget(w)
         self.list_rr_combined=QListWidget(); self.list_rr_combined.currentRowChanged.connect(lambda _: self.preview_combined_rr_set(True))
         self.canvas_combined=Canvas(10,4); l.addLayout(left,2); l.addLayout(mid,1); l.addWidget(self.list_rr_combined,2); l.addWidget(PlotPanel(self.canvas_combined),4)
         return box
@@ -1887,13 +1937,22 @@ class RR2NMFGui(QMainWindow):
         self.cube=self.original_cube.copy(); self.bg_applied=False; self.conv_result=None; self.rr_result=None; self.lbl_bg.setText("Reset to original"); self.refresh_views(); self.refresh_spectrum_sources()
 
     def collect_params(self):
-        return {"run_conventional":self.chk_conv.isChecked(),"conv_components":self.spin_k.value(),"run_rr":self.chk_rr.isChecked(),"rr_rank":self.spin_rank.value(),"rr_depth":self.spin_depth.value(),"residual_mode":self.combo_res_mode.currentText(),"residual_nonnegative":self.combo_res_nn.currentText(),"decompose_residual_branch":self.chk_decomp_res.isChecked(),"max_iter":self.spin_iter.value(),"init":self.combo_init.currentText(),"solver":self.combo_solver.currentText(),"random_state":self.spin_seed.value(),"chunk_size":self.spin_chunk.value()}
+        params={"run_conventional":self.chk_conv.isChecked(),"conv_components":self.spin_k.value(),"run_rr":self.chk_rr.isChecked(),"rr_rank":self.spin_rank.value(),"rr_depth":self.spin_depth.value(),"residual_mode":self.combo_res_mode.currentText(),"residual_nonnegative":self.combo_res_nn.currentText(),"decompose_residual_branch":self.chk_decomp_res.isChecked(),"max_iter":self.spin_iter.value(),"init":self.combo_init.currentText(),"solver":self.combo_solver.currentText(),"random_state":self.spin_seed.value(),"chunk_size":self.spin_chunk.value()}
+        if getattr(self,"chk_manual_depth",None) is not None and self.chk_manual_depth.isChecked():
+            md=int(self.spin_manual_depth.value())
+            if self.rr_combined_sets:
+                params["manual_groups"]={md:[{"name":c.get("name",f"Combined {i+1}"),"members":c.get("members",[]),"X":np.asarray(c["matrix"],dtype=np.float32)} for i,c in enumerate(self.rr_combined_sets)]}
+        return params
 
     def run_analysis(self):
         try: roi,X,shape,axis=self.get_roi_cube_and_X()
         except Exception as e: QMessageBox.warning(self,"ROI/Data error",str(e)); return
         self.roi_cube=roi; self.X=X; self.image_shape=shape; self.roi_axis_info=axis; self.btn_run.setEnabled(False)
-        self.worker=AnalysisWorker(X,shape,self.collect_params()); self.worker.finished_ok.connect(self.on_analysis_finished); self.worker.failed.connect(self.on_analysis_failed); self.worker.start()
+        params=self.collect_params()
+        if params.get("manual_groups"):
+            md=list(params["manual_groups"].keys())[0]
+            self.append_log(f"Manual depth enabled: depth {md} will use {len(params['manual_groups'][md])} Combined Set node(s).")
+        self.worker=AnalysisWorker(X,shape,params); self.worker.finished_ok.connect(self.on_analysis_finished); self.worker.failed.connect(self.on_analysis_failed); self.worker.start()
 
     def on_analysis_finished(self,conv,rr,logs):
         self.conv_result=conv; self.rr_result=rr; self.btn_run.setEnabled(True); self.append_log(logs); self.refresh_views(); self.refresh_spectrum_sources()
@@ -1944,6 +2003,20 @@ class RR2NMFGui(QMainWindow):
         row=self.list_rr_combined.currentRow()
         if row<0 or row>=len(self.rr_combined_sets): return
         c=self.rr_combined_sets[row]; plot_combined(self.canvas_combined.fig,c,self.roi_axis_info,self.combo_cmap.currentText()); self.canvas_combined.set_base(); self.canvas_combined.draw()
+
+    def delete_combined_rr_set(self):
+        row=self.list_rr_combined.currentRow()
+        if row<0 or row>=len(self.rr_combined_sets):
+            QMessageBox.warning(self,"No selection","Select a combined set to delete."); return
+        name=self.rr_combined_sets[row].get("name",f"Combined {row+1}")
+        del self.rr_combined_sets[row]
+        self.refresh_rr_component_list()
+        if self.rr_combined_sets:
+            self.list_rr_combined.setCurrentRow(min(row,len(self.rr_combined_sets)-1))
+        else:
+            self.canvas_combined.clear()
+        self.refresh_spectrum_sources()
+        self.append_log(f"Deleted combined set: {name}")
 
     def export_combined_rr_set(self):
         row=self.list_rr_combined.currentRow()
