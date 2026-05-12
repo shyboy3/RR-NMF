@@ -1,6 +1,6 @@
 
 """
-rr2_nmf_gui_ver4_7_eels_workflow.py
+rr2_nmf_gui_ver4_8_eels_workflow.py
 
 Single-file rr-NMF GUI based on the v4.4 workflow, with EELS Interpretation added.
 This file keeps the v4.4-style core workflow in one executable Python file.
@@ -32,6 +32,7 @@ import matplotlib
 matplotlib.use("Qt5Agg")
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 
@@ -52,6 +53,7 @@ class RRNodeSummary:
     path: str
     component_maps: List[np.ndarray] = field(default_factory=list)
     component_spectra: List[np.ndarray] = field(default_factory=list)
+    child_matrices: List[Optional[np.ndarray]] = field(default_factory=list)  # exact next-depth inputs including residual redistribution
     residual_image: Optional[np.ndarray] = None
     residual_spectrum: Optional[np.ndarray] = None
     residual_energy: float = np.nan
@@ -530,6 +532,24 @@ def normalize_for_shape_compare(y: np.ndarray, mode: str = "max", eps: float = 1
     return y / (m + eps) if m > 0 else y
 
 
+
+
+def safe_shape_correlation(a: np.ndarray, b: np.ndarray, norm_mode: str = "max") -> float:
+    """Correlation after visual/shape normalization; original spectra remain unscaled for plotting."""
+    aa = normalize_for_shape_compare(np.asarray(a, dtype=np.float64), norm_mode)
+    bb = normalize_for_shape_compare(np.asarray(b, dtype=np.float64), norm_mode)
+    m = np.isfinite(aa) & np.isfinite(bb)
+    if np.count_nonzero(m) < 3:
+        return np.nan
+    aa = aa[m] - np.nanmean(aa[m])
+    bb = bb[m] - np.nanmean(bb[m])
+    den = float(np.sqrt(np.nansum(aa * aa) * np.nansum(bb * bb)))
+    return float(np.nansum(aa * bb) / den) if den > 0 else np.nan
+
+def roi_mean_std_spectrum(cube: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    X = np.asarray(cube, dtype=np.float64).reshape(-1, cube.shape[-1])
+    return np.nanmean(X, axis=0), np.nanstd(X, axis=0)
+
 def get_source_pair_label(label: str) -> Optional[str]:
     """Return the paired NMF-basis or W-weighted source label."""
     import re
@@ -889,8 +909,11 @@ def run_rr_nmf(X, image_shape, rank=2, max_depth=3, residual_mode="redistribute_
                 erecs.append({"method": "rr_nmf", "depth": d, "node_local_index": li, "node_id": node_id, "parent_id": parent_id, "component_id": ci, "type": "component", "energy": ei, "node_energy": NE, "global_energy": GE, "node_ratio": ei/NE if NE > 0 else np.nan, "global_ratio": ei/GE if GE > 0 else np.nan, "path": f'{node["path"]}/C{ci}'})
                 if d < max_depth:
                     child = make_child_matrix_chunked(Xd, W, H, ci, rank, residual_mode, residual_nonnegative, chunk_size)
+                    ns.child_matrices.append(child)
                     nxt.append({"X": child, "node_id": nid, "parent_id": node_id, "path": f'{node["path"]}/C{ci}', "node_type": "component"})
                     nid += 1
+                else:
+                    ns.child_matrices.append(None)
             erecs.append({"method": "rr_nmf", "depth": d, "node_local_index": li, "node_id": node_id, "parent_id": parent_id, "component_id": "R", "type": "residual", "energy": RE, "node_energy": NE, "global_energy": GE, "node_ratio": RE/NE if NE > 0 else np.nan, "global_ratio": RE/GE if GE > 0 else np.nan, "path": node["path"] + "/R"})
             if residual_mode == "explicit_branch" and d < max_depth:
                 rb = make_residual_branch_chunked(Xd, W, H, residual_nonnegative, chunk_size)
@@ -951,15 +974,42 @@ class PlotPanel(QWidget):
         lay.addWidget(self.scroll)
 
 
-def plot_raw(fig, cube, axis, cmap="viridis"):
-    fig.clear(); fig.set_size_inches(14,5, forward=True)
-    ax = fig.add_subplot(121); sp = fig.add_subplot(122)
-    img = np.sum(cube, axis=2); spec = np.sum(cube, axis=(0,1))
-    x = axis.energy_axis if len(axis.energy_axis)==len(spec) else np.arange(len(spec))
-    im = ax.imshow(img, cmap=cmap, origin="upper", aspect="equal"); ax.set_title("Raw sum image"); add_colorbar(fig, ax, im)
-    sp.plot(x, spec); sp.set_title("Raw sum spectrum"); sp.set_xlabel(axis.energy_label); sp.grid(True, alpha=.3)
-    fig.tight_layout()
+def plot_raw(fig, cube, axis, cmap="viridis", full_cube=None, spatial_roi=None, raw_roi_before_bg=None, corrected_roi=None, bg_applied=False):
+    """Raw-data view with visible spatial ROI and final ROI mean/std spectrum.
 
+    full_cube/spatial_roi are used only to draw the selection rectangle. The spectrum is always
+    calculated from the final analysis ROI. If background correction has been applied, raw, bg,
+    and raw-bg spectra are shown together.
+    """
+    fig.clear(); fig.set_size_inches(16,6.2, forward=True)
+    ax = fig.add_subplot(121); sp = fig.add_subplot(122)
+    show_cube = full_cube if full_cube is not None else cube
+    img = np.sum(show_cube, axis=2)
+    im = ax.imshow(img, cmap=cmap, origin="upper", aspect="equal")
+    ax.set_title("Raw sum image with selected spatial ROI")
+    ax.set_xlabel("X"); ax.set_ylabel("Y")
+    if spatial_roi is not None:
+        y0,y1,x0,x1 = spatial_roi
+        rect = Rectangle((x0, y0), max(1, x1-x0), max(1, y1-y0), fill=False, linewidth=2.0)
+        ax.add_patch(rect)
+        ax.text(x0, max(0, y0-2), f"ROI x[{x0}:{x1}] y[{y0}:{y1}]", fontsize=9, va="bottom")
+    add_colorbar(fig, ax, im)
+
+    src = raw_roi_before_bg if raw_roi_before_bg is not None else cube
+    mean_raw, std_raw = roi_mean_std_spectrum(src)
+    x = axis.energy_axis if len(axis.energy_axis)==len(mean_raw) else np.arange(len(mean_raw))
+    sp.plot(x, mean_raw, linewidth=1.4, label="ROI raw mean")
+    sp.fill_between(x, mean_raw-std_raw, mean_raw+std_raw, alpha=0.18, label="ROI raw ±1σ")
+    if bg_applied and corrected_roi is not None:
+        mean_corr, std_corr = roi_mean_std_spectrum(corrected_roi)
+        mean_bg = mean_raw - mean_corr
+        sp.plot(x, mean_bg, linewidth=1.2, label="estimated BG = raw - corrected")
+        sp.plot(x, mean_corr, linewidth=1.5, label="raw - BG / corrected mean")
+        sp.fill_between(x, mean_corr-std_corr, mean_corr+std_corr, alpha=0.12, label="corrected ±1σ")
+    sp.set_title("Final ROI spectrum: mean / deviation")
+    sp.set_xlabel(axis.energy_label); sp.set_ylabel("Intensity")
+    sp.grid(True, alpha=.3); sp.legend(fontsize=8)
+    fig.tight_layout()
 
 def plot_conv(fig, conv, axis, cmap="viridis", maxn=20):
     fig.clear()
@@ -982,9 +1032,24 @@ def plot_conv(fig, conv, axis, cmap="viridis", maxn=20):
 def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"):
     fig.clear()
     depths = rr.node_summaries_by_depth
-    max_nodes = 4
-    cols_node = 2
+
+    # Generalized layout for recursive rank >= 2.
+    # Each node occupies "rank" columns:
+    #   row 1: C0 ... C{rank-1} images
+    #   row 2: H0 ... H{rank-1} spectra
+    #   row 3: residual image spanning rank columns
+    #   row 4: residual spectrum spanning rank columns
+    rank = max(1, int(getattr(rr, "rank", 2)))
+    cols_node = rank
     rows_node = 4
+
+    # Keep the display reasonably wide without forcing too many nodes per row.
+    # Examples:
+    #   rank=2 -> 4 nodes/row => 8 component columns
+    #   rank=3 -> 3 nodes/row => 9 component columns
+    #   rank=4 -> 2 nodes/row => 8 component columns
+    max_nodes = max(1, min(4, 10 // max(1, rank)))
+
     ratios = []
     starts = []
     cur = 0
@@ -1000,7 +1065,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
         cur += 1
 
     total_cols = max_nodes * cols_node
-    fig.set_size_inches(max(24, total_cols * 3.2), max(8, sum(ratios) * 1.55), forward=True)
+    fig.set_size_inches(max(24, total_cols * 3.0), max(8, sum(ratios) * 1.55), forward=True)
     gs = fig.add_gridspec(cur, total_cols, height_ratios=ratios)
 
     for d, nodes in enumerate(depths):
@@ -1014,7 +1079,8 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
             br = starts[d] + 1 + wr * rows_node
             bc = wc * cols_node
 
-            for ci in range(min(2, len(ns.component_maps))):
+            n_comp = len(ns.component_maps)
+            for ci in range(n_comp):
                 ax = fig.add_subplot(gs[br, bc + ci])
                 sp = fig.add_subplot(gs[br + 1, bc + ci])
                 wmap = ns.component_maps[ci]
@@ -1027,24 +1093,40 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                 add_colorbar(fig, ax, im)
 
                 x = axis.energy_axis if len(axis.energy_axis) == len(hspec) else np.arange(len(hspec))
+                corr_txt = ""
                 if X_for_weight is not None:
                     try:
                         wspec = weighted_raw_spectrum_by_map(X_for_weight, wmap)
-                        sp.plot(x, normalize_for_shape_compare(hspec, overlay_mode), linewidth=1.0, label="H basis")
-                        sp.plot(x, normalize_for_shape_compare(wspec, overlay_mode), linewidth=1.4, alpha=0.9, color="#ff6666", label="weighted raw")
+                        corr = safe_shape_correlation(hspec, wspec, overlay_mode)
+                        corr_txt = f", corr({overlay_mode})={corr:.3f}" if np.isfinite(corr) else ", corr=nan"
+                        line1, = sp.plot(x, hspec, linewidth=1.0, label="H basis (left)")
+                        sp2 = sp.twinx()
+                        line2, = sp2.plot(x, wspec, linewidth=1.0, linestyle="--", label="weighted raw (right)")
+                        sp.set_ylabel("H basis", fontsize=7)
+                        sp2.set_ylabel("weighted raw", fontsize=7)
+                        sp2.tick_params(labelsize=7)
+                        sp.legend([line1, line2], [line1.get_label(), line2.get_label()], fontsize=6, loc="best")
                     except Exception:
                         sp.plot(x, hspec, linewidth=1.0, label="H basis")
+                        sp.legend(fontsize=6, loc="best")
                 else:
                     sp.plot(x, hspec, linewidth=1.0, label="H basis")
+                    sp.legend(fontsize=6, loc="best")
 
-                sp.set_title(f"H{ci}", fontsize=9)
+                sp.set_title(f"H{ci}{corr_txt}", fontsize=9)
                 sp.set_xlabel(axis.energy_label, fontsize=8)
                 sp.grid(True, alpha=0.25)
                 sp.tick_params(labelsize=7)
-                sp.legend(fontsize=6, loc="best")
+
+            # If n_comp < rank for a degenerate node, leave the remaining slots blank.
+            for ci in range(n_comp, rank):
+                ax_blank = fig.add_subplot(gs[br, bc + ci])
+                ax_blank.axis("off")
+                sp_blank = fig.add_subplot(gs[br + 1, bc + ci])
+                sp_blank.axis("off")
 
             if ns.residual_image is not None:
-                ax = fig.add_subplot(gs[br + 2, bc:bc + 2])
+                ax = fig.add_subplot(gs[br + 2, bc:bc + rank])
                 im = ax.imshow(ns.residual_image, cmap=cmap, origin="upper", aspect="equal")
                 ax.set_title(f"D{d} N{i} Residual", fontsize=10)
                 ax.set_xticks([])
@@ -1052,7 +1134,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                 add_colorbar(fig, ax, im)
 
             if ns.residual_spectrum is not None:
-                sp = fig.add_subplot(gs[br + 3, bc:bc + 2])
+                sp = fig.add_subplot(gs[br + 3, bc:bc + rank])
                 x = axis.energy_axis if len(axis.energy_axis) == len(ns.residual_spectrum) else np.arange(len(ns.residual_spectrum))
                 sp.plot(x, ns.residual_spectrum, linewidth=1.0)
                 sp.set_title("Residual spectrum", fontsize=9)
@@ -1060,7 +1142,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                 sp.grid(True, alpha=0.25)
                 sp.tick_params(labelsize=7)
 
-    fig.suptitle("rr-NMF Tree: H basis with weighted raw overlay", fontsize=14)
+    fig.suptitle(f"rr-NMF Tree rank={rank}: H basis with weighted raw overlay", fontsize=14)
     fig.subplots_adjust(left=0.015, right=0.995, top=0.965, bottom=0.025, hspace=0.32, wspace=0.12)
 
 
@@ -1214,18 +1296,23 @@ def collect_rr_component_entries(rr):
     for d,nodes in enumerate(rr.node_summaries_by_depth):
         for n,ns in enumerate(nodes):
             for c,(wm,hs) in enumerate(zip(ns.component_maps,ns.component_spectra)):
-                out.append({"label":f"D{d} N{n} C{c}","W_map":wm,"H_spec":hs})
+                out.append({"label":f"D{d} N{n} C{c}","W_map":wm,"H_spec":hs,"child_matrix": (ns.child_matrices[c] if c < len(getattr(ns, "child_matrices", [])) else None),"depth":d,"node_index":n,"component":c})
     return out
 
 
 def build_combined_dataset(entries, name=""):
     if not entries: raise ValueError("No components selected")
     h,w=entries[0]["W_map"].shape; L=len(entries[0]["H_spec"])
-    X=np.zeros((h*w,L),dtype=np.float32); labels=[]
+    X=np.zeros((h*w,L),dtype=np.float32); labels=[]; used_child=False
     for e in entries:
-        X += np.outer(e["W_map"].reshape(-1).astype(np.float32), e["H_spec"].astype(np.float32))
+        child = e.get("child_matrix", None)
+        if child is not None:
+            X += np.asarray(child, dtype=np.float32)
+            used_child = True
+        else:
+            X += np.outer(e["W_map"].reshape(-1).astype(np.float32), e["H_spec"].astype(np.float32))
         labels.append(e["label"])
-    return {"name":name or f"Combined {len(entries)} component(s)", "members":labels, "matrix":X, "image":np.sum(X,axis=1).reshape(h,w), "spectrum":np.sum(X,axis=0)}
+    return {"name":name or f"Combined {len(entries)} component(s)", "members":labels, "matrix":X, "image":np.sum(X,axis=1).reshape(h,w), "spectrum":np.sum(X,axis=0), "uses_child_matrix": used_child}
 
 
 def plot_combined(fig, combined, axis, cmap="viridis"):
@@ -1369,10 +1456,10 @@ class AnalysisWorker(QThread):
 
 class RR2NMFGui(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v4.7 full from v4.4"); self.resize(1850,1080)
+        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v4.8 integrated"); self.resize(1850,1080)
         self.cube=None; self.original_cube=None; self.roi_cube=None; self.X=None; self.image_shape=None
         self.axis_info=make_default_axis_info((1,1,1)); self.roi_axis_info=make_default_axis_info((1,1,1))
-        self.conv_result=None; self.rr_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]
+        self.conv_result=None; self.rr_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.bg_applied=False; self._raw_mouse_press=None
         self.eds_elements=[]; self.eels_elements=[]; self.eds_sources=[]; self.eels_sources=[]; self.eds_hits=[]; self.eels_hits=[]
         self._syncing=False; self._build_ui()
 
@@ -1452,7 +1539,7 @@ class RR2NMFGui(QMainWindow):
         self.log=QTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(180); cl.addWidget(QLabel("Log")); cl.addWidget(self.log); cl.addStretch(1)
 
         self.tabs=QTabWidget(); split.addWidget(self.tabs)
-        self.canvas_raw=Canvas(14,5.5); self.tabs.addTab(PlotPanel(self.canvas_raw),"Raw Data")
+        self.canvas_raw=Canvas(14,5.5); self._connect_raw_roi_mouse(); self.tabs.addTab(PlotPanel(self.canvas_raw),"Raw Data")
         self.canvas_tree=Canvas(14,10); tree_page=QWidget(); tl=QVBoxLayout(tree_page); tl.addWidget(PlotPanel(self.canvas_tree),5); tl.addWidget(self._build_combine_panel(),2); self.tabs.addTab(tree_page,"rr-NMF Tree")
         self.canvas_conv=Canvas(16,10); self.tabs.addTab(PlotPanel(self.canvas_conv),"Conventional NMF")
         self.canvas_energy=Canvas(12,8); self.tabs.addTab(PlotPanel(self.canvas_energy),"Energy Summary")
@@ -1468,7 +1555,8 @@ class RR2NMFGui(QMainWindow):
         self.btn_create_combined=QPushButton("Create Combined Set"); self.btn_create_combined.clicked.connect(self.create_combined_rr_set)
         self.btn_preview_selected=QPushButton("Preview Selected"); self.btn_preview_selected.clicked.connect(self.preview_selected_rr_components)
         self.btn_export_combined=QPushButton("Export Selected Combined NPZ"); self.btn_export_combined.clicked.connect(self.export_combined_rr_set)
-        for w in [self.edit_combined_name,self.btn_create_combined,self.btn_preview_selected,self.btn_export_combined]: mid.addWidget(w)
+        self.btn_run_combined=QPushButton("Run rr-NMF from Combined Set"); self.btn_run_combined.clicked.connect(self.run_rr_from_combined_set)
+        for w in [self.edit_combined_name,self.btn_create_combined,self.btn_preview_selected,self.btn_export_combined,self.btn_run_combined]: mid.addWidget(w)
         self.list_rr_combined=QListWidget(); self.list_rr_combined.currentRowChanged.connect(lambda _: self.preview_combined_rr_set(True))
         self.canvas_combined=Canvas(10,4); l.addLayout(left,2); l.addLayout(mid,1); l.addWidget(self.list_rr_combined,2); l.addWidget(PlotPanel(self.canvas_combined),4)
         return box
@@ -1634,7 +1722,7 @@ class RR2NMFGui(QMainWindow):
         if not path: return
         try:
             cube,meta,axis=load_hyperspectral_file(path); cube=nonnegative(cube,"clip")
-            self.cube=cube.copy(); self.original_cube=cube.copy(); self.axis_info=axis; self.roi_axis_info=axis; self.conv_result=None; self.rr_result=None; self.rr_combined_sets=[]
+            self.cube=cube.copy(); self.original_cube=cube.copy(); self.axis_info=axis; self.roi_axis_info=axis; self.bg_applied=False; self.conv_result=None; self.rr_result=None; self.rr_combined_sets=[]
             self.lbl_file.setText(os.path.basename(path)); self.lbl_shape.setText(str(cube.shape)); self.set_roi_full(); self.set_background_roi_full(); self.refresh_views(); self.refresh_spectrum_sources(); self.append_log(f"Loaded {cube.shape}")
         except Exception as e: QMessageBox.critical(self,"Load failed",str(e)); self.append_log(traceback.format_exc())
 
@@ -1693,6 +1781,44 @@ class RR2NMFGui(QMainWindow):
         axis=AxisInfo(energy_axis=self.axis_info.energy_axis[l0:l1].copy() if len(self.axis_info.energy_axis)==l else np.arange(ll,dtype=np.float32), energy_unit=self.axis_info.energy_unit, energy_label=self.axis_info.energy_label)
         return roi,X,(hh,ww),axis
 
+    def current_spatial_roi_bounds(self):
+        if self.cube is None: return (0,0,0,0)
+        y,x,_=self.cube.shape
+        y0=max(0,min(self.spin_y0.value(),y)); y1=max(0,min(self.spin_y1.value(),y))
+        x0=max(0,min(self.spin_x0.value(),x)); x1=max(0,min(self.spin_x1.value(),x))
+        return y0,y1,x0,x1
+
+    def current_channel_bounds(self):
+        if self.cube is None: return (0,0)
+        L=self.cube.shape[2]
+        l0=max(0,min(self.spin_l0.value(),L)); l1=max(0,min(self.spin_l1.value(),L))
+        return l0,l1
+
+    def _connect_raw_roi_mouse(self):
+        self.canvas_raw.mpl_connect("button_press_event", self.on_raw_mouse_press)
+        self.canvas_raw.mpl_connect("button_release_event", self.on_raw_mouse_release)
+
+    def on_raw_mouse_press(self, event):
+        if self.cube is None or event.inaxes is None or event.xdata is None or event.ydata is None:
+            return
+        # Left panel only: it is the image axis and has image data.
+        if not getattr(event.inaxes, "images", []):
+            return
+        self._raw_mouse_press=(float(event.xdata), float(event.ydata))
+
+    def on_raw_mouse_release(self, event):
+        if self.cube is None or self._raw_mouse_press is None or event.inaxes is None or event.xdata is None or event.ydata is None:
+            self._raw_mouse_press=None; return
+        if not getattr(event.inaxes, "images", []):
+            self._raw_mouse_press=None; return
+        x0,y0=self._raw_mouse_press; x1,y1=float(event.xdata),float(event.ydata)
+        self._raw_mouse_press=None
+        yy,xx,_=self.cube.shape
+        xa,xb=sorted([int(round(x0)), int(round(x1))]); ya,yb=sorted([int(round(y0)), int(round(y1))])
+        xa=max(0,min(xa,xx-1)); xb=max(xa+1,min(xb+1,xx)); ya=max(0,min(ya,yy-1)); yb=max(ya+1,min(yb+1,yy))
+        self.spin_x0.setValue(xa); self.spin_x1.setValue(xb); self.spin_y0.setValue(ya); self.spin_y1.setValue(yb)
+        self.refresh_views(); self.refresh_spectrum_sources()
+
     def use_current_roi_for_background(self):
         if self.cube is None: return
         y,x,_=self.cube.shape; self.bg_y0.setValue(max(0,min(self.spin_y0.value(),y))); self.bg_y1.setValue(max(0,min(self.spin_y1.value(),y))); self.bg_x0.setValue(max(0,min(self.spin_x0.value(),x))); self.bg_x1.setValue(max(0,min(self.spin_x1.value(),x)))
@@ -1746,6 +1872,7 @@ class RR2NMFGui(QMainWindow):
                     f'Applied: global r={fit["r"]:.4g}, pixelwise A, RMSE={fit["rmse"]:.4g}'
                 )
 
+            self.bg_applied = True
             self.conv_result = None
             self.rr_result = None
             self.refresh_views()
@@ -1757,7 +1884,7 @@ class RR2NMFGui(QMainWindow):
 
     def reset_background_correction(self):
         if self.original_cube is None: return
-        self.cube=self.original_cube.copy(); self.conv_result=None; self.rr_result=None; self.lbl_bg.setText("Reset to original"); self.refresh_views(); self.refresh_spectrum_sources()
+        self.cube=self.original_cube.copy(); self.bg_applied=False; self.conv_result=None; self.rr_result=None; self.lbl_bg.setText("Reset to original"); self.refresh_views(); self.refresh_spectrum_sources()
 
     def collect_params(self):
         return {"run_conventional":self.chk_conv.isChecked(),"conv_components":self.spin_k.value(),"run_rr":self.chk_rr.isChecked(),"rr_rank":self.spin_rank.value(),"rr_depth":self.spin_depth.value(),"residual_mode":self.combo_res_mode.currentText(),"residual_nonnegative":self.combo_res_nn.currentText(),"decompose_residual_branch":self.chk_decomp_res.isChecked(),"max_iter":self.spin_iter.value(),"init":self.combo_init.currentText(),"solver":self.combo_solver.currentText(),"random_state":self.spin_seed.value(),"chunk_size":self.spin_chunk.value()}
@@ -1778,7 +1905,13 @@ class RR2NMFGui(QMainWindow):
         cmap=self.combo_cmap.currentText() if hasattr(self,"combo_cmap") else "viridis"
         if self.cube is not None:
             try:
-                roi,_,_,axis=self.get_roi_cube_and_X(); self.roi_cube=roi; self.roi_axis_info=axis; plot_raw(self.canvas_raw.fig,roi,axis,cmap); self.canvas_raw.set_base(); self.canvas_raw.draw()
+                roi,_,_,axis=self.get_roi_cube_and_X(); self.roi_cube=roi; self.roi_axis_info=axis
+                y0,y1,x0,x1=self.current_spatial_roi_bounds()
+                raw_roi=None
+                if self.original_cube is not None:
+                    l0,l1=self.current_channel_bounds()
+                    raw_roi=self.original_cube[y0:y1,x0:x1,l0:l1].astype(np.float32,copy=False)
+                plot_raw(self.canvas_raw.fig,roi,axis,cmap,full_cube=(self.original_cube if self.original_cube is not None else self.cube),spatial_roi=(y0,y1,x0,x1),raw_roi_before_bg=raw_roi,corrected_roi=roi,bg_applied=getattr(self,"bg_applied",False)); self.canvas_raw.set_base(); self.canvas_raw.draw()
             except Exception: self.canvas_raw.clear()
         if self.rr_result is not None: plot_rr(self.canvas_tree.fig,self.rr_result,self.roi_axis_info,cmap,X_for_weight=getattr(self,"X",None),overlay_mode="max"); self.canvas_tree.set_base(); self.canvas_tree.draw()
         else: self.canvas_tree.clear()
@@ -1819,6 +1952,27 @@ class RR2NMFGui(QMainWindow):
         if not path: return
         if not path.lower().endswith(".npz"): path += ".npz"
         c=self.rr_combined_sets[row]; np.savez_compressed(path,matrix=c["matrix"],image=c["image"],spectrum=c["spectrum"],members=np.array(c["members"],dtype=object),name=np.array(c["name"],dtype=object),energy_axis=self.roi_axis_info.energy_axis)
+
+    def run_rr_from_combined_set(self):
+        row=self.list_rr_combined.currentRow()
+        if row<0 or row>=len(self.rr_combined_sets):
+            QMessageBox.warning(self,"No selection","Create and select a combined set first."); return
+        c=self.rr_combined_sets[row]
+        try:
+            X=np.asarray(c["matrix"],dtype=np.float32)
+            if self.image_shape is None:
+                raise ValueError("Run an initial ROI analysis first so image shape is known.")
+            params=self.collect_params()
+            params["run_conventional"]=False
+            params["run_rr"]=True
+            self.btn_run.setEnabled(False)
+            self.worker=AnalysisWorker(X,self.image_shape,params)
+            self.worker.finished_ok.connect(self.on_analysis_finished)
+            self.worker.failed.connect(self.on_analysis_failed)
+            self.worker.start()
+            self.append_log(f"Running rr-NMF from combined set: {c.get('name','Combined')} | members={', '.join(c.get('members', []))} | exact_child_matrix={c.get('uses_child_matrix', False)}")
+        except Exception as e:
+            QMessageBox.critical(self,"Combined rr-NMF failed",str(e)); self.append_log(traceback.format_exc())
 
     def collect_spectrum_sources(self):
         sources = []
