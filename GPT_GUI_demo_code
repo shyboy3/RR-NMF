@@ -1,6 +1,6 @@
 
 """
-rr2_nmf_gui_ver5_0_manual_depth_workflow.py
+rr2_nmf_gui_ver5_1_multi_manual_depth.py
 
 Single-file rr-NMF GUI based on the v4.4 workflow, with EELS Interpretation added.
 This file keeps the v4.4-style core workflow in one executable Python file.
@@ -1010,49 +1010,117 @@ class PlotPanel(QWidget):
         lay.addWidget(self.scroll)
 
 
-def plot_raw(fig, cube, axis, cmap="viridis", full_cube=None, spatial_roi=None, raw_roi_before_bg=None, corrected_roi=None, bg_applied=False):
-    """Raw-data view with visible spatial ROI and final ROI mean/std spectrum.
+def plot_raw(
+    fig,
+    cube,
+    axis,
+    cmap="viridis",
+    full_cube=None,
+    spatial_roi=None,
+    raw_roi_before_bg=None,
+    corrected_roi=None,
+    bg_applied=False,
+    selected_pixel=None,
+    corrected_full_cube=None,
+):
+    """Raw-data view with click-selected single-pixel spectrum.
 
-    full_cube/spatial_roi are used only to draw the selection rectangle. The spectrum is always
-    calculated from the final analysis ROI. If background correction has been applied, raw, bg,
-    and raw-bg spectra are shown together.
+    The spinbox ROI still defines the analysis ROI. Mouse interaction on this tab now only
+    selects one spatial pixel for inspection and does not modify the analysis ROI.
     """
-    fig.clear(); fig.set_size_inches(16,6.2, forward=True)
-    ax = fig.add_subplot(121); sp = fig.add_subplot(122)
+    fig.clear()
+    if bg_applied and corrected_full_cube is not None:
+        fig.set_size_inches(16, 9.2, forward=True)
+        gs = fig.add_gridspec(2, 2, width_ratios=[1.0, 1.35], height_ratios=[1, 1])
+        ax = fig.add_subplot(gs[0, 0])
+        ax_corr = fig.add_subplot(gs[1, 0])
+        sp = fig.add_subplot(gs[:, 1])
+    else:
+        fig.set_size_inches(16, 6.4, forward=True)
+        gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 1.35])
+        ax = fig.add_subplot(gs[0, 0])
+        ax_corr = None
+        sp = fig.add_subplot(gs[0, 1])
+
     show_cube = full_cube if full_cube is not None else cube
-    img = np.sum(show_cube, axis=2)
-    im = ax.imshow(img, cmap=cmap, origin="upper", aspect="equal")
-    ax.set_title("Raw sum image with selected spatial ROI", pad=34)
+    raw_img = np.sum(show_cube, axis=2)
+    im = ax.imshow(raw_img, cmap=cmap, origin="upper", aspect="equal")
+    ax.set_title("Raw sum image: click a pixel to inspect spectrum", pad=18)
     ax.set_xlabel("X"); ax.set_ylabel("Y")
+
     if spatial_roi is not None:
-        y0,y1,x0,x1 = spatial_roi
-        rect = Rectangle((x0, y0), max(1, x1-x0), max(1, y1-y0), fill=False, linewidth=2.0)
+        y0, y1, x0, x1 = spatial_roi
+        rect = Rectangle((x0, y0), max(1, x1 - x0), max(1, y1 - y0), fill=False, linewidth=1.8)
         ax.add_patch(rect)
-        # Keep the ROI text inside the image area so it never gets squeezed between
-        # the title and the axes when ROI starts at y=0.
         ax.text(
-            0.02, 0.98, f"ROI x[{x0}:{x1}] y[{y0}:{y1}]",
+            0.02, 0.98, f"Analysis ROI x[{x0}:{x1}] y[{y0}:{y1}]",
             transform=ax.transAxes,
-            fontsize=10, va="top", ha="left", clip_on=True,
+            fontsize=9, va="top", ha="left", clip_on=True,
+            bbox=dict(facecolor="white", alpha=0.82, edgecolor="black", linewidth=0.3, pad=2.5),
+        )
+
+    if selected_pixel is not None:
+        px, py = selected_pixel
+        ax.plot([px], [py], marker="x", markersize=8, markeredgewidth=1.8)
+        ax.text(
+            0.02, 0.08, f"Selected pixel: x={px}, y={py}",
+            transform=ax.transAxes,
+            fontsize=9, va="bottom", ha="left", clip_on=True,
             bbox=dict(facecolor="white", alpha=0.82, edgecolor="black", linewidth=0.3, pad=2.5),
         )
     add_colorbar(fig, ax, im)
 
-    src = raw_roi_before_bg if raw_roi_before_bg is not None else cube
-    mean_raw, std_raw = roi_mean_std_spectrum(src)
-    x = axis.energy_axis if len(axis.energy_axis)==len(mean_raw) else np.arange(len(mean_raw))
-    sp.plot(x, mean_raw, linewidth=1.4, label="ROI raw mean")
-    sp.fill_between(x, mean_raw-std_raw, mean_raw+std_raw, alpha=0.18, label="ROI raw ±1σ")
+    if ax_corr is not None:
+        corr_img = np.sum(corrected_full_cube, axis=2)
+        im2 = ax_corr.imshow(corr_img, cmap=cmap, origin="upper", aspect="equal")
+        ax_corr.set_title("Background-corrected raw image", pad=12)
+        ax_corr.set_xlabel("X"); ax_corr.set_ylabel("Y")
+        if spatial_roi is not None:
+            y0, y1, x0, x1 = spatial_roi
+            ax_corr.add_patch(Rectangle((x0, y0), max(1, x1 - x0), max(1, y1 - y0), fill=False, linewidth=1.8))
+        if selected_pixel is not None:
+            px, py = selected_pixel
+            ax_corr.plot([px], [py], marker="x", markersize=8, markeredgewidth=1.8)
+        add_colorbar(fig, ax_corr, im2)
+
+    # Spectrum: single clicked pixel. If no pixel is selected yet, use the analysis-ROI mean
+    # as a safe default and label it explicitly.
+    src_raw = raw_roi_before_bg if raw_roi_before_bg is not None else cube
+    src_corr = corrected_roi if corrected_roi is not None else cube
+    if selected_pixel is not None:
+        px, py = selected_pixel
+        l0_len = src_corr.shape[-1]
+        if full_cube is not None and 0 <= py < full_cube.shape[0] and 0 <= px < full_cube.shape[1]:
+            # selected pixel in full-image coordinates; channel range is already matched to axis
+            # by caller via current_channel_bounds.
+            raw_spec = np.asarray(src_raw[py, px, :], dtype=np.float64) if src_raw.ndim == 3 and src_raw.shape[:2] == full_cube.shape[:2] else None
+            corr_spec = np.asarray(src_corr[py, px, :], dtype=np.float64) if src_corr.ndim == 3 and src_corr.shape[:2] == full_cube.shape[:2] else None
+        else:
+            raw_spec = corr_spec = None
+        if raw_spec is None:
+            raw_spec, _ = roi_mean_std_spectrum(src_raw)
+        if corr_spec is None:
+            corr_spec, _ = roi_mean_std_spectrum(src_corr)
+        spec_title = f"Single-pixel spectrum x={px}, y={py}"
+    else:
+        raw_spec, raw_std = roi_mean_std_spectrum(src_raw)
+        corr_spec, corr_std = roi_mean_std_spectrum(src_corr)
+        spec_title = "Analysis ROI mean spectrum (click image for one pixel)"
+
+    x = axis.energy_axis if len(axis.energy_axis) == len(raw_spec) else np.arange(len(raw_spec))
+    sp.plot(x, raw_spec, linewidth=1.4, label="raw pixel" if selected_pixel is not None else "ROI raw mean")
+    if selected_pixel is None:
+        sp.fill_between(x, raw_spec - raw_std, raw_spec + raw_std, alpha=0.16, label="ROI raw ±1σ")
     if bg_applied and corrected_roi is not None:
-        mean_corr, std_corr = roi_mean_std_spectrum(corrected_roi)
-        mean_bg = mean_raw - mean_corr
-        sp.plot(x, mean_bg, linewidth=1.2, label="estimated BG = raw - corrected")
-        sp.plot(x, mean_corr, linewidth=1.5, label="raw - BG / corrected mean")
-        sp.fill_between(x, mean_corr-std_corr, mean_corr+std_corr, alpha=0.12, label="corrected ±1σ")
-    sp.set_title("Final ROI spectrum: mean / deviation")
+        bg_spec = raw_spec - corr_spec
+        sp.plot(x, bg_spec, linewidth=1.2, label="estimated BG = raw - corrected")
+        sp.plot(x, corr_spec, linewidth=1.5, label="raw - BG / corrected")
+        if selected_pixel is None:
+            sp.fill_between(x, corr_spec - corr_std, corr_spec + corr_std, alpha=0.12, label="corrected ±1σ")
+    sp.set_title(spec_title)
     sp.set_xlabel(axis.energy_label); sp.set_ylabel("Intensity")
     sp.grid(True, alpha=.3); sp.legend(fontsize=8)
-    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    fig.subplots_adjust(left=.055, right=.97, top=.93, bottom=.09, wspace=.34, hspace=.34)
 
 def plot_conv(fig, conv, axis, cmap="viridis", maxn=20):
     fig.clear()
@@ -1114,7 +1182,9 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
     for d, nodes in enumerate(depths):
         axd = fig.add_subplot(gs[starts[d], :])
         axd.axis("off")
-        axd.text(0, 0.5, f"Depth {d}", fontweight="bold", fontsize=13, va="center")
+        combined_count = sum(1 for _ns in nodes if str(getattr(_ns, "path", "")).startswith("manualD"))
+        header = f"Depth {d}" + (f"   |   {combined_count} combined-data node(s)" if combined_count else "")
+        axd.text(0, 0.5, header, fontweight="bold", fontsize=13, va="center")
 
         for i, ns in enumerate(nodes):
             wr = i // max_nodes
@@ -1130,7 +1200,8 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                 hspec = np.asarray(ns.component_spectra[ci])
 
                 im = ax.imshow(wmap, cmap=cmap, origin="upper", aspect="equal")
-                ax.set_title(f"D{d} N{i} C{ci}", fontsize=10)
+                node_tag = "COMBINED DATA\n" if str(getattr(ns, "path", "")).startswith("manualD") else ""
+                ax.set_title(f"{node_tag}D{d} N{i} C{ci}", fontsize=10)
                 ax.set_xticks([])
                 ax.set_yticks([])
                 add_colorbar(fig, ax, im)
@@ -1172,7 +1243,8 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
             if ns.residual_image is not None:
                 ax = fig.add_subplot(gs[br + 2, bc:bc + rank])
                 im = ax.imshow(ns.residual_image, cmap=cmap, origin="upper", aspect="equal")
-                ax.set_title(f"D{d} N{i} Residual", fontsize=10)
+                node_tag = "COMBINED DATA\n" if str(getattr(ns, "path", "")).startswith("manualD") else ""
+                ax.set_title(f"{node_tag}D{d} N{i} Residual", fontsize=10)
                 ax.set_xticks([])
                 ax.set_yticks([])
                 add_colorbar(fig, ax, im)
@@ -1500,10 +1572,10 @@ class AnalysisWorker(QThread):
 
 class RR2NMFGui(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v4.9 integrated"); self.resize(1850,1080)
+        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v5.1 multi-manual-depth"); self.resize(1850,1080)
         self.cube=None; self.original_cube=None; self.roi_cube=None; self.X=None; self.image_shape=None
         self.axis_info=make_default_axis_info((1,1,1)); self.roi_axis_info=make_default_axis_info((1,1,1))
-        self.conv_result=None; self.rr_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.bg_applied=False; self._raw_mouse_press=None
+        self.conv_result=None; self.rr_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.bg_applied=False; self._raw_mouse_press=None; self.selected_raw_pixel=None
         self.eds_elements=[]; self.eels_elements=[]; self.eds_sources=[]; self.eels_sources=[]; self.eds_hits=[]; self.eels_hits=[]
         self._syncing=False; self._build_ui()
 
@@ -1563,8 +1635,10 @@ class RR2NMFGui(QMainWindow):
         self.chk_rr=QCheckBox("Run recursive NMF"); self.chk_rr.setChecked(True)
         self.spin_rank=QSpinBox(); self.spin_rank.setRange(2,10); self.spin_rank.setValue(2)
         self.spin_depth=QSpinBox(); self.spin_depth.setRange(0,8); self.spin_depth.setValue(3)
-        self.chk_manual_depth=QCheckBox("Manual depth: use Combined Sets as next-depth nodes")
+        self.chk_manual_depth=QCheckBox("Manual depth workflow: merge selected nodes before chosen depth")
         self.spin_manual_depth=QSpinBox(); self.spin_manual_depth.setRange(1,8); self.spin_manual_depth.setValue(2)
+        self.spin_manual_depth.valueChanged.connect(lambda *_: self.refresh_rr_component_list() if hasattr(self, "list_rr_components") else None)
+        self.chk_manual_depth.stateChanged.connect(lambda *_: self.refresh_rr_component_list() if hasattr(self, "list_rr_components") else None)
         self.combo_res_mode=QComboBox(); self.combo_res_mode.addItems(["discard","redistribute_equal","explicit_branch"]); self.combo_res_mode.setCurrentText("redistribute_equal")
         self.combo_res_nn=QComboBox(); self.combo_res_nn.addItems(["clip","abs","shift"])
         self.chk_decomp_res=QCheckBox("Decompose residual branch")
@@ -1580,9 +1654,9 @@ class RR2NMFGui(QMainWindow):
         self.combo_cmap=QComboBox(); self.combo_cmap.addItems(["viridis","plasma","inferno","magma","cividis","gray","turbo","coolwarm","jet"]); self.combo_cmap.currentTextChanged.connect(self.refresh_views)
         vg=QGroupBox("View / Run"); vf=QFormLayout(vg); vf.addRow("Colormap",self.combo_cmap)
         self.btn_run=QPushButton("Run Full Auto Analysis on ROI"); self.btn_run.clicked.connect(self.run_analysis)
-        self.btn_run_auto_stage=QPushButton("Manual Step 1: Run Auto Stage to Manual Depth-1")
+        self.btn_run_auto_stage=QPushButton("Manual Step: Run/Refresh to Merge Source Depth")
         self.btn_run_auto_stage.clicked.connect(self.run_auto_until_manual_depth)
-        self.btn_continue_manual=QPushButton("Manual Step 2: Continue from Merged Sets")
+        self.btn_continue_manual=QPushButton("Continue Full rr-NMF with All Manual Merges")
         self.btn_continue_manual.clicked.connect(self.continue_from_manual_merge)
         self.btn_export=QPushButton("Export CSV"); self.btn_export.clicked.connect(self.export_csv)
         vf.addRow(self.btn_run); vf.addRow(self.btn_run_auto_stage); vf.addRow(self.btn_continue_manual); vf.addRow(self.btn_export); cl.addWidget(vg)
@@ -1599,9 +1673,9 @@ class RR2NMFGui(QMainWindow):
         self.table_nodes=QTableWidget(); self.tabs.addTab(self.table_nodes,"Node Table")
 
     def _build_combine_panel(self):
-        box=QGroupBox("Manual Depth Merge: select components from Manual Depth-1 and create merged nodes"); l=QHBoxLayout(box)
+        box=QGroupBox("Manual Multi-Depth Merge: choose target depth, merge previous-depth components, then continue"); l=QHBoxLayout(box)
         left=QVBoxLayout()
-        self.lbl_manual_component_hint=QLabel("Available components. In manual-depth workflow, create sets from depth = Manual depth - 1.")
+        self.lbl_manual_component_hint=QLabel("Available components. Set Manual apply depth; this panel shows components from depth = Manual depth - 1.")
         self.lbl_manual_component_hint.setWordWrap(True)
         left.addWidget(self.lbl_manual_component_hint)
         self.list_rr_components=QListWidget(); self.list_rr_components.setSelectionMode(QListWidget.MultiSelection); left.addWidget(self.list_rr_components)
@@ -1613,12 +1687,12 @@ class RR2NMFGui(QMainWindow):
         self.btn_preview_selected.clicked.connect(self.preview_selected_rr_components)
         self.btn_export_combined=QPushButton("Export Selected Merged NPZ")
         self.btn_export_combined.clicked.connect(self.export_combined_rr_set)
-        hint=QLabel("Workflow: 1) run auto stage to Manual depth-1, 2) select components from that previous depth, 3) create one or more merged sets, 4) continue from merged sets.")
+        hint=QLabel("Workflow can be repeated: set Manual apply depth D, run/refresh to depth D-1, merge components, continue. Then choose another D and repeat. All saved manual merges are reused.")
         hint.setWordWrap(True)
         for w in [self.edit_combined_name,self.btn_create_combined,self.btn_preview_selected,self.btn_export_combined,hint]: mid.addWidget(w)
         mid.addStretch(1)
 
-        right=QVBoxLayout(); right.addWidget(QLabel("Merged Sets for Manual Depth"))
+        right=QVBoxLayout(); right.addWidget(QLabel("Merged Sets for Current Manual Depth"))
         self.list_rr_combined=QListWidget(); self.list_rr_combined.currentRowChanged.connect(lambda _: self.preview_combined_rr_set(True))
         right.addWidget(self.list_rr_combined)
         self.btn_delete_combined=QPushButton("Delete Selected Merged Set")
@@ -1790,7 +1864,7 @@ class RR2NMFGui(QMainWindow):
         if not path: return
         try:
             cube,meta,axis=load_hyperspectral_file(path); cube=nonnegative(cube,"clip")
-            self.cube=cube.copy(); self.original_cube=cube.copy(); self.axis_info=axis; self.roi_axis_info=axis; self.bg_applied=False; self.conv_result=None; self.rr_result=None; self.rr_combined_sets=[]
+            self.cube=cube.copy(); self.original_cube=cube.copy(); self.axis_info=axis; self.roi_axis_info=axis; self.bg_applied=False; self.conv_result=None; self.rr_result=None; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.selected_raw_pixel=None
             self.lbl_file.setText(os.path.basename(path)); self.lbl_shape.setText(str(cube.shape)); self.set_roi_full(); self.set_background_roi_full(); self.refresh_views(); self.refresh_spectrum_sources(); self.append_log(f"Loaded {cube.shape}")
         except Exception as e: QMessageBox.critical(self,"Load failed",str(e)); self.append_log(traceback.format_exc())
 
@@ -1864,28 +1938,19 @@ class RR2NMFGui(QMainWindow):
 
     def _connect_raw_roi_mouse(self):
         self.canvas_raw.mpl_connect("button_press_event", self.on_raw_mouse_press)
-        self.canvas_raw.mpl_connect("button_release_event", self.on_raw_mouse_release)
 
     def on_raw_mouse_press(self, event):
         if self.cube is None or event.inaxes is None or event.xdata is None or event.ydata is None:
             return
-        # Left panel only: it is the image axis and has image data.
         if not getattr(event.inaxes, "images", []):
             return
-        self._raw_mouse_press=(float(event.xdata), float(event.ydata))
-
-    def on_raw_mouse_release(self, event):
-        if self.cube is None or self._raw_mouse_press is None or event.inaxes is None or event.xdata is None or event.ydata is None:
-            self._raw_mouse_press=None; return
-        if not getattr(event.inaxes, "images", []):
-            self._raw_mouse_press=None; return
-        x0,y0=self._raw_mouse_press; x1,y1=float(event.xdata),float(event.ydata)
-        self._raw_mouse_press=None
-        yy,xx,_=self.cube.shape
-        xa,xb=sorted([int(round(x0)), int(round(x1))]); ya,yb=sorted([int(round(y0)), int(round(y1))])
-        xa=max(0,min(xa,xx-1)); xb=max(xa+1,min(xb+1,xx)); ya=max(0,min(ya,yy-1)); yb=max(ya+1,min(yb+1,yy))
-        self.spin_x0.setValue(xa); self.spin_x1.setValue(xb); self.spin_y0.setValue(ya); self.spin_y1.setValue(yb)
-        self.refresh_views(); self.refresh_spectrum_sources()
+        yy, xx, _ = self.cube.shape
+        px = max(0, min(int(round(float(event.xdata))), xx - 1))
+        py = max(0, min(int(round(float(event.ydata))), yy - 1))
+        self.selected_raw_pixel = (px, py)
+        self.append_log(f"Selected raw pixel spectrum: x={px}, y={py}")
+        self.refresh_views()
+        self.refresh_spectrum_sources()
 
     def use_current_roi_for_background(self):
         if self.cube is None: return
@@ -1954,13 +2019,37 @@ class RR2NMFGui(QMainWindow):
         if self.original_cube is None: return
         self.cube=self.original_cube.copy(); self.bg_applied=False; self.conv_result=None; self.rr_result=None; self.lbl_bg.setText("Reset to original"); self.refresh_views(); self.refresh_spectrum_sources()
 
-    def collect_params(self, include_manual=True):
+    def collect_params(self, include_manual=True, max_manual_depth=None):
         params={"run_conventional":self.chk_conv.isChecked(),"conv_components":self.spin_k.value(),"run_rr":self.chk_rr.isChecked(),"rr_rank":self.spin_rank.value(),"rr_depth":self.spin_depth.value(),"residual_mode":self.combo_res_mode.currentText(),"residual_nonnegative":self.combo_res_nn.currentText(),"decompose_residual_branch":self.chk_decomp_res.isChecked(),"max_iter":self.spin_iter.value(),"init":self.combo_init.currentText(),"solver":self.combo_solver.currentText(),"random_state":self.spin_seed.value(),"chunk_size":self.spin_chunk.value()}
         if include_manual and getattr(self,"chk_manual_depth",None) is not None and self.chk_manual_depth.isChecked():
-            md=int(self.spin_manual_depth.value())
-            if self.rr_combined_sets:
-                params["manual_groups"]={md:[{"name":c.get("name",f"Combined {i+1}"),"members":c.get("members",[]),"X":np.asarray(c["matrix"],dtype=np.float32)} for i,c in enumerate(self.rr_combined_sets)]}
+            manual_groups={}
+            group_dict=getattr(self,"manual_depth_groups",{}) or {}
+            for md, sets in sorted(group_dict.items()):
+                md_int=int(md)
+                if max_manual_depth is not None and md_int > int(max_manual_depth):
+                    continue
+                valid=[]
+                for i,c in enumerate(sets):
+                    if "matrix" not in c:
+                        continue
+                    valid.append({"name":c.get("name",f"Merged D{md_int}.{i+1}"),"members":c.get("members",[]),"X":np.asarray(c["matrix"],dtype=np.float32)})
+                if valid:
+                    manual_groups[md_int]=valid
+            if manual_groups:
+                params["manual_groups"]=manual_groups
         return params
+
+    def _current_manual_depth(self):
+        return int(self.spin_manual_depth.value()) if hasattr(self,"spin_manual_depth") else 1
+
+    def _get_current_depth_sets(self):
+        md=self._current_manual_depth()
+        if not hasattr(self,"manual_depth_groups") or self.manual_depth_groups is None:
+            self.manual_depth_groups={}
+        return self.manual_depth_groups.setdefault(md, [])
+
+    def _sync_current_combined_alias(self):
+        self.rr_combined_sets=self._get_current_depth_sets()
 
     def _set_run_buttons_enabled(self, enabled: bool):
         for name in ("btn_run", "btn_run_auto_stage", "btn_continue_manual"):
@@ -1969,16 +2058,19 @@ class RR2NMFGui(QMainWindow):
                 b.setEnabled(enabled)
 
     def run_auto_until_manual_depth(self):
-        """Manual workflow step 1: run automatic rr-NMF only up to manual_depth - 1."""
+        """Run rr-NMF only to the source depth for the currently selected manual merge.
+
+        For manual target depth D, this computes only through D-1. Previously saved manual
+        merges at depths < D are applied, so the D-1 candidates reflect earlier manual choices.
+        """
         if not self.chk_manual_depth.isChecked():
-            QMessageBox.warning(self, "Manual depth disabled", "Enable 'Manual depth' first."); return
-        md = int(self.spin_manual_depth.value())
+            QMessageBox.warning(self, "Manual depth disabled", "Enable 'Manual depth workflow' first."); return
+        md = self._current_manual_depth()
         stop_depth = max(0, md - 1)
         try: roi,X,shape,axis=self.get_roi_cube_and_X()
         except Exception as e: QMessageBox.warning(self,"ROI/Data error",str(e)); return
         self.roi_cube=roi; self.X=X; self.image_shape=shape; self.roi_axis_info=axis
-        self.rr_combined_sets=[]
-        params=self.collect_params(include_manual=False)
+        params=self.collect_params(include_manual=True, max_manual_depth=md-1)
         params["run_rr"] = True
         params["rr_depth"] = stop_depth
         self._set_run_buttons_enabled(False)
@@ -1986,27 +2078,30 @@ class RR2NMFGui(QMainWindow):
         self.worker.finished_ok.connect(self.on_analysis_finished)
         self.worker.failed.connect(self.on_analysis_failed)
         self.worker.start()
-        self.append_log(f"Manual Step 1: auto rr-NMF running only to depth {stop_depth}. After it finishes, select components from depth {stop_depth} and create merged sets.")
+        lower=[d for d in sorted((getattr(self,"manual_depth_groups",{}) or {}).keys()) if int(d)<md and self.manual_depth_groups[d]]
+        self.append_log(f"Manual step: running rr-NMF to source depth {stop_depth} for target depth {md}. Earlier manual merge depths used: {lower if lower else 'none'}. Select depth {stop_depth} components and create one or more merged sets for depth {md}.")
 
     def continue_from_manual_merge(self):
-        """Manual workflow step 2: recompute full rr-NMF and replace manual depth nodes with merged sets."""
+        """Run the full rr-NMF using all saved manual merge groups at their target depths."""
         if not self.chk_manual_depth.isChecked():
-            QMessageBox.warning(self, "Manual depth disabled", "Enable 'Manual depth' first."); return
-        md = int(self.spin_manual_depth.value())
-        if not self.rr_combined_sets:
-            QMessageBox.warning(self, "No merged sets", "Create at least one merged set from Manual depth-1 components first."); return
+            QMessageBox.warning(self, "Manual depth disabled", "Enable 'Manual depth workflow' first."); return
+        self._sync_current_combined_alias()
+        all_groups=getattr(self,"manual_depth_groups",{}) or {}
+        nonempty={int(d):sets for d,sets in all_groups.items() if sets}
+        if not nonempty:
+            QMessageBox.warning(self, "No merged sets", "Create at least one merged set for a manual depth first."); return
         try: roi,X,shape,axis=self.get_roi_cube_and_X()
         except Exception as e: QMessageBox.warning(self,"ROI/Data error",str(e)); return
         self.roi_cube=roi; self.X=X; self.image_shape=shape; self.roi_axis_info=axis
-        params=self.collect_params(include_manual=False)
+        params=self.collect_params(include_manual=True)
         params["run_rr"] = True
-        params["manual_groups"]={md:[{"name":c.get("name",f"Merged {i+1}"),"members":c.get("members",[]),"X":np.asarray(c["matrix"],dtype=np.float32)} for i,c in enumerate(self.rr_combined_sets)]}
         self._set_run_buttons_enabled(False)
         self.worker=AnalysisWorker(X,shape,params)
         self.worker.finished_ok.connect(self.on_analysis_finished)
         self.worker.failed.connect(self.on_analysis_failed)
         self.worker.start()
-        self.append_log(f"Manual Step 2: full rr-NMF will run automatically to depth {md-1}, then replace depth {md} nodes with {len(self.rr_combined_sets)} merged set(s) and continue to depth {params['rr_depth']}.")
+        summary=", ".join([f"D{d}:{len(nonempty[d])} set(s)" for d in sorted(nonempty)])
+        self.append_log(f"Continuing full rr-NMF with manual merge groups: {summary}. At each listed depth, automatic child nodes are replaced by the saved combined-data nodes.")
 
     def run_analysis(self):
         try: roi,X,shape,axis=self.get_roi_cube_and_X()
@@ -2030,11 +2125,17 @@ class RR2NMFGui(QMainWindow):
             try:
                 roi,_,_,axis=self.get_roi_cube_and_X(); self.roi_cube=roi; self.roi_axis_info=axis
                 y0,y1,x0,x1=self.current_spatial_roi_bounds()
-                raw_roi=None
+                l0,l1=self.current_channel_bounds()
+                raw_full=None
+                corr_full=None
                 if self.original_cube is not None:
-                    l0,l1=self.current_channel_bounds()
+                    raw_full=self.original_cube[:,:,l0:l1].astype(np.float32,copy=False)
                     raw_roi=self.original_cube[y0:y1,x0:x1,l0:l1].astype(np.float32,copy=False)
-                plot_raw(self.canvas_raw.fig,roi,axis,cmap,full_cube=(self.original_cube if self.original_cube is not None else self.cube),spatial_roi=(y0,y1,x0,x1),raw_roi_before_bg=raw_roi,corrected_roi=roi,bg_applied=getattr(self,"bg_applied",False)); self.canvas_raw.set_base(); self.canvas_raw.draw()
+                else:
+                    raw_full=self.cube[:,:,l0:l1].astype(np.float32,copy=False)
+                    raw_roi=roi
+                corr_full=self.cube[:,:,l0:l1].astype(np.float32,copy=False)
+                plot_raw(self.canvas_raw.fig,roi,axis,cmap,full_cube=raw_full,spatial_roi=(y0,y1,x0,x1),raw_roi_before_bg=raw_full,corrected_roi=corr_full,bg_applied=getattr(self,"bg_applied",False),selected_pixel=getattr(self,"selected_raw_pixel",None),corrected_full_cube=corr_full); self.canvas_raw.set_base(); self.canvas_raw.draw()
             except Exception: self.canvas_raw.clear()
         if self.rr_result is not None: plot_rr(self.canvas_tree.fig,self.rr_result,self.roi_axis_info,cmap,X_for_weight=getattr(self,"X",None),overlay_mode="max"); self.canvas_tree.set_base(); self.canvas_tree.draw()
         else: self.canvas_tree.clear()
@@ -2045,17 +2146,23 @@ class RR2NMFGui(QMainWindow):
 
     def refresh_rr_component_list(self):
         if not hasattr(self,"list_rr_components"): return
+        self._sync_current_combined_alias()
         self.list_rr_components.clear(); self.list_rr_combined.clear(); self.rr_component_entries=collect_rr_component_entries(self.rr_result)
         entries_to_show = list(self.rr_component_entries)
         if getattr(self, "chk_manual_depth", None) is not None and self.chk_manual_depth.isChecked():
-            target_depth = max(0, int(self.spin_manual_depth.value()) - 1)
+            md=self._current_manual_depth()
+            target_depth = max(0, md - 1)
             filtered = [e for e in entries_to_show if int(e.get("depth", -999)) == target_depth]
             if filtered:
                 entries_to_show = filtered
             if hasattr(self, "lbl_manual_component_hint"):
-                self.lbl_manual_component_hint.setText(f"Available components from depth {target_depth} (= Manual depth - 1). Select components here and create merged sets for Manual depth {target_depth+1}.")
+                saved_depths=[]
+                for d,sets in sorted((getattr(self,"manual_depth_groups",{}) or {}).items()):
+                    if sets:
+                        saved_depths.append(f"D{int(d)}:{len(sets)}")
+                self.lbl_manual_component_hint.setText(f"Current target Manual depth = {md}. Showing components from source depth {target_depth} (= D-1). Saved manual merge groups: {', '.join(saved_depths) if saved_depths else 'none'}.")
         for e in entries_to_show: self.list_rr_components.addItem(e["label"])
-        for i,c in enumerate(self.rr_combined_sets): self.list_rr_combined.addItem(f'{i+1}: {c["name"]} [{", ".join(c["members"])}]')
+        for i,c in enumerate(self.rr_combined_sets): self.list_rr_combined.addItem(f'D{self._current_manual_depth()} / {i+1}: {c["name"]} [{", ".join(c["members"])}]')
 
     def selected_rr_entries(self):
         labels=[i.text() for i in self.list_rr_components.selectedItems()]
@@ -2070,20 +2177,29 @@ class RR2NMFGui(QMainWindow):
         sel=self.selected_rr_entries()
         if not sel: QMessageBox.warning(self,"No selection","Select rr-NMF components first."); return
         if getattr(self,"chk_manual_depth",None) is not None and self.chk_manual_depth.isChecked():
-            target_depth=max(0,int(self.spin_manual_depth.value())-1)
+            md=self._current_manual_depth()
+            target_depth=max(0,md-1)
             bad=[e["label"] for e in sel if int(e.get("depth",-999)) != target_depth]
             if bad:
-                QMessageBox.warning(self,"Wrong depth selection",f"Manual depth workflow requires components from depth {target_depth} only.\nWrong selections: {', '.join(bad[:8])}"); return
-        c=build_combined_dataset(sel,self.edit_combined_name.text().strip() or f"Merged {len(self.rr_combined_sets)+1}")
-        self.rr_combined_sets.append(c); self.refresh_rr_component_list(); self.list_rr_combined.setCurrentRow(len(self.rr_combined_sets)-1); self.refresh_spectrum_sources()
-        self.append_log(f"Created merged set: {c['name']} | members={', '.join(c.get('members', []))} | exact_child_matrix={c.get('uses_child_matrix', False)}")
+                QMessageBox.warning(self,"Wrong depth selection",f"For target manual depth {md}, select components from source depth {target_depth} only.\nWrong selections: {', '.join(bad[:8])}"); return
+        else:
+            md=self._current_manual_depth()
+        sets=self._get_current_depth_sets()
+        c=build_combined_dataset(sel,self.edit_combined_name.text().strip() or f"Merged_D{md}_{len(sets)+1}")
+        c["target_depth"]=md
+        sets.append(c)
+        self._sync_current_combined_alias()
+        self.refresh_rr_component_list(); self.list_rr_combined.setCurrentRow(len(sets)-1); self.refresh_spectrum_sources()
+        self.append_log(f"Created merged set for manual depth {md}: {c['name']} | members={', '.join(c.get('members', []))} | exact_child_matrix={c.get('uses_child_matrix', False)}")
 
     def preview_combined_rr_set(self,*_):
+        self._sync_current_combined_alias()
         row=self.list_rr_combined.currentRow()
         if row<0 or row>=len(self.rr_combined_sets): return
         c=self.rr_combined_sets[row]; plot_combined(self.canvas_combined.fig,c,self.roi_axis_info,self.combo_cmap.currentText()); self.canvas_combined.set_base(); self.canvas_combined.draw()
 
     def delete_combined_rr_set(self):
+        self._sync_current_combined_alias()
         row=self.list_rr_combined.currentRow()
         if row<0 or row>=len(self.rr_combined_sets):
             QMessageBox.warning(self,"No selection","Select a combined set to delete."); return
@@ -2095,9 +2211,10 @@ class RR2NMFGui(QMainWindow):
         else:
             self.canvas_combined.clear()
         self.refresh_spectrum_sources()
-        self.append_log(f"Deleted combined set: {name}")
+        self.append_log(f"Deleted merged set from manual depth {self._current_manual_depth()}: {name}")
 
     def export_combined_rr_set(self):
+        self._sync_current_combined_alias()
         row=self.list_rr_combined.currentRow()
         if row<0 or row>=len(self.rr_combined_sets): QMessageBox.warning(self,"No selection","Select a combined set."); return
         path,_=QFileDialog.getSaveFileName(self,"Save combined dataset","combined_rr_component_set.npz","NPZ Files (*.npz)")
@@ -2200,15 +2317,16 @@ class RR2NMFGui(QMainWindow):
                         "pair_key": pair_key,
                     })
 
-        for idx, combined in enumerate(getattr(self, "rr_combined_sets", [])):
-            sources.append({
-                "label": f"Combined {idx + 1}: {combined.get('name', 'Combined')}",
-                "spectrum": np.asarray(combined["spectrum"]),
-                "axis": self.roi_axis_info,
-                "image": combined.get("image", None),
-                "kind": "combined",
-                "pair_key": None,
-            })
+        for d, sets in sorted((getattr(self, "manual_depth_groups", {}) or {}).items()):
+            for idx, combined in enumerate(sets):
+                sources.append({
+                    "label": f"Combined D{int(d)}.{idx + 1}: {combined.get('name', 'Combined')}",
+                    "spectrum": np.asarray(combined["spectrum"]),
+                    "axis": self.roi_axis_info,
+                    "image": combined.get("image", None),
+                    "kind": "combined",
+                    "pair_key": None,
+                })
         return sources
 
 
