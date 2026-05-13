@@ -1,6 +1,6 @@
 
 """
-rr2_nmf_gui_ver5_2_manual_start_depth.py
+rr2_nmf_gui_ver6_7_auto_merge_w_tree.py
 
 Single-file rr-NMF GUI based on the v4.4 workflow, with EELS Interpretation added.
 This file keeps the v4.4-style core workflow in one executable Python file.
@@ -1205,6 +1205,136 @@ def plot_rr_diagnostics_summary(fig, rr, axis, X_for_weight=None, match_threshol
     fig.subplots_adjust(left=0.06, right=0.975, top=0.94, bottom=0.045, hspace=0.65, wspace=0.28)
 
 
+def _short_component_label(label: str) -> str:
+    """Compact label for provenance plots."""
+    try:
+        return str(label).replace(" ", "")
+    except Exception:
+        return str(label)
+
+
+def _auto_pair_stats_for_labels(pair_rows, labels):
+    """Return aggregate score/corr/IoU among selected labels."""
+    labs = set(labels or [])
+    rows = [r for r in (pair_rows or []) if r.get("label_i") in labs and r.get("label_j") in labs]
+    if not rows:
+        return None
+    vals = {}
+    for key in ("score", "corr", "iou"):
+        arr = np.asarray([float(r.get(key, np.nan)) for r in rows], dtype=np.float64)
+        arr = arr[np.isfinite(arr)]
+        vals[key + "_mean"] = float(np.mean(arr)) if arr.size else np.nan
+        vals[key + "_max"] = float(np.max(arr)) if arr.size else np.nan
+        vals[key + "_min"] = float(np.min(arr)) if arr.size else np.nan
+    vals["n_pairs"] = len(rows)
+    return vals
+
+
+def plot_auto_merge_w_provenance(fig, manual_depth_groups, cmap="viridis"):
+    """Concept view for Auto-Step merge provenance using W images only.
+
+    Each panel corresponds to one auto target depth. Source W maps are shown above
+    the resulting next-depth input tile. Connecting lines are annotated with the
+    aggregate Score/Corr/IoU that produced the automatic merge decision.
+    """
+    fig.clear()
+    groups_by_depth = []
+    for d, sets in sorted((manual_depth_groups or {}).items(), key=lambda kv: int(kv[0])):
+        auto_sets = [c for c in (sets or []) if c.get("auto_score", False)]
+        if auto_sets:
+            groups_by_depth.append((int(d), auto_sets))
+    if not groups_by_depth:
+        fig.set_size_inches(12, 5, forward=True)
+        ax = fig.add_subplot(111)
+        ax.axis("off")
+        ax.text(0.5, 0.55, "No Auto-Step merge provenance yet", ha="center", va="center", fontsize=14)
+        ax.text(0.5, 0.43, "Run Auto Step to create score-based merge/pass groups.", ha="center", va="center", fontsize=10)
+        return
+
+    total_sets = sum(len(sets) for _, sets in groups_by_depth)
+    fig.set_size_inches(18, max(6, 2.6 * total_sets + 1.2 * len(groups_by_depth)), forward=True)
+    height_ratios = []
+    for _, sets in groups_by_depth:
+        height_ratios.extend([0.35] + [2.6] * len(sets))
+    gs = fig.add_gridspec(len(height_ratios), 1, height_ratios=height_ratios)
+    grid_row = 0
+    for target_depth, sets in groups_by_depth:
+        axh = fig.add_subplot(gs[grid_row, 0])
+        axh.axis("off")
+        axh.text(0.01, 0.5, f"Auto target depth D{target_depth}: source D{target_depth-1} → next-depth input groups", fontsize=12, fontweight="bold", va="center")
+        grid_row += 1
+        for gi, c in enumerate(sets, start=1):
+            ax = fig.add_subplot(gs[grid_row, 0])
+            grid_row += 1
+            ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.axis("off")
+            members = list(c.get("members", []) or [])
+            member_maps = list(c.get("member_maps", []) or [])
+            is_pass = bool(c.get("pass_through", False))
+            name = c.get("name", f"Group {gi}")
+            pair_rows = c.get("auto_pair_details", []) or []
+            stats = c.get("auto_pair_stats", None) or _auto_pair_stats_for_labels(pair_rows, members)
+
+            # Header
+            kind = "PASS" if is_pass or len(members) <= 1 else "MERGED"
+            ax.text(0.01, 0.96, f"D{target_depth} G{gi} [{kind}]  {name}", fontsize=10, fontweight="bold", va="top")
+            if stats:
+                metric_txt = (
+                    f"mean Score={100*stats.get('score_mean', np.nan):.1f}%  "
+                    f"Corr={100*stats.get('corr_mean', np.nan):.1f}%  "
+                    f"IoU={100*stats.get('iou_mean', np.nan):.1f}%  "
+                    f"(n={int(stats.get('n_pairs', 0))} pairs)"
+                )
+            else:
+                metric_txt = "PASS-through or no pair statistics"
+            ax.text(0.01, 0.88, metric_txt, fontsize=8, va="top")
+
+            nmem = max(1, len(member_maps))
+            # Keep member thumbnails visible without occupying the entire width.
+            x0, x1 = 0.04, 0.72
+            gap = 0.012
+            slot_w = min(0.13, max(0.055, (x1 - x0 - gap * (nmem - 1)) / nmem))
+            total_w = slot_w * nmem + gap * (nmem - 1)
+            start_x = x0 + max(0, (x1 - x0 - total_w) / 2.0)
+            member_centers = []
+            for mi, wm in enumerate(member_maps):
+                xx = start_x + mi * (slot_w + gap)
+                iax = inset_axes(ax, width="100%", height="100%", bbox_to_anchor=(xx, 0.54, slot_w, 0.28), bbox_transform=ax.transAxes, borderpad=0)
+                iax.imshow(wm, cmap=cmap, origin="upper", aspect="equal")
+                iax.set_xticks([]); iax.set_yticks([])
+                lab = _short_component_label(members[mi] if mi < len(members) else f"M{mi}")
+                iax.set_title(lab, fontsize=7, pad=1)
+                member_centers.append((xx + slot_w / 2.0, 0.54))
+
+            # Combined input tile (from summed child matrices) at the bottom.
+            cimg = c.get("image", None)
+            cax_x, cax_y, cax_w, cax_h = 0.39, 0.07, 0.18, 0.33
+            if cimg is not None:
+                cax = inset_axes(ax, width="100%", height="100%", bbox_to_anchor=(cax_x, cax_y, cax_w, cax_h), bbox_transform=ax.transAxes, borderpad=0)
+                cax.imshow(cimg, cmap=cmap, origin="upper", aspect="equal")
+                cax.set_xticks([]); cax.set_yticks([])
+                cax.set_title("next-depth input", fontsize=8, pad=2)
+            target_center = (cax_x + cax_w / 2.0, cax_y + cax_h)
+
+            # Draw connector lines and annotate with pair metrics.
+            for mc in member_centers:
+                ax.plot([mc[0], target_center[0]], [mc[1], target_center[1]], transform=ax.transAxes, lw=1.0, alpha=0.55)
+            ax.text(target_center[0], target_center[1] + 0.035, "combined data" if not is_pass else "pass-through data", ha="center", va="bottom", fontsize=8, transform=ax.transAxes)
+
+            # Detailed top pair list helps tune a/top/threshold.
+            if pair_rows:
+                ranked = sorted(pair_rows, key=lambda r: r.get("score", 0.0), reverse=True)[:5]
+                lines = []
+                for r in ranked:
+                    if r.get("label_i") in members and r.get("label_j") in members:
+                        lines.append(f"{_short_component_label(r.get('label_i',''))}+{_short_component_label(r.get('label_j',''))}: S {100*r.get('score',0):.1f} / C {100*r.get('corr',0):.1f} / I {100*r.get('iou',0):.1f}")
+                if lines:
+                    ax.text(0.76, 0.72, "pair Score/Corr/IoU", fontsize=8, fontweight="bold", va="top")
+                    ax.text(0.76, 0.66, "\n".join(lines), fontsize=7, va="top")
+
+    fig.suptitle("Auto-Step W-image merge provenance: tune a, top-percent, and threshold using Score/Corr/IoU", fontsize=14)
+    fig.subplots_adjust(left=0.035, right=0.985, top=0.965, bottom=0.03, hspace=0.28)
+
+
 class Canvas(FigureCanvas):
     def __init__(self, w=12, h=8):
         self.fig = Figure(figsize=(w,h), dpi=100)
@@ -1439,6 +1569,11 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
         return f"COMBINED DATA: {name} | {base}\nMerged: {mtxt}"
 
     for d, nodes in enumerate(depths):
+        # Recompute the number of wrapped node rows for THIS depth.
+        # Do not reuse the `wraps` value from the layout-construction loop;
+        # Auto-Step can produce different node counts at different depths, and
+        # using a stale value places the W-corr matrix in the wrong GridSpec row.
+        wraps_d = max(1, int(np.ceil(max(1, len(nodes)) / max_nodes)))
         axd = fig.add_subplot(gs[starts[d], :])
         axd.axis("off")
         combined_count = sum(1 for _ns in nodes if str(getattr(_ns, "path", "")).startswith("manualD"))
@@ -1534,7 +1669,10 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
         try:
             labels_corr, Ccorr = compute_w_morphology_corr_for_depth(nodes, nonnegative_display=True)
             if Ccorr.size:
-                corr_row = starts[d] + 1 + wraps * rows_node + 1
+                # Place the matrix below all node rows for this depth.
+                # Keep it in the first node-width block so it remains visible without
+                # horizontal scrolling, but make the row calculation depth-local.
+                corr_row = starts[d] + 1 + wraps_d * rows_node + 1
                 holder_corr = fig.add_subplot(gs[corr_row, 0:rank])
                 holder_corr.axis("off")
                 corr_ax = inset_axes(holder_corr, width="52%", height="95%", loc="lower center", borderpad=0.0)
@@ -1988,6 +2126,7 @@ class RR2NMFGui(QMainWindow):
         self.canvas_conv=Canvas(16,10); self.tabs.addTab(PlotPanel(self.canvas_conv),"Conventional NMF")
         self.canvas_energy=Canvas(12,8); self.tabs.addTab(PlotPanel(self.canvas_energy),"Energy Summary")
         self.canvas_diag=Canvas(16,8); self.tabs.addTab(PlotPanel(self.canvas_diag),"rr Interpretation Summary")
+        self.canvas_auto_prov=Canvas(18,8); self.tabs.addTab(PlotPanel(self.canvas_auto_prov),"Auto Merge W Tree")
         self.canvas_eds=Canvas(12.5,5.2); self.tabs.addTab(self._build_eds_tab(),"EDS Analysis")
         self.canvas_eels=Canvas(12.5,5.2); self.tabs.addTab(self._build_eels_tab(),"EELS Interpretation")
         self.table_energy=QTableWidget(); self.tabs.addTab(self.table_energy,"Energy Table")
@@ -2546,6 +2685,9 @@ class RR2NMFGui(QMainWindow):
                 c["pass_through"] = True
             c["target_depth"] = int(target_depth)
             c["auto_score"] = True
+            c["member_maps"] = [np.asarray(e.get("W_map"), dtype=np.float32).copy() for e in g if e.get("W_map") is not None]
+            c["auto_pair_details"] = [r for r in pairs if r.get("label_i") in labels and r.get("label_j") in labels]
+            c["auto_pair_stats"] = _auto_pair_stats_for_labels(pairs, labels)
             sets.append(c)
         self.manual_depth_groups[int(target_depth)] = sets
         best_pairs=sorted(pairs, key=lambda r: r.get("score",0.0), reverse=True)[:8]
@@ -2715,6 +2857,8 @@ This does not modify the current rr-NMF/manual tree results.
         else: self.canvas_tree.clear()
         if hasattr(self, "canvas_diag"):
             plot_rr_diagnostics_summary(self.canvas_diag.fig,self.rr_result,self.roi_axis_info if self.roi_axis_info is not None else make_default_axis_info((1,1,1)),X_for_weight=getattr(self,"X",None),match_threshold_pct=match_pct,match_window=match_window); self.canvas_diag.set_base(); self.canvas_diag.draw()
+        if hasattr(self, "canvas_auto_prov"):
+            plot_auto_merge_w_provenance(self.canvas_auto_prov.fig, getattr(self, "manual_depth_groups", {}), cmap=self.combo_cmap.currentText() if hasattr(self, "combo_cmap") else "viridis"); self.canvas_auto_prov.set_base(); self.canvas_auto_prov.draw()
         if self.conv_result is not None: plot_conv(self.canvas_conv.fig,self.conv_result,self.roi_axis_info,cmap); self.canvas_conv.set_base(); self.canvas_conv.draw()
         else: self.canvas_conv.clear()
         plot_energy(self.canvas_energy.fig,self.conv_result,self.rr_result); self.canvas_energy.set_base(); self.canvas_energy.draw()
