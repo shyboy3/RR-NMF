@@ -1184,17 +1184,22 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
     fig.set_size_inches(max(30.0, total_cols * 4.1), max(8, sum(ratios) * 1.55), forward=True)
     gs = fig.add_gridspec(cur, total_cols, height_ratios=ratios)
 
-    def _combined_label(ns):
+    def _short_text(txt, max_len=70):
+        txt = str(txt).replace("\n", " ").strip()
+        return txt if len(txt) <= max_len else txt[:max(0, max_len - 3)] + "..."
+
+    def _combined_title(ns, base, max_name=42, max_members=78):
+        """Return a title string. Combined-data nodes are always rendered as exactly 2 lines."""
         if not str(getattr(ns, "path", "")).startswith("manualD"):
-            return ""
-        name = str(getattr(ns, "combined_name", "") or "Combined")
+            return base
+        name = _short_text(str(getattr(ns, "combined_name", "") or "Combined"), max_name)
         members = list(getattr(ns, "combined_members", []) or [])
         if members:
-            mtxt = ", ".join(map(str, members[:4]))
-            if len(members) > 4:
-                mtxt += f", +{len(members)-4} more"
-            return f"COMBINED DATA: {name}\nfrom {mtxt}\n"
-        return f"COMBINED DATA: {name}\n"
+            mtxt = ", ".join(map(str, members))
+        else:
+            mtxt = "selected previous-depth components"
+        mtxt = _short_text(mtxt, max_members)
+        return f"COMBINED DATA: {name} | {base}\nMerged: {mtxt}"
 
     for d, nodes in enumerate(depths):
         axd = fig.add_subplot(gs[starts[d], :])
@@ -1217,8 +1222,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                 hspec = np.asarray(ns.component_spectra[ci])
 
                 im = ax.imshow(wmap, cmap=cmap, origin="upper", aspect="equal")
-                node_tag = _combined_label(ns)
-                ax.set_title(f"{node_tag}D{d} N{i} C{ci}", fontsize=10)
+                ax.set_title(_combined_title(ns, f"D{d} N{i} C{ci}"), fontsize=9)
                 ax.set_xticks([])
                 ax.set_yticks([])
                 add_colorbar(fig, ax, im)
@@ -1258,20 +1262,31 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                 sp_blank.axis("off")
 
             if ns.residual_image is not None:
+                # Display residual image as mean residual per spectral channel.
+                L_res = len(ns.residual_spectrum) if ns.residual_spectrum is not None else 1
+                rimg_mean = np.asarray(ns.residual_image, dtype=np.float64) / max(1, int(L_res))
                 ax = fig.add_subplot(gs[br + 2, bc:bc + rank])
-                im = ax.imshow(ns.residual_image, cmap=cmap, origin="upper", aspect="equal")
-                node_tag = _combined_label(ns)
-                ax.set_title(f"{node_tag}D{d} N{i} Residual", fontsize=10)
+                im = ax.imshow(rimg_mean, cmap=cmap, origin="upper", aspect="equal")
+                ax.set_title(_combined_title(ns, f"D{d} N{i} Residual mean"), fontsize=9)
                 ax.set_xticks([])
                 ax.set_yticks([])
                 add_colorbar(fig, ax, im)
 
             if ns.residual_spectrum is not None:
-                res_span = max(1, int(np.ceil(rank / 2)))
-                sp = fig.add_subplot(gs[br + 3, bc:bc + res_span])
-                x = axis.energy_axis if len(axis.energy_axis) == len(ns.residual_spectrum) else np.arange(len(ns.residual_spectrum))
-                sp.plot(x, ns.residual_spectrum, linewidth=1.0)
-                sp.set_title("Residual spectrum", fontsize=9)
+                # Display residual spectrum as mean residual per spatial pixel.
+                Npix = int(np.prod(ns.residual_image.shape)) if ns.residual_image is not None else 1
+                rspec_mean = np.asarray(ns.residual_spectrum, dtype=np.float64) / max(1, Npix)
+                x = axis.energy_axis if len(axis.energy_axis) == len(rspec_mean) else np.arange(len(rspec_mean))
+
+                # Keep the residual spectrum half-width, but center it under the residual image.
+                # This makes it visually aligned with the residual image rather than left-aligned.
+                img_bbox = gs[br + 2, bc:bc + rank].get_position(fig)
+                row_bbox = gs[br + 3, bc:bc + rank].get_position(fig)
+                sp_w = img_bbox.width * 0.50
+                sp_x = img_bbox.x0 + (img_bbox.width - sp_w) / 2.0
+                sp = fig.add_axes([sp_x, row_bbox.y0, sp_w, row_bbox.height])
+                sp.plot(x, rspec_mean, linewidth=1.0)
+                sp.set_title("Residual spectrum mean", fontsize=9)
                 sp.set_xlabel(axis.energy_label, fontsize=8)
                 sp.grid(True, alpha=0.25)
                 sp.tick_params(labelsize=7)
