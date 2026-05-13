@@ -1181,7 +1181,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
         cur += 1
 
     total_cols = max_nodes * cols_node
-    fig.set_size_inches(max(36.4, total_cols * 5.07), max(8, sum(ratios) * 1.55), forward=True)
+    fig.set_size_inches(max(30.0, total_cols * 4.1), max(8, sum(ratios) * 1.55), forward=True)
     gs = fig.add_gridspec(cur, total_cols, height_ratios=ratios)
 
     def _combined_label(ns):
@@ -1267,7 +1267,8 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                 add_colorbar(fig, ax, im)
 
             if ns.residual_spectrum is not None:
-                sp = fig.add_subplot(gs[br + 3, bc:bc + rank])
+                res_span = max(1, int(np.ceil(rank / 2)))
+                sp = fig.add_subplot(gs[br + 3, bc:bc + res_span])
                 x = axis.energy_axis if len(axis.energy_axis) == len(ns.residual_spectrum) else np.arange(len(ns.residual_spectrum))
                 sp.plot(x, ns.residual_spectrum, linewidth=1.0)
                 sp.set_title("Residual spectrum", fontsize=9)
@@ -1276,7 +1277,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                 sp.tick_params(labelsize=7)
 
     fig.suptitle(f"rr-NMF Tree rank={rank}: H basis with weighted raw overlay", fontsize=14)
-    fig.subplots_adjust(left=0.012, right=0.988, top=0.965, bottom=0.025, hspace=0.36, wspace=1.75)
+    fig.subplots_adjust(left=0.012, right=0.988, top=0.965, bottom=0.025, hspace=0.36, wspace=0.88)
 
 
 def plot_energy(fig, conv, rr):
@@ -1673,7 +1674,7 @@ class RR2NMFGui(QMainWindow):
         self.btn_run=QPushButton("Run Full Auto Analysis on ROI"); self.btn_run.clicked.connect(self.run_analysis)
         self.btn_run_auto_stage=QPushButton("Manual Step: Run/Refresh Current Source Depth")
         self.btn_run_auto_stage.clicked.connect(self.run_auto_until_manual_depth)
-        self.btn_continue_manual=QPushButton("Continue / Advance with Manual Merges")
+        self.btn_continue_manual=QPushButton("Continue One Depth with Current Manual Merge")
         self.btn_continue_manual.clicked.connect(self.continue_from_manual_merge)
         self.btn_export=QPushButton("Export CSV"); self.btn_export.clicked.connect(self.export_csv)
         vf.addRow(self.btn_run); vf.addRow(self.btn_run_auto_stage); vf.addRow(self.btn_continue_manual); vf.addRow(self.btn_export); cl.addWidget(vg)
@@ -2130,26 +2131,38 @@ class RR2NMFGui(QMainWindow):
         self.append_log(f"Manual step: running rr-NMF to source depth {stop_depth} for target depth {md}. Earlier manual merge depths used: {lower if lower else 'none'}. Select depth {stop_depth} components and create one or more merged sets for depth {md}.")
 
     def continue_from_manual_merge(self):
-        """Run the full rr-NMF using all saved manual merge groups at their target depths."""
+        """Advance exactly one manual target depth using the saved merge groups.
+
+        Example: Recursive depth=4, Manual start depth=2.
+        - First, run/refresh computes through D1 and exposes D1 components.
+        - User creates merged set(s) for target D2.
+        - This button computes only through D2 using those D2 merged nodes.
+        - The panel then advances to target D3, where the user can merge D2 results.
+        It does not jump directly to the final depth.
+        """
         if not self.chk_manual_depth.isChecked():
             QMessageBox.warning(self, "Manual depth disabled", "Enable 'Manual depth workflow' first."); return
         self._sync_current_combined_alias()
-        all_groups=getattr(self,"manual_depth_groups",{}) or {}
-        nonempty={int(d):sets for d,sets in all_groups.items() if sets}
-        if not nonempty:
-            QMessageBox.warning(self, "No merged sets", "Create at least one merged set for a manual depth first."); return
+        md = self._active_manual_target_depth()
+        final_depth = int(self.spin_depth.value()) if hasattr(self, "spin_depth") else md
+        if md > final_depth:
+            QMessageBox.information(self, "Manual workflow complete", "The manual workflow has already reached the final recursive depth."); return
+        sets = (getattr(self, "manual_depth_groups", {}) or {}).get(md, []) or []
+        if not sets:
+            QMessageBox.warning(self, "No merged sets", f"Create at least one merged set for target depth {md} before continuing."); return
         try: roi,X,shape,axis=self.get_roi_cube_and_X()
         except Exception as e: QMessageBox.warning(self,"ROI/Data error",str(e)); return
         self.roi_cube=roi; self.X=X; self.image_shape=shape; self.roi_axis_info=axis
-        params=self.collect_params(include_manual=True)
+        params=self.collect_params(include_manual=True, max_manual_depth=md)
         params["run_rr"] = True
+        params["rr_depth"] = md
         self._set_run_buttons_enabled(False)
         self.worker=AnalysisWorker(X,shape,params)
         self.worker.finished_ok.connect(self.on_analysis_finished)
         self.worker.failed.connect(self.on_analysis_failed)
         self.worker.start()
-        summary=", ".join([f"D{d}:{len(nonempty[d])} set(s)" for d in sorted(nonempty)])
-        self.append_log(f"Continuing full rr-NMF with manual merge groups: {summary}. At each listed depth, automatic child nodes are replaced by the saved combined-data nodes.")
+        summary=", ".join([f"D{d}:{len((getattr(self,'manual_depth_groups',{}) or {}).get(d,[]) or [])} set(s)" for d in range(self._current_manual_depth(), md+1) if (getattr(self,'manual_depth_groups',{}) or {}).get(d,[])])
+        self.append_log(f"Manual continue: computing exactly to depth {md} using saved manual merge groups ({summary}). After completion, the panel will expose depth {md} components for target depth {md+1 if md < final_depth else 'final complete'}.")
 
     def run_analysis(self):
         try: roi,X,shape,axis=self.get_roi_cube_and_X()
