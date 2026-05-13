@@ -1336,9 +1336,9 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
         cur += 1
         for _ in range(wraps):
             # rows: W image, H spectrum, spacer, residual image, residual spectrum, compact W-corr
-            # W-corr is deliberately compact and placed below the first residual spectrum,
-            # not in an extra right-side diagnostic column, so it stays visible at a glance.
-            ratios.extend([3.0, 1.0, 0.30, 3.0, 1.0, 1.05])
+            # W-corr is placed below the first residual spectrum with extra vertical offset.
+            # The matrix size/aspect is preserved; only its position is moved down to avoid title overlap.
+            ratios.extend([3.0, 1.0, 0.30, 3.0, 1.0, 1.45])
             cur += rows_node
         ratios.append(0.20)
         cur += 1
@@ -1466,9 +1466,9 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                     if Ccorr.size:
                         holder_corr = fig.add_subplot(gs[br + 5, bc:bc + rank])
                         holder_corr.axis("off")
-                        corr_ax = inset_axes(holder_corr, width="48%", height="95%", loc="center", borderpad=0.0)
+                        corr_ax = inset_axes(holder_corr, width="48%", height="95%", loc="lower center", borderpad=0.0)
                         imcorr = corr_ax.imshow(Ccorr, vmin=0, vmax=1, cmap="viridis", aspect="equal")
-                        corr_ax.set_title("W morphology similarity\n(Pearson, negative→0)", fontsize=7)
+                        corr_ax.set_title("W morphology similarity\n(Pearson, negative→0)", fontsize=7, pad=2)
                         if len(labels_corr) <= 10:
                             corr_ax.set_xticks(range(len(labels_corr)))
                             corr_ax.set_yticks(range(len(labels_corr)))
@@ -1478,14 +1478,14 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                             corr_ax.set_xticks([])
                             corr_ax.set_yticks([])
                         corr_ax.tick_params(length=1, pad=1)
-                        cax = inset_axes(holder_corr, width="3%", height="75%", loc="center right", borderpad=0.4)
+                        cax = inset_axes(holder_corr, width="3%", height="75%", loc="lower right", borderpad=0.4)
                         cb = fig.colorbar(imcorr, cax=cax)
                         cb.ax.tick_params(labelsize=5, pad=1)
                 except Exception:
                     pass
 
     fig.suptitle(f"rr-NMF Tree rank={rank}: H basis with weighted raw overlay", fontsize=14)
-    fig.subplots_adjust(left=0.012, right=0.988, top=0.965, bottom=0.025, hspace=0.24, wspace=0.70)
+    fig.subplots_adjust(left=0.012, right=0.988, top=0.965, bottom=0.025, hspace=0.28, wspace=0.70)
 
 
 def plot_energy(fig, conv, rr):
@@ -1798,7 +1798,7 @@ class AnalysisWorker(QThread):
 
 class RR2NMFGui(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v5.2 manual-start-depth"); self.resize(1850,1080)
+        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v6.1 energy-unit ranges"); self.resize(1850,1080)
         self.cube=None; self.original_cube=None; self.roi_cube=None; self.X=None; self.image_shape=None
         self.axis_info=make_default_axis_info((1,1,1)); self.roi_axis_info=make_default_axis_info((1,1,1))
         self.conv_result=None; self.rr_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.bg_applied=False; self._raw_mouse_press=None; self.selected_raw_pixel=None
@@ -1817,13 +1817,15 @@ class RR2NMFGui(QMainWindow):
         self.lbl_file=QLabel("No file loaded"); self.lbl_shape=QLabel("Shape: -"); self.lbl_roi=QLabel("ROI: -")
         self.combo_norm=QComboBox(); self.combo_norm.addItems(["none","global_max","max","area"])
         self.spin_y0=QSpinBox(); self.spin_y1=QSpinBox(); self.spin_x0=QSpinBox(); self.spin_x1=QSpinBox(); self.spin_l0=QSpinBox(); self.spin_l1=QSpinBox()
-        for sp in [self.spin_y0,self.spin_y1,self.spin_x0,self.spin_x1,self.spin_l0,self.spin_l1]:
+        for sp in [self.spin_y0,self.spin_y1,self.spin_x0,self.spin_x1]:
             sp.setRange(0,10**9); sp.valueChanged.connect(self.on_channel_roi_changed)
+        for sp in [self.spin_l0,self.spin_l1]:
+            sp.setRange(0,10**9); sp.setEnabled(False); sp.setToolTip("Resolved channel index from Energy start/end; not a user input.")
         self.spin_e0=QDoubleSpinBox(); self.spin_e1=QDoubleSpinBox()
         for sp in [self.spin_e0,self.spin_e1]:
             sp.setRange(-1e9,1e9); sp.setDecimals(6); sp.valueChanged.connect(self.on_energy_roi_changed)
         self.btn_full=QPushButton("Use Full ROI"); self.btn_full.clicked.connect(self.set_roi_full)
-        for lab,w in [(None,self.btn_load),("File",self.lbl_file),("Loaded cube",self.lbl_shape),("Y start",self.spin_y0),("Y end",self.spin_y1),("X start",self.spin_x0),("X end",self.spin_x1),("Channel start",self.spin_l0),("Channel end",self.spin_l1),("Energy start",self.spin_e0),("Energy end",self.spin_e1),(None,self.btn_full),("ROI shape",self.lbl_roi),("Normalize",self.combo_norm)]:
+        for lab,w in [(None,self.btn_load),("File",self.lbl_file),("Loaded cube",self.lbl_shape),("Y start",self.spin_y0),("Y end",self.spin_y1),("X start",self.spin_x0),("X end",self.spin_x1),("Energy start",self.spin_e0),("Energy end",self.spin_e1),("Resolved ch start",self.spin_l0),("Resolved ch end",self.spin_l1),(None,self.btn_full),("ROI shape",self.lbl_roi),("Normalize",self.combo_norm)]:
             f.addRow(w) if lab is None else f.addRow(lab,w)
         cl.addWidget(g)
 
@@ -1834,9 +1836,10 @@ class RR2NMFGui(QMainWindow):
         for sp in [self.bg_y0,self.bg_y1,self.bg_x0,self.bg_x1]: sp.setRange(0,10**9)
         self.bg_e0=QDoubleSpinBox(); self.bg_e1=QDoubleSpinBox()
         for sp in [self.bg_e0,self.bg_e1]: sp.setRange(-1e9,1e9); sp.setDecimals(6)
-        self.bg_ref_ch0=QSpinBox(); self.bg_ref_ch1=QSpinBox()
-        self.bg_ref_ch0.setRange(0,10**9); self.bg_ref_ch1.setRange(0,10**9)
-        self.bg_ref_ch0.setValue(0); self.bg_ref_ch1.setValue(1)
+        self.bg_ref_ch0=QDoubleSpinBox(); self.bg_ref_ch1=QDoubleSpinBox()
+        for sp in [self.bg_ref_ch0,self.bg_ref_ch1]:
+            sp.setRange(-1e9,1e9); sp.setDecimals(6); sp.setToolTip("Energy-axis value, e.g. eV for EELS data. Internally converted to nearest channel.")
+        self.bg_ref_ch0.setValue(0.0); self.bg_ref_ch1.setValue(1.0)
         self.combo_bg_after=QComboBox()
         self.combo_bg_after.addItems(["shift_min", "clip", "keep"])
         self.chk_bg_clip=QCheckBox("Clip negative after power-law subtraction")
@@ -1850,7 +1853,7 @@ class RR2NMFGui(QMainWindow):
             ("BG/fit Y start",self.bg_y0),("BG/fit Y end",self.bg_y1),
             ("BG/fit X start",self.bg_x0),("BG/fit X end",self.bg_x1),
             ("Power-law fit energy start",self.bg_e0),("Power-law fit energy end",self.bg_e1),
-            ("Reference scale ch start",self.bg_ref_ch0),("Reference scale ch end",self.bg_ref_ch1),
+            ("Reference scale energy start",self.bg_ref_ch0),("Reference scale energy end",self.bg_ref_ch1),
             ("Reference after subtraction",self.combo_bg_after),
             (None,self.chk_bg_clip),(None,self.btn_bg_current),(None,self.btn_apply_bg),(None,self.btn_reset_bg),
             ("Status",self.lbl_bg)
@@ -1882,8 +1885,8 @@ class RR2NMFGui(QMainWindow):
 
         self.combo_cmap=QComboBox(); self.combo_cmap.addItems(["viridis","plasma","inferno","magma","cividis","gray","turbo","coolwarm","jet"]); self.combo_cmap.currentTextChanged.connect(self.refresh_views)
         self.spin_shape_match_pct=QDoubleSpinBox(); self.spin_shape_match_pct.setRange(0,100); self.spin_shape_match_pct.setDecimals(1); self.spin_shape_match_pct.setValue(80.0); self.spin_shape_match_pct.setSuffix(" %"); self.spin_shape_match_pct.valueChanged.connect(self.refresh_views)
-        self.spin_shape_match_window=QSpinBox(); self.spin_shape_match_window.setRange(5,9999); self.spin_shape_match_window.setValue(21); self.spin_shape_match_window.setSingleStep(2); self.spin_shape_match_window.setSuffix(" ch"); self.spin_shape_match_window.valueChanged.connect(self.refresh_views)
-        vg=QGroupBox("View / Run"); vf=QFormLayout(vg); vf.addRow("Colormap",self.combo_cmap); vf.addRow("H/raw shape-match threshold", self.spin_shape_match_pct); vf.addRow("H/raw shape-match window", self.spin_shape_match_window)
+        self.spin_shape_match_window=QDoubleSpinBox(); self.spin_shape_match_window.setRange(0.0,1e9); self.spin_shape_match_window.setDecimals(6); self.spin_shape_match_window.setValue(21.0); self.spin_shape_match_window.setSingleStep(1.0); self.spin_shape_match_window.setSuffix(" energy"); self.spin_shape_match_window.setToolTip("Energy-axis window width, e.g. eV for EELS data. Converted to an odd number of channels internally."); self.spin_shape_match_window.valueChanged.connect(self.refresh_views)
+        vg=QGroupBox("View / Run"); vf=QFormLayout(vg); vf.addRow("Colormap",self.combo_cmap); vf.addRow("H/raw shape-match threshold", self.spin_shape_match_pct); vf.addRow("H/raw shape-match window energy width", self.spin_shape_match_window)
         self.btn_run=QPushButton("Run Full Auto Analysis on ROI"); self.btn_run.clicked.connect(self.run_analysis)
         self.btn_run_auto_stage=QPushButton("Manual Step: Run/Refresh Current Source Depth")
         self.btn_run_auto_stage.clicked.connect(self.run_auto_until_manual_depth)
@@ -2125,9 +2128,9 @@ class RR2NMFGui(QMainWindow):
             sp.setRange(0,mx); sp.setValue(val)
         e=self.axis_info.energy_axis
         if len(e)==l:
-            mn,mx=float(np.nanmin(e)),float(np.nanmax(e)); pad=abs(mx-mn)*.1+1; self.bg_e0.setRange(mn-pad,mx+pad); self.bg_e1.setRange(mn-pad,mx+pad); end=max(3,int(l*.15)); self.bg_e0.setValue(float(e[0])); self.bg_e1.setValue(float(e[min(end,l)-1])); self.bg_ref_ch0.setRange(0,l); self.bg_ref_ch1.setRange(0,l); self.bg_ref_ch0.setValue(0); self.bg_ref_ch1.setValue(1)
+            mn,mx=float(np.nanmin(e)),float(np.nanmax(e)); pad=abs(mx-mn)*.1+1; self.bg_e0.setRange(mn-pad,mx+pad); self.bg_e1.setRange(mn-pad,mx+pad); self.bg_ref_ch0.setRange(mn-pad,mx+pad); self.bg_ref_ch1.setRange(mn-pad,mx+pad); end=max(3,int(l*.15)); self.bg_e0.setValue(float(e[0])); self.bg_e1.setValue(float(e[min(end,l)-1])); self.bg_ref_ch0.setValue(float(e[0])); self.bg_ref_ch1.setValue(float(e[min(1,l-1)]))
         else:
-            self.bg_e0.setRange(0,l); self.bg_e1.setRange(0,l); self.bg_e0.setValue(0); self.bg_e1.setValue(max(3,int(l*.15))); self.bg_ref_ch0.setRange(0,l); self.bg_ref_ch1.setRange(0,l); self.bg_ref_ch0.setValue(0); self.bg_ref_ch1.setValue(1)
+            self.bg_e0.setRange(0,l); self.bg_e1.setRange(0,l); self.bg_e0.setValue(0); self.bg_e1.setValue(max(3,int(l*.15))); self.bg_ref_ch0.setRange(0,l); self.bg_ref_ch1.setRange(0,l); self.bg_ref_ch0.setValue(0.0); self.bg_ref_ch1.setValue(1.0)
 
     def on_channel_roi_changed(self):
         if self._syncing: return
@@ -2196,12 +2199,58 @@ class RR2NMFGui(QMainWindow):
         if self.cube is None: return
         y,x,_=self.cube.shape; self.bg_y0.setValue(max(0,min(self.spin_y0.value(),y))); self.bg_y1.setValue(max(0,min(self.spin_y1.value(),y))); self.bg_x0.setValue(max(0,min(self.spin_x0.value(),x))); self.bg_x1.setValue(max(0,min(self.spin_x1.value(),x)))
 
+    def energy_range_to_channel_bounds(self, e0, e1, axis_info=None, L=None):
+        """Convert an energy-axis interval to half-open channel bounds [lo, hi).
+
+        For EELS/EDS with a real energy axis this means eV/keV values; for arrays
+        without calibration the energy axis is the channel index, so the behavior
+        remains backward compatible.
+        """
+        if self.cube is None and L is None:
+            raise ValueError("No cube loaded")
+        if L is None:
+            L = int(self.cube.shape[2])
+        axis_info = axis_info or self.axis_info
+        e = np.asarray(axis_info.energy_axis, dtype=np.float64)
+        if len(e) == L and L > 0:
+            i0 = nearest_channel_from_energy(e, float(e0))
+            i1 = nearest_channel_from_energy(e, float(e1))
+            lo = max(0, min(i0, i1))
+            hi = min(L, max(i0, i1) + 1)
+        else:
+            lo = max(0, min(int(round(float(e0))), L - 1))
+            hi = min(L, max(lo + 1, int(round(float(e1)))))
+        return lo, hi
+
+    def energy_width_to_window_channels(self, width_energy, axis_info=None, L=None, min_odd=5):
+        """Convert an energy-axis width to an odd channel window for local shape matching."""
+        if L is None:
+            if self.roi_axis_info is not None and len(self.roi_axis_info.energy_axis) > 0:
+                L = len(self.roi_axis_info.energy_axis)
+            elif self.cube is not None:
+                L = int(self.cube.shape[2])
+            else:
+                L = 1
+        axis_info = axis_info or self.roi_axis_info or self.axis_info
+        e = np.asarray(axis_info.energy_axis, dtype=np.float64)
+        width = abs(float(width_energy))
+        if width <= 0:
+            return int(min(max(min_odd, 5), max(1, L)))
+        if len(e) == L and L > 1:
+            de = np.diff(np.sort(e[np.isfinite(e)]))
+            de = de[de > 0]
+            step = float(np.nanmedian(de)) if de.size else 1.0
+            n = int(round(width / max(step, 1e-12)))
+        else:
+            n = int(round(width))
+        n = max(int(min_odd), min(int(L), n))
+        if n % 2 == 0:
+            n = n + 1 if n < L else n - 1
+        return max(1, int(n))
+
     def background_channel_range(self):
         if self.cube is None: raise ValueError("No cube loaded")
-        L=self.cube.shape[2]; e=self.axis_info.energy_axis
-        if len(e)==L:
-            i0=nearest_channel_from_energy(e,self.bg_e0.value()); i1=nearest_channel_from_energy(e,self.bg_e1.value()); return max(0,min(i0,i1)), min(L,max(i0,i1)+1)
-        return max(0,min(int(round(self.bg_e0.value())),L-1)), min(L,max(1,int(round(self.bg_e1.value()))))
+        return self.energy_range_to_channel_bounds(self.bg_e0.value(), self.bg_e1.value(), self.axis_info, self.cube.shape[2])
 
     def apply_background_correction(self):
         if self.cube is None:
@@ -2215,8 +2264,7 @@ class RR2NMFGui(QMainWindow):
 
             mode = self.combo_bg_mode.currentText()
             if mode.startswith("Reference BG"):
-                s0 = max(0, min(self.bg_ref_ch0.value(), L - 1))
-                s1 = max(s0 + 1, min(self.bg_ref_ch1.value(), L))
+                s0, s1 = self.energy_range_to_channel_bounds(self.bg_ref_ch0.value(), self.bg_ref_ch1.value(), self.axis_info, L)
                 l0, l1 = self.background_channel_range()
                 corrected, meta = apply_reference_bg_low_energy_scaling(
                     self.cube,
@@ -2230,7 +2278,7 @@ class RR2NMFGui(QMainWindow):
                 self.cube = corrected
                 self.lbl_bg.setText(
                     "Applied: fitted reference BG × low-energy scale "
-                    f"fit_ch[{l0}:{l1}], scale_ch[{s0}:{s1}], "
+                    f"fit_energy[{self.bg_e0.value():.6g}:{self.bg_e1.value():.6g}] -> ch[{l0}:{l1}], scale_energy[{self.bg_ref_ch0.value():.6g}:{self.bg_ref_ch1.value():.6g}] -> ch[{s0}:{s1}], "
                     f"r={meta['r_ref']:.4g}, after={self.combo_bg_after.currentText()}, "
                     f"alpha mean={meta['alpha_mean']:.4g}"
                 )
@@ -2421,7 +2469,7 @@ class RR2NMFGui(QMainWindow):
                 plot_raw(self.canvas_raw.fig,roi,axis,cmap,full_cube=raw_full,spatial_roi=(y0,y1,x0,x1),raw_roi_before_bg=raw_full,corrected_roi=corr_full,bg_applied=getattr(self,"bg_applied",False),selected_pixel=getattr(self,"selected_raw_pixel",None),corrected_full_cube=corr_full); self.canvas_raw.set_base(); self.canvas_raw.draw()
             except Exception: self.canvas_raw.clear()
         match_pct = self.spin_shape_match_pct.value() if hasattr(self, "spin_shape_match_pct") else 80.0
-        match_window = self.spin_shape_match_window.value() if hasattr(self, "spin_shape_match_window") else 21
+        match_window = self.energy_width_to_window_channels(self.spin_shape_match_window.value(), self.roi_axis_info, len(self.roi_axis_info.energy_axis) if self.roi_axis_info is not None else None) if hasattr(self, "spin_shape_match_window") else 21
         if self.rr_result is not None: plot_rr(self.canvas_tree.fig,self.rr_result,self.roi_axis_info,cmap,X_for_weight=getattr(self,"X",None),overlay_mode="max",match_threshold_pct=match_pct,match_window=match_window); self.canvas_tree.set_base(); self.canvas_tree.draw()
         else: self.canvas_tree.clear()
         if hasattr(self, "canvas_diag"):
@@ -2914,7 +2962,7 @@ class RR2NMFGui(QMainWindow):
     def get_processing_settings(self):
         """Collect ROI, background, NMF and basic view settings into a JSON-safe dict."""
         return {
-            "version": "rr2_nmf_gui_ver5_6_settings_v1",
+            "version": "rr2_nmf_gui_ver6_1_energy_settings_v1",
             "roi": {
                 "y0": self.spin_y0.value(), "y1": self.spin_y1.value(),
                 "x0": self.spin_x0.value(), "x1": self.spin_x1.value(),
@@ -2927,7 +2975,7 @@ class RR2NMFGui(QMainWindow):
                 "y0": self.bg_y0.value(), "y1": self.bg_y1.value(),
                 "x0": self.bg_x0.value(), "x1": self.bg_x1.value(),
                 "e0": self.bg_e0.value(), "e1": self.bg_e1.value(),
-                "ref_ch0": self.bg_ref_ch0.value(), "ref_ch1": self.bg_ref_ch1.value(),
+                "ref_energy0": self.bg_ref_ch0.value(), "ref_energy1": self.bg_ref_ch1.value(),
                 "after": self.combo_bg_after.currentText(),
                 "clip_negative": self.chk_bg_clip.isChecked(),
             },
@@ -2948,7 +2996,7 @@ class RR2NMFGui(QMainWindow):
                 "random_seed": self.spin_seed.value(),
                 "chunk_size": self.spin_chunk.value(),
             },
-            "view": {"cmap": self.combo_cmap.currentText(), "shape_match_threshold_pct": self.spin_shape_match_pct.value() if hasattr(self, "spin_shape_match_pct") else 80.0, "shape_match_window": self.spin_shape_match_window.value() if hasattr(self, "spin_shape_match_window") else 21},
+            "view": {"cmap": self.combo_cmap.currentText(), "shape_match_threshold_pct": self.spin_shape_match_pct.value() if hasattr(self, "spin_shape_match_pct") else 80.0, "shape_match_window_energy": self.spin_shape_match_window.value() if hasattr(self, "spin_shape_match_window") else 21.0},
         }
 
     def apply_processing_settings(self, cfg):
@@ -2972,10 +3020,20 @@ class RR2NMFGui(QMainWindow):
         self._set_combo_text_safe(self.combo_norm, roi.get("normalize", self.combo_norm.currentText()))
 
         self._set_combo_text_safe(self.combo_bg_mode, bg.get("mode", self.combo_bg_mode.currentText()))
-        for key, widget in [("y0",self.bg_y0),("y1",self.bg_y1),("x0",self.bg_x0),("x1",self.bg_x1),("ref_ch0",self.bg_ref_ch0),("ref_ch1",self.bg_ref_ch1)]:
+        for key, widget in [("y0",self.bg_y0),("y1",self.bg_y1),("x0",self.bg_x0),("x1",self.bg_x1)]:
             if key in bg: widget.setValue(int(bg[key]))
-        for key, widget in [("e0",self.bg_e0),("e1",self.bg_e1)]:
+        for key, widget in [("e0",self.bg_e0),("e1",self.bg_e1),("ref_energy0",self.bg_ref_ch0),("ref_energy1",self.bg_ref_ch1)]:
             if key in bg: widget.setValue(float(bg[key]))
+        # Backward-compatible loading of older channel-index reference settings.
+        if "ref_ch0" in bg or "ref_ch1" in bg:
+            e = np.asarray(self.axis_info.energy_axis, dtype=np.float64)
+            L = self.cube.shape[2] if self.cube is not None else len(e)
+            if len(e) == L and L > 0:
+                if "ref_ch0" in bg: self.bg_ref_ch0.setValue(float(e[max(0,min(int(bg["ref_ch0"]),L-1))]))
+                if "ref_ch1" in bg: self.bg_ref_ch1.setValue(float(e[max(0,min(int(bg["ref_ch1"]),L-1))]))
+            else:
+                if "ref_ch0" in bg: self.bg_ref_ch0.setValue(float(bg["ref_ch0"]))
+                if "ref_ch1" in bg: self.bg_ref_ch1.setValue(float(bg["ref_ch1"]))
         self._set_combo_text_safe(self.combo_bg_after, bg.get("after", self.combo_bg_after.currentText()))
         if "clip_negative" in bg: self.chk_bg_clip.setChecked(bool(bg["clip_negative"]))
 
@@ -2996,7 +3054,19 @@ class RR2NMFGui(QMainWindow):
         if "chunk_size" in nmf: self.spin_chunk.setValue(int(nmf["chunk_size"]))
         self._set_combo_text_safe(self.combo_cmap, view.get("cmap", self.combo_cmap.currentText()))
         if hasattr(self, "spin_shape_match_pct") and "shape_match_threshold_pct" in view: self.spin_shape_match_pct.setValue(float(view["shape_match_threshold_pct"]))
-        if hasattr(self, "spin_shape_match_window") and "shape_match_window" in view: self.spin_shape_match_window.setValue(int(view["shape_match_window"]))
+        if hasattr(self, "spin_shape_match_window"):
+            if "shape_match_window_energy" in view:
+                self.spin_shape_match_window.setValue(float(view["shape_match_window_energy"]))
+            elif "shape_match_window" in view:
+                # Legacy value was channels. Convert to current energy width when possible.
+                ch = int(view["shape_match_window"])
+                e = np.asarray((self.roi_axis_info or self.axis_info).energy_axis, dtype=np.float64)
+                if len(e) > 1:
+                    de = np.diff(np.sort(e[np.isfinite(e)])); de = de[de > 0]
+                    step = float(np.nanmedian(de)) if de.size else 1.0
+                    self.spin_shape_match_window.setValue(float(ch * step))
+                else:
+                    self.spin_shape_match_window.setValue(float(ch))
 
         self.update_roi_label()
         if hasattr(self, "refresh_rr_component_list"):
