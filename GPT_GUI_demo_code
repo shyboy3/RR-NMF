@@ -2632,7 +2632,7 @@ class RR2NMFGui(QMainWindow):
             self._sync_current_combined_alias()
             self.refresh_rr_component_list()
             # Stop criterion requested for D>=3: if the next-depth data count is unchanged, run this depth and then stop.
-            self._auto_score_stop_after_current = (target >= 3 and output_count >= input_count)
+            self._auto_score_stop_after_current = (target >= 3 and output_count == input_count)
             roi,X,shape,axis=self.get_roi_cube_and_X()
             params=self.collect_params(include_manual=True, max_manual_depth=target)
             params["run_conventional"] = False
