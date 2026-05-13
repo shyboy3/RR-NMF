@@ -1314,10 +1314,11 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
     #   row 3: spacer
     #   row 4: residual image spanning rank columns
     #   row 5: residual spectrum spanning rank columns
-    #   row 6: optional compact W morphology similarity matrix under the residual spectrum
+    #   row 6: spacer between residual spectrum and W similarity matrix
+    #   row 7: optional compact W morphology similarity matrix under the residual spectrum
     rank = max(1, int(getattr(rr, "rank", 2)))
     cols_node = rank
-    rows_node = 6
+    rows_node = 7
 
     # Keep the display reasonably wide without forcing too many nodes per row.
     # Examples:
@@ -1335,10 +1336,9 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
         ratios.append(0.45)
         cur += 1
         for _ in range(wraps):
-            # rows: W image, H spectrum, spacer, residual image, residual spectrum, compact W-corr
-            # W-corr is placed below the first residual spectrum with extra vertical offset.
-            # The matrix size/aspect is preserved; only its position is moved down to avoid title overlap.
-            ratios.extend([3.0, 1.0, 0.30, 3.0, 1.0, 1.45])
+            # rows: W image, H spectrum, spacer, residual image, residual spectrum, extra spacer, compact W-corr
+            # W-corr matrix height/aspect is preserved; the extra spacer only moves it down.
+            ratios.extend([3.0, 1.0, 0.30, 3.0, 1.0, 0.38, 1.45])
             cur += rows_node
         ratios.append(0.20)
         cur += 1
@@ -1464,7 +1464,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                 try:
                     labels_corr, Ccorr = compute_w_morphology_corr_for_depth(nodes, nonnegative_display=True)
                     if Ccorr.size:
-                        holder_corr = fig.add_subplot(gs[br + 5, bc:bc + rank])
+                        holder_corr = fig.add_subplot(gs[br + 6, bc:bc + rank])
                         holder_corr.axis("off")
                         corr_ax = inset_axes(holder_corr, width="48%", height="95%", loc="lower center", borderpad=0.0)
                         imcorr = corr_ax.imshow(Ccorr, vmin=0, vmax=1, cmap="viridis", aspect="equal")
@@ -1798,7 +1798,7 @@ class AnalysisWorker(QThread):
 
 class RR2NMFGui(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v6.1 energy-unit ranges"); self.resize(1850,1080)
+        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v6.4 conv button + Wcorr spacing"); self.resize(1850,1080)
         self.cube=None; self.original_cube=None; self.roi_cube=None; self.X=None; self.image_shape=None
         self.axis_info=make_default_axis_info((1,1,1)); self.roi_axis_info=make_default_axis_info((1,1,1))
         self.conv_result=None; self.rr_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.bg_applied=False; self._raw_mouse_press=None; self.selected_raw_pixel=None
@@ -1885,9 +1885,11 @@ class RR2NMFGui(QMainWindow):
 
         self.combo_cmap=QComboBox(); self.combo_cmap.addItems(["viridis","plasma","inferno","magma","cividis","gray","turbo","coolwarm","jet"]); self.combo_cmap.currentTextChanged.connect(self.refresh_views)
         self.spin_shape_match_pct=QDoubleSpinBox(); self.spin_shape_match_pct.setRange(0,100); self.spin_shape_match_pct.setDecimals(1); self.spin_shape_match_pct.setValue(80.0); self.spin_shape_match_pct.setSuffix(" %"); self.spin_shape_match_pct.valueChanged.connect(self.refresh_views)
-        self.spin_shape_match_window=QDoubleSpinBox(); self.spin_shape_match_window.setRange(0.0,1e9); self.spin_shape_match_window.setDecimals(6); self.spin_shape_match_window.setValue(21.0); self.spin_shape_match_window.setSingleStep(1.0); self.spin_shape_match_window.setSuffix(" energy"); self.spin_shape_match_window.setToolTip("Energy-axis window width, e.g. eV for EELS data. Converted to an odd number of channels internally."); self.spin_shape_match_window.valueChanged.connect(self.refresh_views)
-        vg=QGroupBox("View / Run"); vf=QFormLayout(vg); vf.addRow("Colormap",self.combo_cmap); vf.addRow("H/raw shape-match threshold", self.spin_shape_match_pct); vf.addRow("H/raw shape-match window energy width", self.spin_shape_match_window)
-        self.btn_run=QPushButton("Run Full Auto Analysis on ROI"); self.btn_run.clicked.connect(self.run_analysis)
+        self.spin_shape_match_window=QDoubleSpinBox(); self.spin_shape_match_window.setRange(0.0,1e9); self.spin_shape_match_window.setDecimals(6); self.spin_shape_match_window.setValue(21.0); self.spin_shape_match_window.setSingleStep(1.0); self.spin_shape_match_window.setSuffix(" eV"); self.spin_shape_match_window.setToolTip("Energy-axis window width in eV/axis units. Converted to an odd number of channels internally."); self.spin_shape_match_window.valueChanged.connect(self.refresh_views)
+        vg=QGroupBox("View / Run"); vf=QFormLayout(vg); vf.addRow("Colormap",self.combo_cmap); vf.addRow("H/raw shape-match threshold", self.spin_shape_match_pct); vf.addRow("H/raw shape-match window width (eV)", self.spin_shape_match_window)
+        self.btn_run=QPushButton("Run Full Analysis on ROI (Conv + rr)"); self.btn_run.clicked.connect(self.run_analysis)
+        self.btn_run_conv_only=QPushButton("Run Conventional NMF Only on ROI")
+        self.btn_run_conv_only.clicked.connect(self.run_conventional_only)
         self.btn_run_auto_stage=QPushButton("Manual Step: Run/Refresh Current Source Depth")
         self.btn_run_auto_stage.clicked.connect(self.run_auto_until_manual_depth)
         self.btn_continue_manual=QPushButton("Continue One Depth with Current Manual Merge/Pass")
@@ -1899,7 +1901,7 @@ class RR2NMFGui(QMainWindow):
         self.btn_load_settings=QPushButton("Load ROI/BG/NMF Settings")
         self.btn_load_settings.clicked.connect(self.load_processing_settings)
         self.btn_export=QPushButton("Export CSV"); self.btn_export.clicked.connect(self.export_csv)
-        vf.addRow(self.btn_run); vf.addRow(self.btn_run_auto_stage); vf.addRow(self.btn_continue_manual); vf.addRow(self.btn_reset_analysis); vf.addRow(self.btn_save_settings); vf.addRow(self.btn_load_settings); vf.addRow(self.btn_export); cl.addWidget(vg)
+        vf.addRow(self.btn_run); vf.addRow(self.btn_run_conv_only); vf.addRow(self.btn_run_auto_stage); vf.addRow(self.btn_continue_manual); vf.addRow(self.btn_reset_analysis); vf.addRow(self.btn_save_settings); vf.addRow(self.btn_load_settings); vf.addRow(self.btn_export); cl.addWidget(vg)
         self.log=QTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(180); cl.addWidget(QLabel("Log")); cl.addWidget(self.log); cl.addStretch(1)
 
         self.tabs=QTabWidget(); split.addWidget(self.tabs)
@@ -2371,7 +2373,7 @@ class RR2NMFGui(QMainWindow):
         self.rr_combined_sets=self._get_current_depth_sets()
 
     def _set_run_buttons_enabled(self, enabled: bool):
-        for name in ("btn_run", "btn_run_auto_stage", "btn_continue_manual"):
+        for name in ("btn_run", "btn_run_conv_only", "btn_run_auto_stage", "btn_continue_manual"):
             b = getattr(self, name, None)
             if b is not None:
                 b.setEnabled(enabled)
@@ -2390,6 +2392,7 @@ class RR2NMFGui(QMainWindow):
         except Exception as e: QMessageBox.warning(self,"ROI/Data error",str(e)); return
         self.roi_cube=roi; self.X=X; self.image_shape=shape; self.roi_axis_info=axis
         params=self.collect_params(include_manual=True, max_manual_depth=md-1)
+        params["run_conventional"] = False
         params["run_rr"] = True
         params["rr_depth"] = stop_depth
         self._set_run_buttons_enabled(False)
@@ -2424,6 +2427,7 @@ class RR2NMFGui(QMainWindow):
         except Exception as e: QMessageBox.warning(self,"ROI/Data error",str(e)); return
         self.roi_cube=roi; self.X=X; self.image_shape=shape; self.roi_axis_info=axis
         params=self.collect_params(include_manual=True, max_manual_depth=md)
+        params["run_conventional"] = False
         params["run_rr"] = True
         params["rr_depth"] = md
         self._set_run_buttons_enabled(False)
@@ -2434,18 +2438,41 @@ class RR2NMFGui(QMainWindow):
         summary=", ".join([f"D{d}:{len((getattr(self,'manual_depth_groups',{}) or {}).get(d,[]) or [])} set(s)" for d in range(self._current_manual_depth(), md+1) if (getattr(self,'manual_depth_groups',{}) or {}).get(d,[])])
         self.append_log(f"Manual continue: computing exactly to depth {md} using saved manual merge groups ({summary}). After completion, the panel will expose depth {md} components for target depth {md+1 if md < final_depth else 'final complete'}.")
 
+    def run_conventional_only(self):
+        """Run only the conventional NMF baseline on the current ROI.
+
+This does not modify the current rr-NMF/manual tree results.
+        """
+        try: roi,X,shape,axis=self.get_roi_cube_and_X()
+        except Exception as e: QMessageBox.warning(self,"ROI/Data error",str(e)); return
+        self.roi_cube=roi; self.X=X; self.image_shape=shape; self.roi_axis_info=axis; self._set_run_buttons_enabled(False)
+        params=self.collect_params(include_manual=False)
+        params["run_conventional"] = True
+        params["run_rr"] = False
+        self.worker=AnalysisWorker(X,shape,params)
+        self.worker.finished_ok.connect(self.on_analysis_finished)
+        self.worker.failed.connect(self.on_analysis_failed)
+        self.worker.start()
+        self.append_log("Running conventional NMF only on current ROI.")
+
     def run_analysis(self):
         try: roi,X,shape,axis=self.get_roi_cube_and_X()
         except Exception as e: QMessageBox.warning(self,"ROI/Data error",str(e)); return
         self.roi_cube=roi; self.X=X; self.image_shape=shape; self.roi_axis_info=axis; self._set_run_buttons_enabled(False)
         params=self.collect_params(include_manual=False)
+        params["run_conventional"] = True
+        params["run_rr"] = True
         if params.get("manual_groups"):
             md=list(params["manual_groups"].keys())[0]
             self.append_log(f"Manual depth enabled: depth {md} will use {len(params['manual_groups'][md])} Combined Set node(s).")
         self.worker=AnalysisWorker(X,shape,params); self.worker.finished_ok.connect(self.on_analysis_finished); self.worker.failed.connect(self.on_analysis_failed); self.worker.start()
 
     def on_analysis_finished(self,conv,rr,logs):
-        self.conv_result=conv; self.rr_result=rr; self._set_run_buttons_enabled(True); self.append_log(logs); self.refresh_views(); self.refresh_spectrum_sources()
+        if conv is not None:
+            self.conv_result=conv
+        if rr is not None:
+            self.rr_result=rr
+        self._set_run_buttons_enabled(True); self.append_log(logs); self.refresh_views(); self.refresh_spectrum_sources()
 
     def on_analysis_failed(self,err):
         self._set_run_buttons_enabled(True); QMessageBox.critical(self,"Analysis failed",err); self.append_log(err)
