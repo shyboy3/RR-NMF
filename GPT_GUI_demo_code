@@ -1,6 +1,6 @@
 
 """
-rr2_nmf_gui_ver5_5_manual_start_depth.py
+rr2_nmf_gui_ver5_2_manual_start_depth.py
 
 Single-file rr-NMF GUI based on the v4.4 workflow, with EELS Interpretation added.
 This file keeps the v4.4-style core workflow in one executable Python file.
@@ -11,7 +11,7 @@ Optional loaders:
     pip install hyperspy exspy rosettasciio
 """
 
-import os, sys, traceback
+import os, sys, traceback, json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -964,7 +964,12 @@ def run_rr_nmf(X, image_shape, rank=2, max_depth=3, residual_mode="redistribute_
                 nodes = nxt
         else:
             nodes = []
-    return RRNMFResult(summaries, pd.DataFrame(erecs), pd.DataFrame(nrecs), rank)
+    node_df = pd.DataFrame(nrecs)
+    if not node_df.empty and "global_ratio" in node_df.columns:
+        depth_sum = node_df.groupby("depth")["global_ratio"].transform("sum")
+        node_df["depth_total_global_ratio"] = depth_sum
+        node_df["node_fraction_within_depth"] = node_df["global_ratio"] / depth_sum.replace(0, np.nan)
+    return RRNMFResult(summaries, pd.DataFrame(erecs), node_df, rank)
 
 
 def add_colorbar(fig, ax, im):
@@ -1158,7 +1163,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
     #   row 4: residual spectrum spanning rank columns
     rank = max(1, int(getattr(rr, "rank", 2)))
     cols_node = rank
-    rows_node = 4
+    rows_node = 5
 
     # Keep the display reasonably wide without forcing too many nodes per row.
     # Examples:
@@ -1176,7 +1181,10 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
         ratios.append(0.45)
         cur += 1
         for _ in range(wraps):
-            ratios.extend([3.0, 1.0, 3.0, 1.0])
+            # rows: W image, H spectrum, spacer, residual image, residual spectrum
+            # Reduced W/H vertical gap via lower global hspace, while keeping an extra
+            # one-line spacer between H spectra and the residual panel.
+            ratios.extend([3.0, 1.0, 0.30, 3.0, 1.0])
             cur += rows_node
         ratios.append(0.20)
         cur += 1
@@ -1266,7 +1274,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                 # Display residual image as mean residual per spectral channel.
                 L_res = len(ns.residual_spectrum) if ns.residual_spectrum is not None else 1
                 rimg_mean = np.asarray(ns.residual_image, dtype=np.float64) / max(1, int(L_res))
-                ax = fig.add_subplot(gs[br + 2, bc:bc + rank])
+                ax = fig.add_subplot(gs[br + 3, bc:bc + rank])
                 im = ax.imshow(rimg_mean, cmap=cmap, origin="upper", aspect="equal")
                 ax.set_title(_combined_title(ns, f"D{d} N{i} Residual mean"), fontsize=9)
                 ax.set_xticks([])
@@ -1282,7 +1290,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                 # Keep the residual spectrum half-width, centered under the residual image.
                 # Use a GridSpec-hosted inset instead of absolute add_axes coordinates so
                 # the alignment remains stable in both full-auto and manual partial trees.
-                holder = fig.add_subplot(gs[br + 3, bc:bc + rank])
+                holder = fig.add_subplot(gs[br + 4, bc:bc + rank])
                 holder.axis("off")
                 sp = inset_axes(holder, width="50%", height="100%", loc="center", borderpad=0.0)
                 sp.plot(x, rspec_mean, linewidth=1.0)
@@ -1292,7 +1300,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                 sp.tick_params(labelsize=7)
 
     fig.suptitle(f"rr-NMF Tree rank={rank}: H basis with weighted raw overlay", fontsize=14)
-    fig.subplots_adjust(left=0.012, right=0.988, top=0.965, bottom=0.025, hspace=0.36, wspace=0.88)
+    fig.subplots_adjust(left=0.012, right=0.988, top=0.965, bottom=0.025, hspace=0.25, wspace=0.88)
 
 
 def plot_energy(fig, conv, rr):
@@ -1614,7 +1622,10 @@ class RR2NMFGui(QMainWindow):
 
     def _build_ui(self):
         central=QWidget(); self.setCentralWidget(central); layout=QHBoxLayout(central); split=QSplitter(Qt.Horizontal); layout.addWidget(split)
-        ctrl=QWidget(); cl=QVBoxLayout(ctrl); split.addWidget(ctrl); split.setStretchFactor(1,1)
+        ctrl=QWidget(); cl=QVBoxLayout(ctrl)
+        ctrl_scroll=QScrollArea(); ctrl_scroll.setWidget(ctrl); ctrl_scroll.setWidgetResizable(True)
+        ctrl_scroll.setMinimumWidth(360)
+        split.addWidget(ctrl_scroll); split.setStretchFactor(1,1)
 
         g=QGroupBox("Data / ROI"); f=QFormLayout(g)
         self.btn_load=QPushButton("Load EELS/EDS Data"); self.btn_load.clicked.connect(self.load_file)
@@ -1693,8 +1704,12 @@ class RR2NMFGui(QMainWindow):
         self.btn_continue_manual.clicked.connect(self.continue_from_manual_merge)
         self.btn_reset_analysis=QPushButton("Reset Analysis / Manual Results")
         self.btn_reset_analysis.clicked.connect(self.reset_analysis_state)
+        self.btn_save_settings=QPushButton("Save ROI/BG/NMF Settings")
+        self.btn_save_settings.clicked.connect(self.save_processing_settings)
+        self.btn_load_settings=QPushButton("Load ROI/BG/NMF Settings")
+        self.btn_load_settings.clicked.connect(self.load_processing_settings)
         self.btn_export=QPushButton("Export CSV"); self.btn_export.clicked.connect(self.export_csv)
-        vf.addRow(self.btn_run); vf.addRow(self.btn_run_auto_stage); vf.addRow(self.btn_continue_manual); vf.addRow(self.btn_reset_analysis); vf.addRow(self.btn_export); cl.addWidget(vg)
+        vf.addRow(self.btn_run); vf.addRow(self.btn_run_auto_stage); vf.addRow(self.btn_continue_manual); vf.addRow(self.btn_reset_analysis); vf.addRow(self.btn_save_settings); vf.addRow(self.btn_load_settings); vf.addRow(self.btn_export); cl.addWidget(vg)
         self.log=QTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(180); cl.addWidget(QLabel("Log")); cl.addWidget(self.log); cl.addStretch(1)
 
         self.tabs=QTabWidget(); split.addWidget(self.tabs)
@@ -2693,6 +2708,126 @@ class RR2NMFGui(QMainWindow):
         self.dataframe_to_table(pd.DataFrame(rows), self.table_eels)
 
 
+
+    def _combo_text_safe(self, combo):
+        return combo.currentText() if combo is not None else ""
+
+    def _set_combo_text_safe(self, combo, text):
+        if combo is None:
+            return
+        idx = combo.findText(str(text))
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    def get_processing_settings(self):
+        """Collect ROI, background, NMF and basic view settings into a JSON-safe dict."""
+        return {
+            "version": "rr2_nmf_gui_ver5_6_settings_v1",
+            "roi": {
+                "y0": self.spin_y0.value(), "y1": self.spin_y1.value(),
+                "x0": self.spin_x0.value(), "x1": self.spin_x1.value(),
+                "l0": self.spin_l0.value(), "l1": self.spin_l1.value(),
+                "e0": self.spin_e0.value(), "e1": self.spin_e1.value(),
+                "normalize": self.combo_norm.currentText(),
+            },
+            "background": {
+                "mode": self.combo_bg_mode.currentText(),
+                "y0": self.bg_y0.value(), "y1": self.bg_y1.value(),
+                "x0": self.bg_x0.value(), "x1": self.bg_x1.value(),
+                "e0": self.bg_e0.value(), "e1": self.bg_e1.value(),
+                "ref_ch0": self.bg_ref_ch0.value(), "ref_ch1": self.bg_ref_ch1.value(),
+                "after": self.combo_bg_after.currentText(),
+                "clip_negative": self.chk_bg_clip.isChecked(),
+            },
+            "nmf": {
+                "run_conventional": self.chk_conv.isChecked(),
+                "conventional_k": self.spin_k.value(),
+                "run_rr": self.chk_rr.isChecked(),
+                "recursive_rank": self.spin_rank.value(),
+                "recursive_depth": self.spin_depth.value(),
+                "manual_depth_workflow": self.chk_manual_depth.isChecked(),
+                "manual_start_depth": self.spin_manual_depth.value(),
+                "residual_mode": self.combo_res_mode.currentText(),
+                "residual_nonnegative": self.combo_res_nn.currentText(),
+                "decompose_residual_branch": self.chk_decomp_res.isChecked(),
+                "max_iter": self.spin_iter.value(),
+                "init": self.combo_init.currentText(),
+                "solver": self.combo_solver.currentText(),
+                "random_seed": self.spin_seed.value(),
+                "chunk_size": self.spin_chunk.value(),
+            },
+            "view": {"cmap": self.combo_cmap.currentText()},
+        }
+
+    def apply_processing_settings(self, cfg):
+        """Apply ROI, background, NMF and basic view settings from a dict."""
+        roi = cfg.get("roi", {})
+        bg = cfg.get("background", {})
+        nmf = cfg.get("nmf", {})
+        view = cfg.get("view", {})
+
+        # Block ROI energy/channel cross-update signals while restoring values.
+        widgets_to_block = [self.spin_y0,self.spin_y1,self.spin_x0,self.spin_x1,self.spin_l0,self.spin_l1,self.spin_e0,self.spin_e1]
+        old_states = [w.blockSignals(True) for w in widgets_to_block]
+        try:
+            for key, widget in [("y0",self.spin_y0),("y1",self.spin_y1),("x0",self.spin_x0),("x1",self.spin_x1),("l0",self.spin_l0),("l1",self.spin_l1)]:
+                if key in roi: widget.setValue(int(roi[key]))
+            for key, widget in [("e0",self.spin_e0),("e1",self.spin_e1)]:
+                if key in roi: widget.setValue(float(roi[key]))
+        finally:
+            for w, old in zip(widgets_to_block, old_states):
+                w.blockSignals(old)
+        self._set_combo_text_safe(self.combo_norm, roi.get("normalize", self.combo_norm.currentText()))
+
+        self._set_combo_text_safe(self.combo_bg_mode, bg.get("mode", self.combo_bg_mode.currentText()))
+        for key, widget in [("y0",self.bg_y0),("y1",self.bg_y1),("x0",self.bg_x0),("x1",self.bg_x1),("ref_ch0",self.bg_ref_ch0),("ref_ch1",self.bg_ref_ch1)]:
+            if key in bg: widget.setValue(int(bg[key]))
+        for key, widget in [("e0",self.bg_e0),("e1",self.bg_e1)]:
+            if key in bg: widget.setValue(float(bg[key]))
+        self._set_combo_text_safe(self.combo_bg_after, bg.get("after", self.combo_bg_after.currentText()))
+        if "clip_negative" in bg: self.chk_bg_clip.setChecked(bool(bg["clip_negative"]))
+
+        if "run_conventional" in nmf: self.chk_conv.setChecked(bool(nmf["run_conventional"]))
+        if "conventional_k" in nmf: self.spin_k.setValue(int(nmf["conventional_k"]))
+        if "run_rr" in nmf: self.chk_rr.setChecked(bool(nmf["run_rr"]))
+        if "recursive_rank" in nmf: self.spin_rank.setValue(int(nmf["recursive_rank"]))
+        if "recursive_depth" in nmf: self.spin_depth.setValue(int(nmf["recursive_depth"]))
+        if "manual_depth_workflow" in nmf: self.chk_manual_depth.setChecked(bool(nmf["manual_depth_workflow"]))
+        if "manual_start_depth" in nmf: self.spin_manual_depth.setValue(int(nmf["manual_start_depth"]))
+        self._set_combo_text_safe(self.combo_res_mode, nmf.get("residual_mode", self.combo_res_mode.currentText()))
+        self._set_combo_text_safe(self.combo_res_nn, nmf.get("residual_nonnegative", self.combo_res_nn.currentText()))
+        if "decompose_residual_branch" in nmf: self.chk_decomp_res.setChecked(bool(nmf["decompose_residual_branch"]))
+        if "max_iter" in nmf: self.spin_iter.setValue(int(nmf["max_iter"]))
+        self._set_combo_text_safe(self.combo_init, nmf.get("init", self.combo_init.currentText()))
+        self._set_combo_text_safe(self.combo_solver, nmf.get("solver", self.combo_solver.currentText()))
+        if "random_seed" in nmf: self.spin_seed.setValue(int(nmf["random_seed"]))
+        if "chunk_size" in nmf: self.spin_chunk.setValue(int(nmf["chunk_size"]))
+        self._set_combo_text_safe(self.combo_cmap, view.get("cmap", self.combo_cmap.currentText()))
+
+        self.update_roi_label()
+        if hasattr(self, "refresh_rr_component_list"):
+            self.refresh_rr_component_list()
+        self.refresh_views()
+
+    def save_processing_settings(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Save ROI/BG/NMF settings", "rr_nmf_settings.json", "JSON Files (*.json)")
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.get_processing_settings(), f, indent=2, ensure_ascii=False)
+        self.append_log(f"Saved ROI/BG/NMF settings: {path}")
+
+    def load_processing_settings(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Load ROI/BG/NMF settings", "", "JSON Files (*.json);;All Files (*)")
+        if not path:
+            return
+        with open(path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        self.apply_processing_settings(cfg)
+        self.append_log(f"Loaded ROI/BG/NMF settings: {path}")
+
     def dataframe_to_table(self,df,table,max_rows=2000):
         if df is None or df.empty: table.clear(); table.setRowCount(0); table.setColumnCount(0); return
         df=df.head(max_rows); table.setRowCount(len(df)); table.setColumnCount(len(df.columns)); table.setHorizontalHeaderLabels([str(c) for c in df.columns])
@@ -2706,7 +2841,13 @@ class RR2NMFGui(QMainWindow):
         if self.conv_result is not None: dfs.append(self.conv_result.energy_records)
         if self.rr_result is not None: dfs.append(self.rr_result.energy_records)
         self.dataframe_to_table(pd.concat(dfs,ignore_index=True) if dfs else pd.DataFrame(),self.table_energy)
-        self.dataframe_to_table(self.rr_result.node_records if self.rr_result is not None else pd.DataFrame(),self.table_nodes)
+        node_df = self.rr_result.node_records.copy() if self.rr_result is not None else pd.DataFrame()
+        if not node_df.empty and "global_ratio" in node_df.columns:
+            if "depth_total_global_ratio" not in node_df.columns:
+                depth_sum = node_df.groupby("depth")["global_ratio"].transform("sum")
+                node_df["depth_total_global_ratio"] = depth_sum
+                node_df["node_fraction_within_depth"] = node_df["global_ratio"] / depth_sum.replace(0, np.nan)
+        self.dataframe_to_table(node_df,self.table_nodes)
 
     def export_csv(self):
         out=QFileDialog.getExistingDirectory(self,"Select output directory")
