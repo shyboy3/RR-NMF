@@ -978,6 +978,149 @@ def add_colorbar(fig, ax, im):
     cb.ax.tick_params(labelsize=7)
 
 
+def safe_pearson_1d(a, b, eps=1e-12):
+    """Bias/intensity-insensitive Pearson correlation for shape comparison."""
+    a = np.asarray(a, dtype=np.float64).reshape(-1)
+    b = np.asarray(b, dtype=np.float64).reshape(-1)
+    m = np.isfinite(a) & np.isfinite(b)
+    if np.count_nonzero(m) < 3:
+        return np.nan
+    aa = a[m] - np.nanmean(a[m])
+    bb = b[m] - np.nanmean(b[m])
+    den = float(np.sqrt(np.sum(aa * aa) * np.sum(bb * bb)))
+    return float(np.sum(aa * bb) / den) if den > eps else np.nan
+
+
+def compute_w_morphology_corr_for_depth(nodes):
+    """Return labels and a morphology-only W-map correlation matrix for all components in a depth."""
+    labels, maps = [], []
+    for ni, ns in enumerate(nodes or []):
+        for ci, wm in enumerate(getattr(ns, "component_maps", []) or []):
+            labels.append(f"N{ni}C{ci}")
+            maps.append(np.asarray(wm, dtype=np.float64).reshape(-1))
+    n = len(maps)
+    if n == 0:
+        return labels, np.zeros((0, 0), dtype=np.float64)
+    C = np.eye(n, dtype=np.float64)
+    for i in range(n):
+        for j in range(i + 1, n):
+            c = safe_pearson_1d(maps[i], maps[j])
+            C[i, j] = C[j, i] = c if np.isfinite(c) else 0.0
+    return labels, C
+
+
+def local_shape_match_mask(h, w, threshold_pct=80.0, window=None):
+    """Find energy-channel regions where H and weighted raw have local shape agreement.
+
+    Uses sliding-window Pearson correlation, so baseline offset and absolute intensity scale
+    are removed. threshold_pct is 0-100 and internally mapped to 0.0-1.0.
+    """
+    h = np.asarray(h, dtype=np.float64).reshape(-1)
+    w = np.asarray(w, dtype=np.float64).reshape(-1)
+    L = min(len(h), len(w))
+    if L <= 3:
+        return np.zeros(L, dtype=bool), np.full(L, np.nan), []
+    h = h[:L]
+    w = w[:L]
+    if window is None:
+        window = max(9, int(round(L / 40)))
+    window = int(max(5, min(window, max(5, L))))
+    if window % 2 == 0:
+        window += 1
+    half = window // 2
+    corr = np.full(L, np.nan, dtype=np.float64)
+    for k in range(L):
+        a = max(0, k - half)
+        b = min(L, k + half + 1)
+        if b - a >= 5:
+            corr[k] = safe_pearson_1d(h[a:b], w[a:b])
+    thr = float(threshold_pct) / 100.0
+    mask = np.isfinite(corr) & (corr >= thr)
+    intervals = []
+    st = None
+    for i, ok in enumerate(mask):
+        if ok and st is None:
+            st = i
+        if (not ok or i == L - 1) and st is not None:
+            en = i if not ok else i + 1
+            if en - st >= 2:
+                intervals.append((st, en))
+            st = None
+    return mask, corr, intervals
+
+
+def _shade_match_intervals(ax, x, intervals, ymin=0.0, ymax=1.0):
+    """Draw semi-transparent match windows on an axis."""
+    if x is None or len(x) == 0:
+        return
+    x = np.asarray(x)
+    for st, en in intervals:
+        st = max(0, min(int(st), len(x) - 1))
+        en_i = max(st, min(int(en) - 1, len(x) - 1))
+        ax.axvspan(float(x[st]), float(x[en_i]), ymin=ymin, ymax=ymax, alpha=0.14)
+
+
+def plot_rr_diagnostics_summary(fig, rr, axis, X_for_weight=None, match_threshold_pct=80.0):
+    """Summary tab: W morphology correlation maps and H/raw local-match ratios by depth."""
+    fig.clear()
+    if rr is None:
+        fig.set_size_inches(12, 5, forward=True)
+        ax = fig.add_subplot(111)
+        ax.axis("off")
+        ax.text(0.5, 0.5, "Run rr-NMF first", ha="center", va="center", fontsize=14)
+        return
+    depths = rr.node_summaries_by_depth
+    ndepth = max(1, len(depths))
+    fig.set_size_inches(18, max(5, ndepth * 4.2), forward=True)
+    gs = fig.add_gridspec(ndepth, 2, width_ratios=[1.15, 1.45])
+    for d, nodes in enumerate(depths):
+        axc = fig.add_subplot(gs[d, 0])
+        labels, C = compute_w_morphology_corr_for_depth(nodes)
+        if C.size:
+            im = axc.imshow(C, vmin=-1, vmax=1, cmap="coolwarm", aspect="auto")
+            axc.set_title(f"Depth {d}: W morphology correlation", fontsize=11)
+            if len(labels) <= 24:
+                axc.set_xticks(range(len(labels))); axc.set_xticklabels(labels, rotation=90, fontsize=6)
+                axc.set_yticks(range(len(labels))); axc.set_yticklabels(labels, fontsize=6)
+            else:
+                axc.set_xticks([]); axc.set_yticks([])
+            add_colorbar(fig, axc, im)
+        else:
+            axc.axis("off"); axc.text(0.5, 0.5, f"Depth {d}: no W maps", ha="center", va="center")
+
+        axb = fig.add_subplot(gs[d, 1])
+        names, vals, fullcorrs = [], [], []
+        if X_for_weight is not None:
+            for ni, ns in enumerate(nodes):
+                for ci, h in enumerate(getattr(ns, "component_spectra", []) or []):
+                    try:
+                        wspec = weighted_raw_spectrum_by_map(X_for_weight, ns.component_maps[ci])
+                        mask, _, _ = local_shape_match_mask(h, wspec, match_threshold_pct)
+                        names.append(f"N{ni}C{ci}")
+                        vals.append(100.0 * float(np.count_nonzero(mask)) / max(1, len(mask)))
+                        fullcorrs.append(safe_pearson_1d(normalize_for_shape_compare(h, "max"), normalize_for_shape_compare(wspec, "max")))
+                    except Exception:
+                        pass
+        if vals:
+            axb.bar(range(len(vals)), vals)
+            axb.set_ylim(0, 100)
+            axb.set_ylabel("matched channels (%)")
+            axb.set_title(f"Depth {d}: H vs weighted raw local shape match ≥ {match_threshold_pct:.0f}%", fontsize=11)
+            axb.set_xticks(range(len(names)))
+            axb.set_xticklabels(names, rotation=90, fontsize=7)
+            axb.grid(True, axis="y", alpha=0.25)
+            # annotate full-spectrum shape corr when space allows
+            if len(vals) <= 28:
+                for k, (v, c) in enumerate(zip(vals, fullcorrs)):
+                    if np.isfinite(c):
+                        axb.text(k, min(98, v + 2), f"r={c:.2f}", ha="center", va="bottom", rotation=90, fontsize=6)
+        else:
+            axb.axis("off")
+            axb.text(0.5, 0.5, "No weighted raw spectra available", ha="center", va="center")
+    fig.suptitle("rr-NMF interpretation diagnostics: morphology and spectrum-shape agreement", fontsize=14)
+    fig.subplots_adjust(left=0.06, right=0.975, top=0.94, bottom=0.045, hspace=0.65, wspace=0.28)
+
+
 class Canvas(FigureCanvas):
     def __init__(self, w=12, h=8):
         self.fig = Figure(figsize=(w,h), dpi=100)
@@ -1151,7 +1294,7 @@ def plot_conv(fig, conv, axis, cmap="viridis", maxn=20):
     fig.subplots_adjust(left=.04,right=.98,top=.96,bottom=.05,hspace=.75,wspace=.2)
 
 
-def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"):
+def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max", match_threshold_pct=80.0):
     fig.clear()
     depths = rr.node_summaries_by_depth
 
@@ -1215,7 +1358,25 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
         axd.axis("off")
         combined_count = sum(1 for _ns in nodes if str(getattr(_ns, "path", "")).startswith("manualD"))
         header = f"Depth {d}" + (f"   |   {combined_count} combined-data node(s)" if combined_count else "")
-        axd.text(0, 0.5, header, fontweight="bold", fontsize=13, va="center")
+        axd.text(0, 0.84, header, fontweight="bold", fontsize=13, va="center")
+        # Compact morphology-correlation map at each depth header. It is independent
+        # of absolute W intensity and compares flattened W-map shapes only.
+        try:
+            labels_corr, Ccorr = compute_w_morphology_corr_for_depth(nodes)
+            if Ccorr.size:
+                corr_ax = inset_axes(axd, width="28%", height="72%", loc="center right", borderpad=0.0)
+                imcorr = corr_ax.imshow(Ccorr, vmin=-1, vmax=1, cmap="coolwarm", aspect="auto")
+                corr_ax.set_title("W morphology corr", fontsize=7)
+                if len(labels_corr) <= 12:
+                    corr_ax.set_xticks(range(len(labels_corr)))
+                    corr_ax.set_yticks(range(len(labels_corr)))
+                    corr_ax.set_xticklabels(labels_corr, rotation=90, fontsize=5)
+                    corr_ax.set_yticklabels(labels_corr, fontsize=5)
+                else:
+                    corr_ax.set_xticks([]); corr_ax.set_yticks([])
+                corr_ax.tick_params(length=1)
+        except Exception:
+            pass
 
         for i, ns in enumerate(nodes):
             wr = i // max_nodes
@@ -1243,7 +1404,10 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                         wspec = weighted_raw_spectrum_by_map(X_for_weight, wmap)
                         corr = safe_shape_correlation(hspec, wspec, overlay_mode)
                         corr_txt = f", corr({overlay_mode})={corr:.3f}" if np.isfinite(corr) else ", corr=nan"
+                        mask, local_corr, intervals = local_shape_match_mask(hspec, wspec, match_threshold_pct)
+                        match_ratio = 100.0 * float(np.count_nonzero(mask)) / max(1, len(mask))
                         line1, = sp.plot(x, hspec, linewidth=1.0, label="H basis (left)")
+                        _shade_match_intervals(sp, x, intervals)
                         sp2 = sp.twinx()
                         line2, = sp2.plot(x, wspec, linewidth=1.2, linestyle="-", color="red", label="weighted raw (right)")
                         # Keep the right axis attached to the spectrum axes; avoid outward offset.
@@ -1251,6 +1415,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                         sp2.set_ylabel("weighted raw", fontsize=7, labelpad=2)
                         sp2.tick_params(axis="y", labelsize=7, pad=2)
                         sp.legend([line1, line2], [line1.get_label(), line2.get_label()], fontsize=6, loc="best")
+                        corr_txt += f", match≥{match_threshold_pct:.0f}%:{match_ratio:.0f}%"
                     except Exception:
                         sp.plot(x, hspec, linewidth=1.0, label="H basis")
                         sp.legend(fontsize=6, loc="best")
@@ -1696,7 +1861,8 @@ class RR2NMFGui(QMainWindow):
         cl.addWidget(ng)
 
         self.combo_cmap=QComboBox(); self.combo_cmap.addItems(["viridis","plasma","inferno","magma","cividis","gray","turbo","coolwarm","jet"]); self.combo_cmap.currentTextChanged.connect(self.refresh_views)
-        vg=QGroupBox("View / Run"); vf=QFormLayout(vg); vf.addRow("Colormap",self.combo_cmap)
+        self.spin_shape_match_pct=QDoubleSpinBox(); self.spin_shape_match_pct.setRange(0,100); self.spin_shape_match_pct.setDecimals(1); self.spin_shape_match_pct.setValue(80.0); self.spin_shape_match_pct.setSuffix(" %"); self.spin_shape_match_pct.valueChanged.connect(self.refresh_views)
+        vg=QGroupBox("View / Run"); vf=QFormLayout(vg); vf.addRow("Colormap",self.combo_cmap); vf.addRow("H/raw shape-match threshold", self.spin_shape_match_pct)
         self.btn_run=QPushButton("Run Full Auto Analysis on ROI"); self.btn_run.clicked.connect(self.run_analysis)
         self.btn_run_auto_stage=QPushButton("Manual Step: Run/Refresh Current Source Depth")
         self.btn_run_auto_stage.clicked.connect(self.run_auto_until_manual_depth)
@@ -1717,6 +1883,7 @@ class RR2NMFGui(QMainWindow):
         self.canvas_tree=Canvas(14,10); tree_page=QWidget(); tl=QVBoxLayout(tree_page); tl.addWidget(PlotPanel(self.canvas_tree),5); tl.addWidget(self._build_combine_panel(),2); self.tabs.addTab(tree_page,"rr-NMF Tree")
         self.canvas_conv=Canvas(16,10); self.tabs.addTab(PlotPanel(self.canvas_conv),"Conventional NMF")
         self.canvas_energy=Canvas(12,8); self.tabs.addTab(PlotPanel(self.canvas_energy),"Energy Summary")
+        self.canvas_diag=Canvas(16,8); self.tabs.addTab(PlotPanel(self.canvas_diag),"rr Interpretation Summary")
         self.canvas_eds=Canvas(12.5,5.2); self.tabs.addTab(self._build_eds_tab(),"EDS Analysis")
         self.canvas_eels=Canvas(12.5,5.2); self.tabs.addTab(self._build_eels_tab(),"EELS Interpretation")
         self.table_energy=QTableWidget(); self.tabs.addTab(self.table_energy,"Energy Table")
@@ -2232,8 +2399,11 @@ class RR2NMFGui(QMainWindow):
                 corr_full=self.cube[:,:,l0:l1].astype(np.float32,copy=False)
                 plot_raw(self.canvas_raw.fig,roi,axis,cmap,full_cube=raw_full,spatial_roi=(y0,y1,x0,x1),raw_roi_before_bg=raw_full,corrected_roi=corr_full,bg_applied=getattr(self,"bg_applied",False),selected_pixel=getattr(self,"selected_raw_pixel",None),corrected_full_cube=corr_full); self.canvas_raw.set_base(); self.canvas_raw.draw()
             except Exception: self.canvas_raw.clear()
-        if self.rr_result is not None: plot_rr(self.canvas_tree.fig,self.rr_result,self.roi_axis_info,cmap,X_for_weight=getattr(self,"X",None),overlay_mode="max"); self.canvas_tree.set_base(); self.canvas_tree.draw()
+        match_pct = self.spin_shape_match_pct.value() if hasattr(self, "spin_shape_match_pct") else 80.0
+        if self.rr_result is not None: plot_rr(self.canvas_tree.fig,self.rr_result,self.roi_axis_info,cmap,X_for_weight=getattr(self,"X",None),overlay_mode="max",match_threshold_pct=match_pct); self.canvas_tree.set_base(); self.canvas_tree.draw()
         else: self.canvas_tree.clear()
+        if hasattr(self, "canvas_diag"):
+            plot_rr_diagnostics_summary(self.canvas_diag.fig,self.rr_result,self.roi_axis_info if self.roi_axis_info is not None else make_default_axis_info((1,1,1)),X_for_weight=getattr(self,"X",None),match_threshold_pct=match_pct); self.canvas_diag.set_base(); self.canvas_diag.draw()
         if self.conv_result is not None: plot_conv(self.canvas_conv.fig,self.conv_result,self.roi_axis_info,cmap); self.canvas_conv.set_base(); self.canvas_conv.draw()
         else: self.canvas_conv.clear()
         plot_energy(self.canvas_energy.fig,self.conv_result,self.rr_result); self.canvas_energy.set_base(); self.canvas_energy.draw()
@@ -2334,7 +2504,7 @@ class RR2NMFGui(QMainWindow):
             self.list_rr_components.clear()
         if hasattr(self,"list_rr_combined"):
             self.list_rr_combined.clear()
-        for cname in ("canvas_tree","canvas_conv","canvas_energy","canvas_combined","canvas_eds","canvas_eels"):
+        for cname in ("canvas_tree","canvas_conv","canvas_energy","canvas_diag","canvas_combined","canvas_eds","canvas_eels"):
             c=getattr(self,cname,None)
             if c is not None:
                 c.clear()
@@ -2756,7 +2926,7 @@ class RR2NMFGui(QMainWindow):
                 "random_seed": self.spin_seed.value(),
                 "chunk_size": self.spin_chunk.value(),
             },
-            "view": {"cmap": self.combo_cmap.currentText()},
+            "view": {"cmap": self.combo_cmap.currentText(), "shape_match_threshold_pct": self.spin_shape_match_pct.value() if hasattr(self, "spin_shape_match_pct") else 80.0},
         }
 
     def apply_processing_settings(self, cfg):
@@ -2803,6 +2973,7 @@ class RR2NMFGui(QMainWindow):
         if "random_seed" in nmf: self.spin_seed.setValue(int(nmf["random_seed"]))
         if "chunk_size" in nmf: self.spin_chunk.setValue(int(nmf["chunk_size"]))
         self._set_combo_text_safe(self.combo_cmap, view.get("cmap", self.combo_cmap.currentText()))
+        if hasattr(self, "spin_shape_match_pct") and "shape_match_threshold_pct" in view: self.spin_shape_match_pct.setValue(float(view["shape_match_threshold_pct"]))
 
         self.update_roi_label()
         if hasattr(self, "refresh_rr_component_list"):
