@@ -1060,7 +1060,7 @@ def _shade_match_intervals(ax, x, intervals, ymin=0.0, ymax=1.0):
         ax.axvspan(float(x[st]), float(x[en_i]), ymin=ymin, ymax=ymax, alpha=0.14)
 
 
-def plot_rr_diagnostics_summary(fig, rr, axis, X_for_weight=None, match_threshold_pct=80.0):
+def plot_rr_diagnostics_summary(fig, rr, axis, X_for_weight=None, match_threshold_pct=80.0, match_window=21):
     """Summary tab: W morphology correlation maps and H/raw local-match ratios by depth."""
     fig.clear()
     if rr is None:
@@ -1095,7 +1095,7 @@ def plot_rr_diagnostics_summary(fig, rr, axis, X_for_weight=None, match_threshol
                 for ci, h in enumerate(getattr(ns, "component_spectra", []) or []):
                     try:
                         wspec = weighted_raw_spectrum_by_map(X_for_weight, ns.component_maps[ci])
-                        mask, _, _ = local_shape_match_mask(h, wspec, match_threshold_pct)
+                        mask, _, _ = local_shape_match_mask(h, wspec, match_threshold_pct, window=match_window)
                         names.append(f"N{ni}C{ci}")
                         vals.append(100.0 * float(np.count_nonzero(mask)) / max(1, len(mask)))
                         fullcorrs.append(safe_pearson_1d(normalize_for_shape_compare(h, "max"), normalize_for_shape_compare(wspec, "max")))
@@ -1105,7 +1105,7 @@ def plot_rr_diagnostics_summary(fig, rr, axis, X_for_weight=None, match_threshol
             axb.bar(range(len(vals)), vals)
             axb.set_ylim(0, 100)
             axb.set_ylabel("matched channels (%)")
-            axb.set_title(f"Depth {d}: H vs weighted raw local shape match ≥ {match_threshold_pct:.0f}%", fontsize=11)
+            axb.set_title(f"Depth {d}: H vs weighted raw local shape match ≥ {match_threshold_pct:.0f}% (window={int(match_window)} ch)", fontsize=11)
             axb.set_xticks(range(len(names)))
             axb.set_xticklabels(names, rotation=90, fontsize=7)
             axb.grid(True, axis="y", alpha=0.25)
@@ -1294,7 +1294,7 @@ def plot_conv(fig, conv, axis, cmap="viridis", maxn=20):
     fig.subplots_adjust(left=.04,right=.98,top=.96,bottom=.05,hspace=.75,wspace=.2)
 
 
-def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max", match_threshold_pct=80.0):
+def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max", match_threshold_pct=80.0, match_window=21):
     fig.clear()
     depths = rr.node_summaries_by_depth
 
@@ -1332,8 +1332,12 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
         ratios.append(0.20)
         cur += 1
 
-    total_cols = max_nodes * cols_node
-    fig.set_size_inches(max(30.0, total_cols * 4.1), max(8, sum(ratios) * 1.55), forward=True)
+    node_cols = max_nodes * cols_node
+    # Extra right-side diagnostic columns are reserved for the per-depth W-correlation map.
+    # This keeps the map next to the residual panels instead of stretching it in the depth header.
+    diag_cols = max(2, min(3, rank))
+    total_cols = node_cols + diag_cols
+    fig.set_size_inches(max(30.0, node_cols * 4.1 + diag_cols * 2.2), max(8, sum(ratios) * 1.55), forward=True)
     gs = fig.add_gridspec(cur, total_cols, height_ratios=ratios)
 
     def _short_text(txt, max_len=70):
@@ -1359,22 +1363,28 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
         combined_count = sum(1 for _ns in nodes if str(getattr(_ns, "path", "")).startswith("manualD"))
         header = f"Depth {d}" + (f"   |   {combined_count} combined-data node(s)" if combined_count else "")
         axd.text(0, 0.84, header, fontweight="bold", fontsize=13, va="center")
-        # Compact morphology-correlation map at each depth header. It is independent
-        # of absolute W intensity and compares flattened W-map shapes only.
+        # Per-depth W morphology correlation map: place it beside the residual area
+        # of the first wrap so it remains visually associated with residual diagnostics.
         try:
             labels_corr, Ccorr = compute_w_morphology_corr_for_depth(nodes)
             if Ccorr.size:
-                corr_ax = inset_axes(axd, width="28%", height="72%", loc="center right", borderpad=0.0)
-                imcorr = corr_ax.imshow(Ccorr, vmin=-1, vmax=1, cmap="coolwarm", aspect="auto")
-                corr_ax.set_title("W morphology corr", fontsize=7)
+                corr_br = starts[d] + 1 + 3  # residual-image row of the first wrap
+                corr_ax = fig.add_subplot(gs[corr_br:corr_br + 2, node_cols:total_cols])
+                imcorr = corr_ax.imshow(Ccorr, vmin=-1, vmax=1, cmap="coolwarm", aspect="equal")
+                corr_ax.set_title("W morphology corr\n(shape only)", fontsize=8)
                 if len(labels_corr) <= 12:
                     corr_ax.set_xticks(range(len(labels_corr)))
                     corr_ax.set_yticks(range(len(labels_corr)))
                     corr_ax.set_xticklabels(labels_corr, rotation=90, fontsize=5)
                     corr_ax.set_yticklabels(labels_corr, fontsize=5)
                 else:
-                    corr_ax.set_xticks([]); corr_ax.set_yticks([])
-                corr_ax.tick_params(length=1)
+                    corr_ax.set_xticks([])
+                    corr_ax.set_yticks([])
+                corr_ax.tick_params(length=1, pad=1)
+                # Small colorbar inside the reserved diagnostic columns.
+                cax = make_axes_locatable(corr_ax).append_axes("right", size="7%", pad=0.03)
+                cb = fig.colorbar(imcorr, cax=cax)
+                cb.ax.tick_params(labelsize=6)
         except Exception:
             pass
 
@@ -1404,7 +1414,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                         wspec = weighted_raw_spectrum_by_map(X_for_weight, wmap)
                         corr = safe_shape_correlation(hspec, wspec, overlay_mode)
                         corr_txt = f", corr({overlay_mode})={corr:.3f}" if np.isfinite(corr) else ", corr=nan"
-                        mask, local_corr, intervals = local_shape_match_mask(hspec, wspec, match_threshold_pct)
+                        mask, local_corr, intervals = local_shape_match_mask(hspec, wspec, match_threshold_pct, window=match_window)
                         match_ratio = 100.0 * float(np.count_nonzero(mask)) / max(1, len(mask))
                         line1, = sp.plot(x, hspec, linewidth=1.0, label="H basis (left)")
                         _shade_match_intervals(sp, x, intervals)
@@ -1415,7 +1425,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                         sp2.set_ylabel("weighted raw", fontsize=7, labelpad=2)
                         sp2.tick_params(axis="y", labelsize=7, pad=2)
                         sp.legend([line1, line2], [line1.get_label(), line2.get_label()], fontsize=6, loc="best")
-                        corr_txt += f", match≥{match_threshold_pct:.0f}%:{match_ratio:.0f}%"
+                        corr_txt += f", match≥{match_threshold_pct:.0f}%/{int(match_window)}ch:{match_ratio:.0f}%"
                     except Exception:
                         sp.plot(x, hspec, linewidth=1.0, label="H basis")
                         sp.legend(fontsize=6, loc="best")
@@ -1862,7 +1872,8 @@ class RR2NMFGui(QMainWindow):
 
         self.combo_cmap=QComboBox(); self.combo_cmap.addItems(["viridis","plasma","inferno","magma","cividis","gray","turbo","coolwarm","jet"]); self.combo_cmap.currentTextChanged.connect(self.refresh_views)
         self.spin_shape_match_pct=QDoubleSpinBox(); self.spin_shape_match_pct.setRange(0,100); self.spin_shape_match_pct.setDecimals(1); self.spin_shape_match_pct.setValue(80.0); self.spin_shape_match_pct.setSuffix(" %"); self.spin_shape_match_pct.valueChanged.connect(self.refresh_views)
-        vg=QGroupBox("View / Run"); vf=QFormLayout(vg); vf.addRow("Colormap",self.combo_cmap); vf.addRow("H/raw shape-match threshold", self.spin_shape_match_pct)
+        self.spin_shape_match_window=QSpinBox(); self.spin_shape_match_window.setRange(5,9999); self.spin_shape_match_window.setValue(21); self.spin_shape_match_window.setSingleStep(2); self.spin_shape_match_window.setSuffix(" ch"); self.spin_shape_match_window.valueChanged.connect(self.refresh_views)
+        vg=QGroupBox("View / Run"); vf=QFormLayout(vg); vf.addRow("Colormap",self.combo_cmap); vf.addRow("H/raw shape-match threshold", self.spin_shape_match_pct); vf.addRow("H/raw shape-match window", self.spin_shape_match_window)
         self.btn_run=QPushButton("Run Full Auto Analysis on ROI"); self.btn_run.clicked.connect(self.run_analysis)
         self.btn_run_auto_stage=QPushButton("Manual Step: Run/Refresh Current Source Depth")
         self.btn_run_auto_stage.clicked.connect(self.run_auto_until_manual_depth)
@@ -2400,10 +2411,11 @@ class RR2NMFGui(QMainWindow):
                 plot_raw(self.canvas_raw.fig,roi,axis,cmap,full_cube=raw_full,spatial_roi=(y0,y1,x0,x1),raw_roi_before_bg=raw_full,corrected_roi=corr_full,bg_applied=getattr(self,"bg_applied",False),selected_pixel=getattr(self,"selected_raw_pixel",None),corrected_full_cube=corr_full); self.canvas_raw.set_base(); self.canvas_raw.draw()
             except Exception: self.canvas_raw.clear()
         match_pct = self.spin_shape_match_pct.value() if hasattr(self, "spin_shape_match_pct") else 80.0
-        if self.rr_result is not None: plot_rr(self.canvas_tree.fig,self.rr_result,self.roi_axis_info,cmap,X_for_weight=getattr(self,"X",None),overlay_mode="max",match_threshold_pct=match_pct); self.canvas_tree.set_base(); self.canvas_tree.draw()
+        match_window = self.spin_shape_match_window.value() if hasattr(self, "spin_shape_match_window") else 21
+        if self.rr_result is not None: plot_rr(self.canvas_tree.fig,self.rr_result,self.roi_axis_info,cmap,X_for_weight=getattr(self,"X",None),overlay_mode="max",match_threshold_pct=match_pct,match_window=match_window); self.canvas_tree.set_base(); self.canvas_tree.draw()
         else: self.canvas_tree.clear()
         if hasattr(self, "canvas_diag"):
-            plot_rr_diagnostics_summary(self.canvas_diag.fig,self.rr_result,self.roi_axis_info if self.roi_axis_info is not None else make_default_axis_info((1,1,1)),X_for_weight=getattr(self,"X",None),match_threshold_pct=match_pct); self.canvas_diag.set_base(); self.canvas_diag.draw()
+            plot_rr_diagnostics_summary(self.canvas_diag.fig,self.rr_result,self.roi_axis_info if self.roi_axis_info is not None else make_default_axis_info((1,1,1)),X_for_weight=getattr(self,"X",None),match_threshold_pct=match_pct,match_window=match_window); self.canvas_diag.set_base(); self.canvas_diag.draw()
         if self.conv_result is not None: plot_conv(self.canvas_conv.fig,self.conv_result,self.roi_axis_info,cmap); self.canvas_conv.set_base(); self.canvas_conv.draw()
         else: self.canvas_conv.clear()
         plot_energy(self.canvas_energy.fig,self.conv_result,self.rr_result); self.canvas_energy.set_base(); self.canvas_energy.draw()
@@ -2926,7 +2938,7 @@ class RR2NMFGui(QMainWindow):
                 "random_seed": self.spin_seed.value(),
                 "chunk_size": self.spin_chunk.value(),
             },
-            "view": {"cmap": self.combo_cmap.currentText(), "shape_match_threshold_pct": self.spin_shape_match_pct.value() if hasattr(self, "spin_shape_match_pct") else 80.0},
+            "view": {"cmap": self.combo_cmap.currentText(), "shape_match_threshold_pct": self.spin_shape_match_pct.value() if hasattr(self, "spin_shape_match_pct") else 80.0, "shape_match_window": self.spin_shape_match_window.value() if hasattr(self, "spin_shape_match_window") else 21},
         }
 
     def apply_processing_settings(self, cfg):
@@ -2974,6 +2986,7 @@ class RR2NMFGui(QMainWindow):
         if "chunk_size" in nmf: self.spin_chunk.setValue(int(nmf["chunk_size"]))
         self._set_combo_text_safe(self.combo_cmap, view.get("cmap", self.combo_cmap.currentText()))
         if hasattr(self, "spin_shape_match_pct") and "shape_match_threshold_pct" in view: self.spin_shape_match_pct.setValue(float(view["shape_match_threshold_pct"]))
+        if hasattr(self, "spin_shape_match_window") and "shape_match_window" in view: self.spin_shape_match_window.setValue(int(view["shape_match_window"]))
 
         self.update_roi_label()
         if hasattr(self, "refresh_rr_component_list"):
