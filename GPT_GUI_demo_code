@@ -1018,6 +1018,76 @@ def compute_w_morphology_corr_for_depth(nodes, nonnegative_display=True):
     return labels, C
 
 
+
+
+def top_percent_iou_from_maps(a, b, top_percent=15.0):
+    """IoU of high-intensity W-map regions using top-percent binary masks."""
+    aa = np.asarray(a, dtype=np.float64).reshape(-1)
+    bb = np.asarray(b, dtype=np.float64).reshape(-1)
+    m = np.isfinite(aa) & np.isfinite(bb)
+    if np.count_nonzero(m) < 3:
+        return 0.0
+    aa = aa[m]
+    bb = bb[m]
+    pct = float(np.clip(top_percent, 0.1, 99.9))
+    ta = np.nanpercentile(aa, 100.0 - pct)
+    tb = np.nanpercentile(bb, 100.0 - pct)
+    ma = aa >= ta
+    mb = bb >= tb
+    union = int(np.count_nonzero(ma | mb))
+    if union <= 0:
+        return 0.0
+    inter = int(np.count_nonzero(ma & mb))
+    return float(inter / union)
+
+
+def auto_score_pair_from_entries(e1, e2, corr_weight=0.40, top_percent=15.0):
+    """Score = a*corr + (1-a)*IoU(top). Corr is clipped to 0..1 for similarity use."""
+    a = float(np.clip(corr_weight, 0.0, 1.0))
+    wm1 = np.asarray(e1.get("W_map"), dtype=np.float64)
+    wm2 = np.asarray(e2.get("W_map"), dtype=np.float64)
+    corr = safe_pearson_1d(wm1.reshape(-1), wm2.reshape(-1))
+    corr_pos = float(np.clip(corr if np.isfinite(corr) else 0.0, 0.0, 1.0))
+    iou = top_percent_iou_from_maps(wm1, wm2, top_percent=top_percent)
+    score = a * corr_pos + (1.0 - a) * iou
+    return float(score), corr_pos, float(iou)
+
+
+def auto_score_groups_from_entries(entries, corr_weight=0.40, top_percent=15.0, threshold_pct=55.0):
+    """Cluster components by thresholded pair score using connected components.
+
+    Returns groups as lists of entries plus a diagnostics list of pair scores.
+    """
+    entries = list(entries or [])
+    n = len(entries)
+    if n == 0:
+        return [], []
+    thr = float(threshold_pct) / 100.0
+    parent = list(range(n))
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+    pair_rows = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            score, corr, iou = auto_score_pair_from_entries(entries[i], entries[j], corr_weight, top_percent)
+            pair_rows.append({"i": i, "j": j, "label_i": entries[i].get("label", str(i)), "label_j": entries[j].get("label", str(j)), "score": score, "corr": corr, "iou": iou})
+            if score >= thr:
+                union(i, j)
+    bins = {}
+    for i, e in enumerate(entries):
+        bins.setdefault(find(i), []).append((i, e))
+    indexed_groups = list(bins.values())
+    indexed_groups.sort(key=lambda g: min(i for i, _ in g) if g else 999999)
+    groups = [[e for _, e in g] for g in indexed_groups]
+    return groups, pair_rows
+
 def local_shape_match_mask(h, w, threshold_pct=80.0, window=None):
     """Find energy-channel regions where H and weighted raw have local shape agreement.
 
@@ -1086,13 +1156,18 @@ def plot_rr_diagnostics_summary(fig, rr, axis, X_for_weight=None, match_threshol
         axc = fig.add_subplot(gs[d, 0])
         labels, C = compute_w_morphology_corr_for_depth(nodes)
         if C.size:
-            im = axc.imshow(C, vmin=-1, vmax=1, cmap="coolwarm", aspect="auto")
-            axc.set_title(f"Depth {d}: W morphology correlation", fontsize=11)
+            im = axc.imshow(np.clip(C, 0.0, 1.0), vmin=0, vmax=1, cmap="viridis", aspect="auto")
+            axc.set_title(f"Depth {d}: W morphology similarity (0–1)", fontsize=11)
             if len(labels) <= 24:
                 axc.set_xticks(range(len(labels))); axc.set_xticklabels(labels, rotation=90, fontsize=6)
                 axc.set_yticks(range(len(labels))); axc.set_yticklabels(labels, fontsize=6)
             else:
                 axc.set_xticks([]); axc.set_yticks([])
+            if C.size and C.shape[0] <= 18:
+                Cdisp = np.clip(C, 0.0, 1.0)
+                for _ii in range(Cdisp.shape[0]):
+                    for _jj in range(Cdisp.shape[1]):
+                        axc.text(_jj, _ii, f"{Cdisp[_ii, _jj]:.2f}", ha="center", va="center", fontsize=6)
             add_colorbar(fig, axc, im)
         else:
             axc.axis("off"); axc.text(0.5, 0.5, f"Depth {d}: no W maps", ha="center", va="center")
@@ -1314,11 +1389,9 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
     #   row 3: spacer
     #   row 4: residual image spanning rank columns
     #   row 5: residual spectrum spanning rank columns
-    #   row 6: spacer between residual spectrum and W similarity matrix
-    #   row 7: optional compact W morphology similarity matrix under the residual spectrum
     rank = max(1, int(getattr(rr, "rank", 2)))
     cols_node = rank
-    rows_node = 7
+    rows_node = 5  # W, H, spacer, residual image, residual spectrum; W-corr is one per depth after all node rows
 
     # Keep the display reasonably wide without forcing too many nodes per row.
     # Examples:
@@ -1336,12 +1409,12 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
         ratios.append(0.45)
         cur += 1
         for _ in range(wraps):
-            # rows: W image, H spectrum, spacer, residual image, residual spectrum, extra spacer, compact W-corr
-            # W-corr matrix height/aspect is preserved; the extra spacer only moves it down.
-            ratios.extend([3.0, 1.0, 0.30, 3.0, 1.0, 0.38, 1.45])
+            # rows: W image, H spectrum, spacer, residual image, residual spectrum
+            ratios.extend([3.0, 1.0, 0.30, 3.0, 1.0])
             cur += rows_node
-        ratios.append(0.20)
-        cur += 1
+        # One compact W-corr matrix per depth, placed below all node rows.
+        ratios.extend([0.52, 1.45, 0.20])
+        cur += 3
 
     node_cols = max_nodes * cols_node
     total_cols = node_cols
@@ -1457,32 +1530,30 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                 sp.grid(True, alpha=0.25)
                 sp.tick_params(labelsize=7)
 
-            # Compact per-depth W morphology similarity matrix.
-            # Show once per depth, directly below the first node's residual spectrum.
-            # Negative Pearson values are clipped to zero for this co-localization display.
-            if i == 0:
-                try:
-                    labels_corr, Ccorr = compute_w_morphology_corr_for_depth(nodes, nonnegative_display=True)
-                    if Ccorr.size:
-                        holder_corr = fig.add_subplot(gs[br + 6, bc:bc + rank])
-                        holder_corr.axis("off")
-                        corr_ax = inset_axes(holder_corr, width="48%", height="95%", loc="lower center", borderpad=0.0)
-                        imcorr = corr_ax.imshow(Ccorr, vmin=0, vmax=1, cmap="viridis", aspect="equal")
-                        corr_ax.set_title("W morphology similarity\n(Pearson, negative→0)", fontsize=7, pad=2)
-                        if len(labels_corr) <= 10:
-                            corr_ax.set_xticks(range(len(labels_corr)))
-                            corr_ax.set_yticks(range(len(labels_corr)))
-                            corr_ax.set_xticklabels(labels_corr, rotation=90, fontsize=4)
-                            corr_ax.set_yticklabels(labels_corr, fontsize=4)
-                        else:
-                            corr_ax.set_xticks([])
-                            corr_ax.set_yticks([])
-                        corr_ax.tick_params(length=1, pad=1)
-                        cax = inset_axes(holder_corr, width="3%", height="75%", loc="lower right", borderpad=0.4)
-                        cb = fig.colorbar(imcorr, cax=cax)
-                        cb.ax.tick_params(labelsize=5, pad=1)
-                except Exception:
-                    pass
+        # Compact per-depth W morphology similarity matrix, below all node rows for this depth.
+        try:
+            labels_corr, Ccorr = compute_w_morphology_corr_for_depth(nodes, nonnegative_display=True)
+            if Ccorr.size:
+                corr_row = starts[d] + 1 + wraps * rows_node + 1
+                holder_corr = fig.add_subplot(gs[corr_row, 0:rank])
+                holder_corr.axis("off")
+                corr_ax = inset_axes(holder_corr, width="52%", height="95%", loc="lower center", borderpad=0.0)
+                imcorr = corr_ax.imshow(Ccorr, vmin=0, vmax=1, cmap="viridis", aspect="equal")
+                corr_ax.set_title("W morphology similarity\n(Pearson, negative→0)", fontsize=7, pad=2)
+                if len(labels_corr) <= 10:
+                    corr_ax.set_xticks(range(len(labels_corr)))
+                    corr_ax.set_yticks(range(len(labels_corr)))
+                    corr_ax.set_xticklabels(labels_corr, rotation=90, fontsize=4)
+                    corr_ax.set_yticklabels(labels_corr, fontsize=4)
+                else:
+                    corr_ax.set_xticks([])
+                    corr_ax.set_yticks([])
+                corr_ax.tick_params(length=1, pad=1)
+                cax = inset_axes(holder_corr, width="3%", height="75%", loc="lower right", borderpad=0.4)
+                cb = fig.colorbar(imcorr, cax=cax)
+                cb.ax.tick_params(labelsize=5, pad=1)
+        except Exception:
+            pass
 
     fig.suptitle(f"rr-NMF Tree rank={rank}: H basis with weighted raw overlay", fontsize=14)
     fig.subplots_adjust(left=0.012, right=0.988, top=0.965, bottom=0.025, hspace=0.28, wspace=0.70)
@@ -1798,12 +1869,12 @@ class AnalysisWorker(QThread):
 
 class RR2NMFGui(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v6.4 conv button + Wcorr spacing"); self.resize(1850,1080)
+        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v6.5 auto score merge"); self.resize(1850,1080)
         self.cube=None; self.original_cube=None; self.roi_cube=None; self.X=None; self.image_shape=None
         self.axis_info=make_default_axis_info((1,1,1)); self.roi_axis_info=make_default_axis_info((1,1,1))
         self.conv_result=None; self.rr_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.bg_applied=False; self._raw_mouse_press=None; self.selected_raw_pixel=None
         self.eds_elements=[]; self.eels_elements=[]; self.eds_sources=[]; self.eels_sources=[]; self.eds_hits=[]; self.eels_hits=[]
-        self._syncing=False; self._build_ui()
+        self._syncing=False; self._auto_score_active=False; self._auto_score_target_depth=None; self._auto_score_stop_after_current=False; self._build_ui()
 
     def _build_ui(self):
         central=QWidget(); self.setCentralWidget(central); layout=QHBoxLayout(central); split=QSplitter(Qt.Horizontal); layout.addWidget(split)
@@ -1887,6 +1958,11 @@ class RR2NMFGui(QMainWindow):
         self.spin_shape_match_pct=QDoubleSpinBox(); self.spin_shape_match_pct.setRange(0,100); self.spin_shape_match_pct.setDecimals(1); self.spin_shape_match_pct.setValue(80.0); self.spin_shape_match_pct.setSuffix(" %"); self.spin_shape_match_pct.valueChanged.connect(self.refresh_views)
         self.spin_shape_match_window=QDoubleSpinBox(); self.spin_shape_match_window.setRange(0.0,1e9); self.spin_shape_match_window.setDecimals(6); self.spin_shape_match_window.setValue(21.0); self.spin_shape_match_window.setSingleStep(1.0); self.spin_shape_match_window.setSuffix(" eV"); self.spin_shape_match_window.setToolTip("Energy-axis window width in eV/axis units. Converted to an odd number of channels internally."); self.spin_shape_match_window.valueChanged.connect(self.refresh_views)
         vg=QGroupBox("View / Run"); vf=QFormLayout(vg); vf.addRow("Colormap",self.combo_cmap); vf.addRow("H/raw shape-match threshold", self.spin_shape_match_pct); vf.addRow("H/raw shape-match window width (eV)", self.spin_shape_match_window)
+        self.spin_auto_corr_weight=QDoubleSpinBox(); self.spin_auto_corr_weight.setRange(0.0,1.0); self.spin_auto_corr_weight.setDecimals(3); self.spin_auto_corr_weight.setSingleStep(0.05); self.spin_auto_corr_weight.setValue(0.40); self.spin_auto_corr_weight.setToolTip("a in Score = a*Corr + (1-a)*IoU(top)")
+        self.lbl_auto_iou_weight=QLabel("0.600"); self.spin_auto_corr_weight.valueChanged.connect(lambda v: self.lbl_auto_iou_weight.setText(f"{1.0-float(v):.3f}"))
+        self.spin_auto_top_pct=QDoubleSpinBox(); self.spin_auto_top_pct.setRange(0.1,99.9); self.spin_auto_top_pct.setDecimals(1); self.spin_auto_top_pct.setSingleStep(1.0); self.spin_auto_top_pct.setValue(15.0); self.spin_auto_top_pct.setSuffix(" %")
+        self.spin_auto_score_thresh=QDoubleSpinBox(); self.spin_auto_score_thresh.setRange(0.0,100.0); self.spin_auto_score_thresh.setDecimals(1); self.spin_auto_score_thresh.setSingleStep(5.0); self.spin_auto_score_thresh.setValue(55.0); self.spin_auto_score_thresh.setSuffix(" %")
+        vf.addRow("Auto score Corr weight a", self.spin_auto_corr_weight); vf.addRow("Auto score IoU weight 1-a", self.lbl_auto_iou_weight); vf.addRow("Auto score top percent", self.spin_auto_top_pct); vf.addRow("Auto score threshold", self.spin_auto_score_thresh)
         self.btn_run=QPushButton("Run Full Analysis on ROI (Conv + rr)"); self.btn_run.clicked.connect(self.run_analysis)
         self.btn_run_conv_only=QPushButton("Run Conventional NMF Only on ROI")
         self.btn_run_conv_only.clicked.connect(self.run_conventional_only)
@@ -1894,6 +1970,8 @@ class RR2NMFGui(QMainWindow):
         self.btn_run_auto_stage.clicked.connect(self.run_auto_until_manual_depth)
         self.btn_continue_manual=QPushButton("Continue One Depth with Current Manual Merge/Pass")
         self.btn_continue_manual.clicked.connect(self.continue_from_manual_merge)
+        self.btn_auto_score_step=QPushButton("Auto Step: Run/Refresh based on Score function")
+        self.btn_auto_score_step.clicked.connect(self.start_auto_score_merge_workflow)
         self.btn_reset_analysis=QPushButton("Reset Analysis / Manual Results")
         self.btn_reset_analysis.clicked.connect(self.reset_analysis_state)
         self.btn_save_settings=QPushButton("Save ROI/BG/NMF Settings")
@@ -1901,7 +1979,7 @@ class RR2NMFGui(QMainWindow):
         self.btn_load_settings=QPushButton("Load ROI/BG/NMF Settings")
         self.btn_load_settings.clicked.connect(self.load_processing_settings)
         self.btn_export=QPushButton("Export CSV"); self.btn_export.clicked.connect(self.export_csv)
-        vf.addRow(self.btn_run); vf.addRow(self.btn_run_conv_only); vf.addRow(self.btn_run_auto_stage); vf.addRow(self.btn_continue_manual); vf.addRow(self.btn_reset_analysis); vf.addRow(self.btn_save_settings); vf.addRow(self.btn_load_settings); vf.addRow(self.btn_export); cl.addWidget(vg)
+        vf.addRow(self.btn_run); vf.addRow(self.btn_run_conv_only); vf.addRow(self.btn_run_auto_stage); vf.addRow(self.btn_continue_manual); vf.addRow(self.btn_auto_score_step); vf.addRow(self.btn_reset_analysis); vf.addRow(self.btn_save_settings); vf.addRow(self.btn_load_settings); vf.addRow(self.btn_export); cl.addWidget(vg)
         self.log=QTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(180); cl.addWidget(QLabel("Log")); cl.addWidget(self.log); cl.addStretch(1)
 
         self.tabs=QTabWidget(); split.addWidget(self.tabs)
@@ -2373,7 +2451,7 @@ class RR2NMFGui(QMainWindow):
         self.rr_combined_sets=self._get_current_depth_sets()
 
     def _set_run_buttons_enabled(self, enabled: bool):
-        for name in ("btn_run", "btn_run_conv_only", "btn_run_auto_stage", "btn_continue_manual"):
+        for name in ("btn_run", "btn_run_conv_only", "btn_run_auto_stage", "btn_continue_manual", "btn_auto_score_step"):
             b = getattr(self, name, None)
             if b is not None:
                 b.setEnabled(enabled)
@@ -2438,6 +2516,139 @@ class RR2NMFGui(QMainWindow):
         summary=", ".join([f"D{d}:{len((getattr(self,'manual_depth_groups',{}) or {}).get(d,[]) or [])} set(s)" for d in range(self._current_manual_depth(), md+1) if (getattr(self,'manual_depth_groups',{}) or {}).get(d,[])])
         self.append_log(f"Manual continue: computing exactly to depth {md} using saved manual merge groups ({summary}). After completion, the panel will expose depth {md} components for target depth {md+1 if md < final_depth else 'final complete'}.")
 
+
+    def _entries_for_depth(self, depth):
+        return [e for e in collect_rr_component_entries(self.rr_result) if int(e.get("depth", -999)) == int(depth)]
+
+    def _build_auto_score_sets_for_target(self, target_depth):
+        source_depth = int(target_depth) - 1
+        entries = self._entries_for_depth(source_depth)
+        if not entries:
+            raise ValueError(f"No rr-NMF components found at source depth {source_depth}.")
+        groups, pairs = auto_score_groups_from_entries(
+            entries,
+            corr_weight=self.spin_auto_corr_weight.value(),
+            top_percent=self.spin_auto_top_pct.value(),
+            threshold_pct=self.spin_auto_score_thresh.value(),
+        )
+        sets=[]
+        merged_count=0
+        for gi, g in enumerate(groups):
+            labels=[e.get("label", "") for e in g]
+            if len(g) >= 2:
+                name=f"AutoScore_D{target_depth}_G{gi+1}"
+                merged_count += 1
+                c=build_combined_dataset(g, name)
+                c["pass_through"] = False
+            else:
+                name=f"AutoPass_{labels[0].replace(' ', '_')}"
+                c=build_combined_dataset(g, name)
+                c["pass_through"] = True
+            c["target_depth"] = int(target_depth)
+            c["auto_score"] = True
+            sets.append(c)
+        self.manual_depth_groups[int(target_depth)] = sets
+        best_pairs=sorted(pairs, key=lambda r: r.get("score",0.0), reverse=True)[:8]
+        pair_txt="; ".join([f"{r['label_i']}+{r['label_j']}: score={100*r['score']:.1f}% corr={100*r['corr']:.1f}% IoU={100*r['iou']:.1f}%" for r in best_pairs])
+        self.append_log(f"Auto score grouping for target D{target_depth} from source D{source_depth}: {len(entries)} input components -> {len(sets)} next-depth set(s), merged_groups={merged_count}, threshold={self.spin_auto_score_thresh.value():.1f}%, a={self.spin_auto_corr_weight.value():.3f}, top={self.spin_auto_top_pct.value():.1f}%")
+        if pair_txt:
+            self.append_log("Top auto-score pairs: " + pair_txt)
+        return len(entries), len(sets), merged_count
+
+    def start_auto_score_merge_workflow(self):
+        """Automatically create merge/pass sets using Score=a*Corr+(1-a)*IoU(top), then advance depth by depth."""
+        if self.cube is None:
+            QMessageBox.warning(self, "No data", "Load data first."); return
+        try:
+            roi,X,shape,axis=self.get_roi_cube_and_X()
+        except Exception as e:
+            QMessageBox.warning(self,"ROI/Data error",str(e)); return
+        self.roi_cube=roi; self.X=X; self.image_shape=shape; self.roi_axis_info=axis
+        self.chk_manual_depth.setChecked(True)
+        start=int(self.spin_manual_depth.value())
+        final=int(self.spin_depth.value())
+        if start < 1 or start > final:
+            QMessageBox.warning(self,"Auto score depth error",f"Manual start depth must be between 1 and Recursive depth ({final})."); return
+        # Fresh auto run from the selected start depth: keep earlier groups below start if user made them,
+        # but replace all groups from start onward.
+        self.manual_depth_groups={int(d):v for d,v in (getattr(self,"manual_depth_groups",{}) or {}).items() if int(d) < start}
+        self._auto_score_active=True
+        self._auto_score_target_depth=start
+        self._auto_score_stop_after_current=False
+        self.append_log(f"Auto score workflow started: start D{start}, final D{final}, score=a*Corr+(1-a)*IoU(top), threshold={self.spin_auto_score_thresh.value():.1f}%.")
+        # First compute to the source depth of the start target.
+        params=self.collect_params(include_manual=True, max_manual_depth=start-1)
+        params["run_conventional"] = False
+        params["run_rr"] = True
+        params["rr_depth"] = start - 1
+        self._set_run_buttons_enabled(False)
+        self.worker=AnalysisWorker(X,shape,params)
+        self.worker.finished_ok.connect(self.on_analysis_finished)
+        self.worker.failed.connect(self.on_analysis_failed)
+        self.worker.start()
+
+    def _continue_auto_score_after_worker(self):
+        if not getattr(self, "_auto_score_active", False):
+            return
+        try:
+            final=int(self.spin_depth.value())
+            target=int(self._auto_score_target_depth or self.spin_manual_depth.value())
+            if target > final:
+                self._auto_score_active=False
+                self.append_log("Auto score workflow complete: reached final recursive depth.")
+                self.refresh_rr_component_list()
+                return
+            computed_max=len(self.rr_result.node_summaries_by_depth)-1 if self.rr_result is not None else -1
+            # If we have just computed target depth, decide whether to advance or stop.
+            if computed_max >= target:
+                if self._auto_score_stop_after_current:
+                    self._auto_score_active=False
+                    self.append_log(f"Auto score workflow stopped after D{target}: no component count reduction after D>=3.")
+                    self.refresh_rr_component_list()
+                    return
+                self._auto_score_target_depth=target+1
+                target=int(self._auto_score_target_depth)
+                if target > final:
+                    self._auto_score_active=False
+                    self.append_log("Auto score workflow complete: reached final recursive depth.")
+                    self.refresh_rr_component_list()
+                    return
+            source_depth=target-1
+            computed_max=len(self.rr_result.node_summaries_by_depth)-1 if self.rr_result is not None else -1
+            if computed_max < source_depth:
+                # Need to refresh/run to the required source depth first.
+                roi,X,shape,axis=self.get_roi_cube_and_X()
+                params=self.collect_params(include_manual=True, max_manual_depth=target-1)
+                params["run_conventional"] = False
+                params["run_rr"] = True
+                params["rr_depth"] = source_depth
+                self._set_run_buttons_enabled(False)
+                self.worker=AnalysisWorker(X,shape,params)
+                self.worker.finished_ok.connect(self.on_analysis_finished)
+                self.worker.failed.connect(self.on_analysis_failed)
+                self.worker.start()
+                return
+            input_count, output_count, merged_count = self._build_auto_score_sets_for_target(target)
+            self._sync_current_combined_alias()
+            self.refresh_rr_component_list()
+            # Stop criterion requested for D>=3: if the next-depth data count is unchanged, run this depth and then stop.
+            self._auto_score_stop_after_current = (target >= 3 and output_count >= input_count)
+            roi,X,shape,axis=self.get_roi_cube_and_X()
+            params=self.collect_params(include_manual=True, max_manual_depth=target)
+            params["run_conventional"] = False
+            params["run_rr"] = True
+            params["rr_depth"] = target
+            self._set_run_buttons_enabled(False)
+            self.worker=AnalysisWorker(X,shape,params)
+            self.worker.finished_ok.connect(self.on_analysis_finished)
+            self.worker.failed.connect(self.on_analysis_failed)
+            self.worker.start()
+        except Exception as e:
+            self._auto_score_active=False
+            self._set_run_buttons_enabled(True)
+            QMessageBox.critical(self,"Auto score workflow failed",str(e))
+            self.append_log(traceback.format_exc())
+
     def run_conventional_only(self):
         """Run only the conventional NMF baseline on the current ROI.
 
@@ -2473,8 +2684,11 @@ This does not modify the current rr-NMF/manual tree results.
         if rr is not None:
             self.rr_result=rr
         self._set_run_buttons_enabled(True); self.append_log(logs); self.refresh_views(); self.refresh_spectrum_sources()
+        if getattr(self, "_auto_score_active", False):
+            self._continue_auto_score_after_worker()
 
     def on_analysis_failed(self,err):
+        self._auto_score_active=False
         self._set_run_buttons_enabled(True); QMessageBox.critical(self,"Analysis failed",err); self.append_log(err)
 
     def refresh_views(self):
@@ -2523,13 +2737,19 @@ This does not modify the current rr-NMF/manual tree results.
                     if sets:
                         saved_depths.append(f"D{int(d)}:{len(sets)}")
                 self.lbl_manual_component_hint.setText(f"Manual start depth = {self._current_manual_depth()}; current target depth = {md}. Showing components from source depth {target_depth} (= target-1). Saved manual merge groups: {', '.join(saved_depths) if saved_depths else 'none'}.")
-        for e in entries_to_show: self.list_rr_components.addItem(e["label"])
+        for idx, e in enumerate(entries_to_show):
+            item = QListWidgetItem(f"{idx}: {e['label']}")
+            item.setData(Qt.UserRole, e["label"])
+            self.list_rr_components.addItem(item)
         for i,c in enumerate(self.rr_combined_sets):
             kind = "PASS" if c.get("pass_through", False) else "MERGED"
             self.list_rr_combined.addItem(f'D{self._active_manual_target_depth()} / {i+1} [{kind}]: {c["name"]} [{", ".join(c["members"])}]')
 
     def selected_rr_entries(self):
-        labels=[i.text() for i in self.list_rr_components.selectedItems()]
+        labels=[]
+        for item in self.list_rr_components.selectedItems():
+            val=item.data(Qt.UserRole)
+            labels.append(str(val) if val is not None else item.text().split(": ",1)[-1])
         return [e for e in self.rr_component_entries if e["label"] in labels]
 
     def preview_selected_rr_components(self):
@@ -2614,6 +2834,9 @@ This does not modify the current rr-NMF/manual tree results.
             self.table_nodes.setRowCount(0)
             self.table_nodes.setColumnCount(0)
         self.refresh_spectrum_sources()
+        self._auto_score_active=False
+        self._auto_score_target_depth=None
+        self._auto_score_stop_after_current=False
         self.append_log("Reset analysis results, manual merged/pass-through sets, and intermediate rr-NMF state. Loaded raw data is kept.")
 
     def preview_combined_rr_set(self,*_):
@@ -3023,7 +3246,7 @@ This does not modify the current rr-NMF/manual tree results.
                 "random_seed": self.spin_seed.value(),
                 "chunk_size": self.spin_chunk.value(),
             },
-            "view": {"cmap": self.combo_cmap.currentText(), "shape_match_threshold_pct": self.spin_shape_match_pct.value() if hasattr(self, "spin_shape_match_pct") else 80.0, "shape_match_window_energy": self.spin_shape_match_window.value() if hasattr(self, "spin_shape_match_window") else 21.0},
+            "view": {"cmap": self.combo_cmap.currentText(), "shape_match_threshold_pct": self.spin_shape_match_pct.value() if hasattr(self, "spin_shape_match_pct") else 80.0, "shape_match_window_energy": self.spin_shape_match_window.value() if hasattr(self, "spin_shape_match_window") else 21.0, "auto_corr_weight": self.spin_auto_corr_weight.value() if hasattr(self,"spin_auto_corr_weight") else 0.40, "auto_top_percent": self.spin_auto_top_pct.value() if hasattr(self,"spin_auto_top_pct") else 15.0, "auto_score_threshold_pct": self.spin_auto_score_thresh.value() if hasattr(self,"spin_auto_score_thresh") else 55.0},
         }
 
     def apply_processing_settings(self, cfg):
@@ -3094,6 +3317,10 @@ This does not modify the current rr-NMF/manual tree results.
                     self.spin_shape_match_window.setValue(float(ch * step))
                 else:
                     self.spin_shape_match_window.setValue(float(ch))
+
+        if hasattr(self, "spin_auto_corr_weight") and "auto_corr_weight" in view: self.spin_auto_corr_weight.setValue(float(view["auto_corr_weight"]))
+        if hasattr(self, "spin_auto_top_pct") and "auto_top_percent" in view: self.spin_auto_top_pct.setValue(float(view["auto_top_percent"]))
+        if hasattr(self, "spin_auto_score_thresh") and "auto_score_threshold_pct" in view: self.spin_auto_score_thresh.setValue(float(view["auto_score_threshold_pct"]))
 
         self.update_roi_label()
         if hasattr(self, "refresh_rr_component_list"):
