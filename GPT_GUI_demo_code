@@ -1020,44 +1020,79 @@ def compute_w_morphology_corr_for_depth(nodes, nonnegative_display=True):
 
 
 
-def top_percent_iou_from_maps(a, b, top_percent=15.0):
-    """IoU of high-intensity W-map regions using top-percent binary masks."""
-    aa = np.asarray(a, dtype=np.float64).reshape(-1)
-    bb = np.asarray(b, dtype=np.float64).reshape(-1)
+
+def ssim_similarity_from_maps(a, b, eps=1e-12):
+    """Global SSIM-like morphology similarity for W maps, returned as 0..1.
+
+    The maps are min-max normalized before SSIM so absolute intensity scale is suppressed,
+    while spatial structure, contrast and local/background occupancy still contribute.
+    This is a compact dependency-free SSIM score for merge guidance.
+    """
+    aa = np.asarray(a, dtype=np.float64)
+    bb = np.asarray(b, dtype=np.float64)
+    if aa.shape != bb.shape:
+        aa = aa.reshape(-1)
+        bb = bb.reshape(-1)
     m = np.isfinite(aa) & np.isfinite(bb)
     if np.count_nonzero(m) < 3:
         return 0.0
-    aa = aa[m]
-    bb = bb[m]
-    pct = float(np.clip(top_percent, 0.1, 99.9))
-    ta = np.nanpercentile(aa, 100.0 - pct)
-    tb = np.nanpercentile(bb, 100.0 - pct)
-    ma = aa >= ta
-    mb = bb >= tb
-    union = int(np.count_nonzero(ma | mb))
-    if union <= 0:
+    x = aa[m].astype(np.float64)
+    y = bb[m].astype(np.float64)
+    xr = float(np.nanmax(x) - np.nanmin(x))
+    yr = float(np.nanmax(y) - np.nanmin(y))
+    if xr > eps:
+        x = (x - np.nanmin(x)) / xr
+    else:
+        x = np.zeros_like(x)
+    if yr > eps:
+        y = (y - np.nanmin(y)) / yr
+    else:
+        y = np.zeros_like(y)
+    mux, muy = float(np.mean(x)), float(np.mean(y))
+    vx = float(np.mean((x - mux) ** 2))
+    vy = float(np.mean((y - muy) ** 2))
+    cov = float(np.mean((x - mux) * (y - muy)))
+    C1 = 0.01 ** 2
+    C2 = 0.03 ** 2
+    den = (mux * mux + muy * muy + C1) * (vx + vy + C2)
+    if abs(den) <= eps:
         return 0.0
-    inter = int(np.count_nonzero(ma & mb))
-    return float(inter / union)
+    val = ((2.0 * mux * muy + C1) * (2.0 * cov + C2)) / den
+    return float(np.clip(val, 0.0, 1.0))
 
 
-def auto_score_pair_from_entries(e1, e2, corr_weight=0.40, top_percent=15.0):
-    """Score = a*corr + (1-a)*IoU(top). Corr is clipped to 0..1 for similarity use."""
+def compute_w_morphology_ssim_for_depth(nodes):
+    """Return labels and a W-map SSIM similarity matrix in 0..1 for all components in a depth."""
+    labels, maps = [], []
+    for ni, ns in enumerate(nodes or []):
+        for ci, wm in enumerate(getattr(ns, "component_maps", []) or []):
+            labels.append(f"N{ni}C{ci}")
+            maps.append(np.asarray(wm, dtype=np.float64))
+    n = len(maps)
+    if n == 0:
+        return labels, np.zeros((0, 0), dtype=np.float64)
+    S = np.eye(n, dtype=np.float64)
+    for i in range(n):
+        for j in range(i + 1, n):
+            v = ssim_similarity_from_maps(maps[i], maps[j])
+            S[i, j] = S[j, i] = v
+    return labels, np.clip(S, 0.0, 1.0)
+
+
+def auto_score_pair_from_entries(e1, e2, corr_weight=0.40):
+    """Score = a*corr + (1-a)*SSIM. Corr is clipped to 0..1 for similarity use."""
     a = float(np.clip(corr_weight, 0.0, 1.0))
     wm1 = np.asarray(e1.get("W_map"), dtype=np.float64)
     wm2 = np.asarray(e2.get("W_map"), dtype=np.float64)
     corr = safe_pearson_1d(wm1.reshape(-1), wm2.reshape(-1))
     corr_pos = float(np.clip(corr if np.isfinite(corr) else 0.0, 0.0, 1.0))
-    iou = top_percent_iou_from_maps(wm1, wm2, top_percent=top_percent)
-    score = a * corr_pos + (1.0 - a) * iou
-    return float(score), corr_pos, float(iou)
+    ssim = ssim_similarity_from_maps(wm1, wm2)
+    score = a * corr_pos + (1.0 - a) * ssim
+    return float(score), corr_pos, float(ssim)
 
 
-def auto_score_groups_from_entries(entries, corr_weight=0.40, top_percent=15.0, threshold_pct=55.0):
-    """Cluster components by thresholded pair score using connected components.
-
-    Returns groups as lists of entries plus a diagnostics list of pair scores.
-    """
+def auto_score_groups_from_entries(entries, corr_weight=0.40, threshold_pct=55.0):
+    """Cluster components by thresholded Score=a*Corr+(1-a)*SSIM using connected components."""
     entries = list(entries or [])
     n = len(entries)
     if n == 0:
@@ -1076,8 +1111,8 @@ def auto_score_groups_from_entries(entries, corr_weight=0.40, top_percent=15.0, 
     pair_rows = []
     for i in range(n):
         for j in range(i + 1, n):
-            score, corr, iou = auto_score_pair_from_entries(entries[i], entries[j], corr_weight, top_percent)
-            pair_rows.append({"i": i, "j": j, "label_i": entries[i].get("label", str(i)), "label_j": entries[j].get("label", str(j)), "score": score, "corr": corr, "iou": iou})
+            score, corr, ssim = auto_score_pair_from_entries(entries[i], entries[j], corr_weight)
+            pair_rows.append({"i": i, "j": j, "label_i": entries[i].get("label", str(i)), "label_j": entries[j].get("label", str(j)), "score": score, "corr": corr, "ssim": ssim})
             if score >= thr:
                 union(i, j)
     bins = {}
@@ -1150,21 +1185,21 @@ def plot_rr_diagnostics_summary(fig, rr, axis, X_for_weight=None, match_threshol
         return
     depths = rr.node_summaries_by_depth
     ndepth = max(1, len(depths))
-    fig.set_size_inches(18, max(5, ndepth * 4.2), forward=True)
-    gs = fig.add_gridspec(ndepth, 2, width_ratios=[1.15, 1.45])
+    fig.set_size_inches(22, max(5, ndepth * 4.2), forward=True)
+    gs = fig.add_gridspec(ndepth, 3, width_ratios=[1.05, 1.05, 1.45])
     for d, nodes in enumerate(depths):
         axc = fig.add_subplot(gs[d, 0])
         labels, C = compute_w_morphology_corr_for_depth(nodes)
         if C.size:
-            im = axc.imshow(np.clip(C, 0.0, 1.0), vmin=0, vmax=1, cmap="viridis", aspect="auto")
-            axc.set_title(f"Depth {d}: W morphology similarity (0–1)", fontsize=11)
+            Cdisp = np.clip(C, 0.0, 1.0)
+            im = axc.imshow(Cdisp, vmin=0, vmax=1, cmap="viridis", aspect="equal")
+            axc.set_title(f"Depth {d}: W Corr similarity", fontsize=11)
             if len(labels) <= 24:
                 axc.set_xticks(range(len(labels))); axc.set_xticklabels(labels, rotation=90, fontsize=6)
                 axc.set_yticks(range(len(labels))); axc.set_yticklabels(labels, fontsize=6)
             else:
                 axc.set_xticks([]); axc.set_yticks([])
-            if C.size and C.shape[0] <= 18:
-                Cdisp = np.clip(C, 0.0, 1.0)
+            if Cdisp.shape[0] <= 18:
                 for _ii in range(Cdisp.shape[0]):
                     for _jj in range(Cdisp.shape[1]):
                         axc.text(_jj, _ii, f"{Cdisp[_ii, _jj]:.2f}", ha="center", va="center", fontsize=6)
@@ -1172,7 +1207,25 @@ def plot_rr_diagnostics_summary(fig, rr, axis, X_for_weight=None, match_threshol
         else:
             axc.axis("off"); axc.text(0.5, 0.5, f"Depth {d}: no W maps", ha="center", va="center")
 
-        axb = fig.add_subplot(gs[d, 1])
+        axs = fig.add_subplot(gs[d, 1])
+        labels_s, Ssim = compute_w_morphology_ssim_for_depth(nodes)
+        if Ssim.size:
+            im2 = axs.imshow(np.clip(Ssim, 0.0, 1.0), vmin=0, vmax=1, cmap="viridis", aspect="equal")
+            axs.set_title(f"Depth {d}: W SSIM similarity", fontsize=11)
+            if len(labels_s) <= 24:
+                axs.set_xticks(range(len(labels_s))); axs.set_xticklabels(labels_s, rotation=90, fontsize=6)
+                axs.set_yticks(range(len(labels_s))); axs.set_yticklabels(labels_s, fontsize=6)
+            else:
+                axs.set_xticks([]); axs.set_yticks([])
+            if Ssim.shape[0] <= 18:
+                for _ii in range(Ssim.shape[0]):
+                    for _jj in range(Ssim.shape[1]):
+                        axs.text(_jj, _ii, f"{Ssim[_ii, _jj]:.2f}", ha="center", va="center", fontsize=6)
+            add_colorbar(fig, axs, im2)
+        else:
+            axs.axis("off"); axs.text(0.5, 0.5, f"Depth {d}: no W maps", ha="center", va="center")
+
+        axb = fig.add_subplot(gs[d, 2])
         names, vals, fullcorrs = [], [], []
         if X_for_weight is not None:
             for ni, ns in enumerate(nodes):
@@ -1202,7 +1255,7 @@ def plot_rr_diagnostics_summary(fig, rr, axis, X_for_weight=None, match_threshol
             axb.axis("off")
             axb.text(0.5, 0.5, "No weighted raw spectra available", ha="center", va="center")
     fig.suptitle("rr-NMF interpretation diagnostics: morphology and spectrum-shape agreement", fontsize=14)
-    fig.subplots_adjust(left=0.06, right=0.975, top=0.94, bottom=0.045, hspace=0.65, wspace=0.28)
+    fig.subplots_adjust(left=0.06, right=0.975, top=0.94, bottom=0.045, hspace=0.65, wspace=0.32)
 
 
 def _short_component_label(label: str) -> str:
@@ -1214,13 +1267,13 @@ def _short_component_label(label: str) -> str:
 
 
 def _auto_pair_stats_for_labels(pair_rows, labels):
-    """Return aggregate score/corr/IoU among selected labels."""
+    """Return aggregate score/corr/SSIM among selected labels."""
     labs = set(labels or [])
     rows = [r for r in (pair_rows or []) if r.get("label_i") in labs and r.get("label_j") in labs]
     if not rows:
         return None
     vals = {}
-    for key in ("score", "corr", "iou"):
+    for key in ("score", "corr", "ssim"):
         arr = np.asarray([float(r.get(key, np.nan)) for r in rows], dtype=np.float64)
         arr = arr[np.isfinite(arr)]
         vals[key + "_mean"] = float(np.mean(arr)) if arr.size else np.nan
@@ -1230,12 +1283,14 @@ def _auto_pair_stats_for_labels(pair_rows, labels):
     return vals
 
 
-def plot_auto_merge_w_provenance(fig, manual_depth_groups, cmap="viridis"):
-    """Concept view for Auto-Step merge provenance using W images only.
 
-    Each panel corresponds to one auto target depth. Source W maps are shown above
-    the resulting next-depth input tile. Connecting lines are annotated with the
-    aggregate Score/Corr/IoU that produced the automatic merge decision.
+def plot_auto_merge_w_provenance(fig, manual_depth_groups, cmap="viridis"):
+    """Tree-like Auto-Step merge provenance using W/combined images only.
+
+    The display is arranged by depth: source components from D-1 are on the left side
+    of each step and the next-depth merged/pass input tiles are on the right. Arrows
+    show which source W maps were sent to each merged/pass tile, and labels show
+    Score/Corr/SSIM values used by the auto merge rule.
     """
     fig.clear()
     groups_by_depth = []
@@ -1248,91 +1303,74 @@ def plot_auto_merge_w_provenance(fig, manual_depth_groups, cmap="viridis"):
         ax = fig.add_subplot(111)
         ax.axis("off")
         ax.text(0.5, 0.55, "No Auto-Step merge provenance yet", ha="center", va="center", fontsize=14)
-        ax.text(0.5, 0.43, "Run Auto Step to create score-based merge/pass groups.", ha="center", va="center", fontsize=10)
+        ax.text(0.5, 0.43, "Run Auto Step to create Score/Corr/SSIM merge/pass groups.", ha="center", va="center", fontsize=10)
         return
 
-    total_sets = sum(len(sets) for _, sets in groups_by_depth)
-    fig.set_size_inches(18, max(6, 2.6 * total_sets + 1.2 * len(groups_by_depth)), forward=True)
-    height_ratios = []
-    for _, sets in groups_by_depth:
-        height_ratios.extend([0.35] + [2.6] * len(sets))
-    gs = fig.add_gridspec(len(height_ratios), 1, height_ratios=height_ratios)
-    grid_row = 0
-    for target_depth, sets in groups_by_depth:
-        axh = fig.add_subplot(gs[grid_row, 0])
-        axh.axis("off")
-        axh.text(0.01, 0.5, f"Auto target depth D{target_depth}: source D{target_depth-1} → next-depth input groups", fontsize=12, fontweight="bold", va="center")
-        grid_row += 1
-        for gi, c in enumerate(sets, start=1):
-            ax = fig.add_subplot(gs[grid_row, 0])
-            grid_row += 1
-            ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.axis("off")
+    nsteps = len(groups_by_depth)
+    max_rows = max([max(sum(max(1, len(c.get("member_maps", []) or [])) for c in sets), len(sets)) for _, sets in groups_by_depth] + [1])
+    fig.set_size_inches(max(16, 6.2 * nsteps), max(7, 1.15 * max_rows + 2.2), forward=True)
+    ax = fig.add_subplot(111)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis("off")
+
+    col_w = 1.0 / max(1, nsteps)
+    thumb_w = min(0.055, col_w * 0.20)
+    thumb_h = min(0.075, 0.72 / max(3, max_rows))
+
+    for si, (target_depth, sets) in enumerate(groups_by_depth):
+        x_left = si * col_w + col_w * 0.08
+        x_mid = si * col_w + col_w * 0.47
+        x_right = si * col_w + col_w * 0.78
+        ax.text(si * col_w + col_w * 0.5, 0.975, f"D{target_depth-1} → D{target_depth}", ha="center", va="top", fontsize=12, fontweight="bold", transform=ax.transAxes)
+        ax.text(x_left, 0.93, "source W", ha="center", va="top", fontsize=8, transform=ax.transAxes)
+        ax.text(x_right, 0.93, "next input", ha="center", va="top", fontsize=8, transform=ax.transAxes)
+
+        total_members = sum(max(1, len(c.get("member_maps", []) or [])) for c in sets)
+        src_slots = max(total_members, 1)
+        grp_slots = max(len(sets), 1)
+        src_y_positions = np.linspace(0.84, 0.12, src_slots) if src_slots > 1 else np.array([0.50])
+        grp_y_positions = np.linspace(0.82, 0.14, grp_slots) if grp_slots > 1 else np.array([0.50])
+        src_idx = 0
+        for gi, c in enumerate(sets):
+            gy = float(grp_y_positions[gi])
             members = list(c.get("members", []) or [])
             member_maps = list(c.get("member_maps", []) or [])
-            is_pass = bool(c.get("pass_through", False))
-            name = c.get("name", f"Group {gi}")
+            is_pass = bool(c.get("pass_through", False)) or len(member_maps) <= 1
             pair_rows = c.get("auto_pair_details", []) or []
             stats = c.get("auto_pair_stats", None) or _auto_pair_stats_for_labels(pair_rows, members)
+            gimg = c.get("image", None)
 
-            # Header
-            kind = "PASS" if is_pass or len(members) <= 1 else "MERGED"
-            ax.text(0.01, 0.96, f"D{target_depth} G{gi} [{kind}]  {name}", fontsize=10, fontweight="bold", va="top")
+            # Target merged/pass tile.
+            if gimg is not None:
+                gax = inset_axes(ax, width="100%", height="100%", bbox_to_anchor=(x_right-thumb_w/2, gy-thumb_h/2, thumb_w, thumb_h), bbox_transform=ax.transAxes, borderpad=0)
+                gax.imshow(gimg, cmap=cmap, origin="upper", aspect="equal")
+                gax.set_xticks([]); gax.set_yticks([])
+                gax.set_title("PASS" if is_pass else "MERGE", fontsize=6, pad=1)
             if stats:
-                metric_txt = (
-                    f"mean Score={100*stats.get('score_mean', np.nan):.1f}%  "
-                    f"Corr={100*stats.get('corr_mean', np.nan):.1f}%  "
-                    f"IoU={100*stats.get('iou_mean', np.nan):.1f}%  "
-                    f"(n={int(stats.get('n_pairs', 0))} pairs)"
-                )
+                metric = f"S {100*stats.get('score_mean', np.nan):.1f}\nC {100*stats.get('corr_mean', np.nan):.1f} / SSIM {100*stats.get('ssim_mean', np.nan):.1f}"
             else:
-                metric_txt = "PASS-through or no pair statistics"
-            ax.text(0.01, 0.88, metric_txt, fontsize=8, va="top")
+                metric = "PASS"
+            ax.text(x_mid, gy, metric, fontsize=6.5, ha="center", va="center", transform=ax.transAxes,
+                    bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="0.6", alpha=0.8))
 
-            nmem = max(1, len(member_maps))
-            # Keep member thumbnails visible without occupying the entire width.
-            x0, x1 = 0.04, 0.72
-            gap = 0.012
-            slot_w = min(0.13, max(0.055, (x1 - x0 - gap * (nmem - 1)) / nmem))
-            total_w = slot_w * nmem + gap * (nmem - 1)
-            start_x = x0 + max(0, (x1 - x0 - total_w) / 2.0)
-            member_centers = []
+            # Source member thumbnails and arrows.
+            if not member_maps:
+                member_maps = [None]
             for mi, wm in enumerate(member_maps):
-                xx = start_x + mi * (slot_w + gap)
-                iax = inset_axes(ax, width="100%", height="100%", bbox_to_anchor=(xx, 0.54, slot_w, 0.28), bbox_transform=ax.transAxes, borderpad=0)
-                iax.imshow(wm, cmap=cmap, origin="upper", aspect="equal")
-                iax.set_xticks([]); iax.set_yticks([])
-                lab = _short_component_label(members[mi] if mi < len(members) else f"M{mi}")
-                iax.set_title(lab, fontsize=7, pad=1)
-                member_centers.append((xx + slot_w / 2.0, 0.54))
+                sy = float(src_y_positions[min(src_idx, len(src_y_positions)-1)])
+                src_idx += 1
+                if wm is not None:
+                    iax = inset_axes(ax, width="100%", height="100%", bbox_to_anchor=(x_left-thumb_w/2, sy-thumb_h/2, thumb_w, thumb_h), bbox_transform=ax.transAxes, borderpad=0)
+                    iax.imshow(wm, cmap=cmap, origin="upper", aspect="equal")
+                    iax.set_xticks([]); iax.set_yticks([])
+                    lab = _short_component_label(members[mi] if mi < len(members) else f"M{mi}")
+                    iax.set_title(lab, fontsize=5.5, pad=1)
+                ax.annotate("", xy=(x_right-thumb_w*0.55, gy), xytext=(x_left+thumb_w*0.55, sy), xycoords=ax.transAxes, textcoords=ax.transAxes,
+                            arrowprops=dict(arrowstyle="->", lw=0.8, alpha=0.55))
 
-            # Combined input tile (from summed child matrices) at the bottom.
-            cimg = c.get("image", None)
-            cax_x, cax_y, cax_w, cax_h = 0.39, 0.07, 0.18, 0.33
-            if cimg is not None:
-                cax = inset_axes(ax, width="100%", height="100%", bbox_to_anchor=(cax_x, cax_y, cax_w, cax_h), bbox_transform=ax.transAxes, borderpad=0)
-                cax.imshow(cimg, cmap=cmap, origin="upper", aspect="equal")
-                cax.set_xticks([]); cax.set_yticks([])
-                cax.set_title("next-depth input", fontsize=8, pad=2)
-            target_center = (cax_x + cax_w / 2.0, cax_y + cax_h)
-
-            # Draw connector lines and annotate with pair metrics.
-            for mc in member_centers:
-                ax.plot([mc[0], target_center[0]], [mc[1], target_center[1]], transform=ax.transAxes, lw=1.0, alpha=0.55)
-            ax.text(target_center[0], target_center[1] + 0.035, "combined data" if not is_pass else "pass-through data", ha="center", va="bottom", fontsize=8, transform=ax.transAxes)
-
-            # Detailed top pair list helps tune a/top/threshold.
-            if pair_rows:
-                ranked = sorted(pair_rows, key=lambda r: r.get("score", 0.0), reverse=True)[:5]
-                lines = []
-                for r in ranked:
-                    if r.get("label_i") in members and r.get("label_j") in members:
-                        lines.append(f"{_short_component_label(r.get('label_i',''))}+{_short_component_label(r.get('label_j',''))}: S {100*r.get('score',0):.1f} / C {100*r.get('corr',0):.1f} / I {100*r.get('iou',0):.1f}")
-                if lines:
-                    ax.text(0.76, 0.72, "pair Score/Corr/IoU", fontsize=8, fontweight="bold", va="top")
-                    ax.text(0.76, 0.66, "\n".join(lines), fontsize=7, va="top")
-
-    fig.suptitle("Auto-Step W-image merge provenance: tune a, top-percent, and threshold using Score/Corr/IoU", fontsize=14)
-    fig.subplots_adjust(left=0.035, right=0.985, top=0.965, bottom=0.03, hspace=0.28)
+    fig.suptitle("Auto-Step W-image merge provenance tree: Score = a·Corr + (1-a)·SSIM", fontsize=14)
+    fig.subplots_adjust(left=0.02, right=0.985, top=0.94, bottom=0.03)
 
 
 class Canvas(FigureCanvas):
@@ -1673,22 +1711,26 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                 # Keep it in the first node-width block so it remains visible without
                 # horizontal scrolling, but make the row calculation depth-local.
                 corr_row = starts[d] + 1 + wraps_d * rows_node + 1
-                holder_corr = fig.add_subplot(gs[corr_row, 0:rank])
+                holder_corr = fig.add_subplot(gs[corr_row, 0:min(total_cols, max(rank*2, rank+1))])
                 holder_corr.axis("off")
-                corr_ax = inset_axes(holder_corr, width="52%", height="95%", loc="lower center", borderpad=0.0)
+                labels_ssim, Ssim = compute_w_morphology_ssim_for_depth(nodes)
+                corr_ax = inset_axes(holder_corr, width="46%", height="95%", loc="lower left", borderpad=0.0)
                 imcorr = corr_ax.imshow(Ccorr, vmin=0, vmax=1, cmap="viridis", aspect="equal")
-                corr_ax.set_title("W morphology similarity\n(Pearson, negative→0)", fontsize=7, pad=2)
-                if len(labels_corr) <= 10:
-                    corr_ax.set_xticks(range(len(labels_corr)))
-                    corr_ax.set_yticks(range(len(labels_corr)))
-                    corr_ax.set_xticklabels(labels_corr, rotation=90, fontsize=4)
-                    corr_ax.set_yticklabels(labels_corr, fontsize=4)
-                else:
-                    corr_ax.set_xticks([])
-                    corr_ax.set_yticks([])
-                corr_ax.tick_params(length=1, pad=1)
-                cax = inset_axes(holder_corr, width="3%", height="75%", loc="lower right", borderpad=0.4)
-                cb = fig.colorbar(imcorr, cax=cax)
+                corr_ax.set_title("W Corr\n(negative→0)", fontsize=7, pad=2)
+                ssim_ax = inset_axes(holder_corr, width="46%", height="95%", loc="lower right", borderpad=0.0)
+                imssim = ssim_ax.imshow(Ssim, vmin=0, vmax=1, cmap="viridis", aspect="equal")
+                ssim_ax.set_title("W SSIM", fontsize=7, pad=2)
+                for _ax, _labels in [(corr_ax, labels_corr), (ssim_ax, labels_ssim)]:
+                    if len(_labels) <= 10:
+                        _ax.set_xticks(range(len(_labels)))
+                        _ax.set_yticks(range(len(_labels)))
+                        _ax.set_xticklabels(_labels, rotation=90, fontsize=4)
+                        _ax.set_yticklabels(_labels, fontsize=4)
+                    else:
+                        _ax.set_xticks([]); _ax.set_yticks([])
+                    _ax.tick_params(length=1, pad=1)
+                cax = inset_axes(holder_corr, width="2.5%", height="75%", loc="center right", borderpad=0.15)
+                cb = fig.colorbar(imssim, cax=cax)
                 cb.ax.tick_params(labelsize=5, pad=1)
         except Exception:
             pass
@@ -2096,11 +2138,10 @@ class RR2NMFGui(QMainWindow):
         self.spin_shape_match_pct=QDoubleSpinBox(); self.spin_shape_match_pct.setRange(0,100); self.spin_shape_match_pct.setDecimals(1); self.spin_shape_match_pct.setValue(80.0); self.spin_shape_match_pct.setSuffix(" %"); self.spin_shape_match_pct.valueChanged.connect(self.refresh_views)
         self.spin_shape_match_window=QDoubleSpinBox(); self.spin_shape_match_window.setRange(0.0,1e9); self.spin_shape_match_window.setDecimals(6); self.spin_shape_match_window.setValue(21.0); self.spin_shape_match_window.setSingleStep(1.0); self.spin_shape_match_window.setSuffix(" eV"); self.spin_shape_match_window.setToolTip("Energy-axis window width in eV/axis units. Converted to an odd number of channels internally."); self.spin_shape_match_window.valueChanged.connect(self.refresh_views)
         vg=QGroupBox("View / Run"); vf=QFormLayout(vg); vf.addRow("Colormap",self.combo_cmap); vf.addRow("H/raw shape-match threshold", self.spin_shape_match_pct); vf.addRow("H/raw shape-match window width (eV)", self.spin_shape_match_window)
-        self.spin_auto_corr_weight=QDoubleSpinBox(); self.spin_auto_corr_weight.setRange(0.0,1.0); self.spin_auto_corr_weight.setDecimals(3); self.spin_auto_corr_weight.setSingleStep(0.05); self.spin_auto_corr_weight.setValue(0.40); self.spin_auto_corr_weight.setToolTip("a in Score = a*Corr + (1-a)*IoU(top)")
+        self.spin_auto_corr_weight=QDoubleSpinBox(); self.spin_auto_corr_weight.setRange(0.0,1.0); self.spin_auto_corr_weight.setDecimals(3); self.spin_auto_corr_weight.setSingleStep(0.05); self.spin_auto_corr_weight.setValue(0.40); self.spin_auto_corr_weight.setToolTip("a in Score = a*Corr + (1-a)*SSIM")
         self.lbl_auto_iou_weight=QLabel("0.600"); self.spin_auto_corr_weight.valueChanged.connect(lambda v: self.lbl_auto_iou_weight.setText(f"{1.0-float(v):.3f}"))
-        self.spin_auto_top_pct=QDoubleSpinBox(); self.spin_auto_top_pct.setRange(0.1,99.9); self.spin_auto_top_pct.setDecimals(1); self.spin_auto_top_pct.setSingleStep(1.0); self.spin_auto_top_pct.setValue(15.0); self.spin_auto_top_pct.setSuffix(" %")
         self.spin_auto_score_thresh=QDoubleSpinBox(); self.spin_auto_score_thresh.setRange(0.0,100.0); self.spin_auto_score_thresh.setDecimals(1); self.spin_auto_score_thresh.setSingleStep(5.0); self.spin_auto_score_thresh.setValue(55.0); self.spin_auto_score_thresh.setSuffix(" %")
-        vf.addRow("Auto score Corr weight a", self.spin_auto_corr_weight); vf.addRow("Auto score IoU weight 1-a", self.lbl_auto_iou_weight); vf.addRow("Auto score top percent", self.spin_auto_top_pct); vf.addRow("Auto score threshold", self.spin_auto_score_thresh)
+        vf.addRow("Auto score Corr weight a", self.spin_auto_corr_weight); vf.addRow("Auto score SSIM weight 1-a", self.lbl_auto_iou_weight); vf.addRow("Auto score threshold", self.spin_auto_score_thresh)
         self.btn_run=QPushButton("Run Full Analysis on ROI (Conv + rr)"); self.btn_run.clicked.connect(self.run_analysis)
         self.btn_run_conv_only=QPushButton("Run Conventional NMF Only on ROI")
         self.btn_run_conv_only.clicked.connect(self.run_conventional_only)
@@ -2667,7 +2708,6 @@ class RR2NMFGui(QMainWindow):
         groups, pairs = auto_score_groups_from_entries(
             entries,
             corr_weight=self.spin_auto_corr_weight.value(),
-            top_percent=self.spin_auto_top_pct.value(),
             threshold_pct=self.spin_auto_score_thresh.value(),
         )
         sets=[]
@@ -2691,14 +2731,14 @@ class RR2NMFGui(QMainWindow):
             sets.append(c)
         self.manual_depth_groups[int(target_depth)] = sets
         best_pairs=sorted(pairs, key=lambda r: r.get("score",0.0), reverse=True)[:8]
-        pair_txt="; ".join([f"{r['label_i']}+{r['label_j']}: score={100*r['score']:.1f}% corr={100*r['corr']:.1f}% IoU={100*r['iou']:.1f}%" for r in best_pairs])
-        self.append_log(f"Auto score grouping for target D{target_depth} from source D{source_depth}: {len(entries)} input components -> {len(sets)} next-depth set(s), merged_groups={merged_count}, threshold={self.spin_auto_score_thresh.value():.1f}%, a={self.spin_auto_corr_weight.value():.3f}, top={self.spin_auto_top_pct.value():.1f}%")
+        pair_txt="; ".join([f"{r['label_i']}+{r['label_j']}: score={100*r['score']:.1f}% corr={100*r['corr']:.1f}% SSIM={100*r['ssim']:.1f}%" for r in best_pairs])
+        self.append_log(f"Auto score grouping for target D{target_depth} from source D{source_depth}: {len(entries)} input components -> {len(sets)} next-depth set(s), merged_groups={merged_count}, threshold={self.spin_auto_score_thresh.value():.1f}%, a={self.spin_auto_corr_weight.value():.3f}, ssim_weight={1.0-self.spin_auto_corr_weight.value():.3f}")
         if pair_txt:
             self.append_log("Top auto-score pairs: " + pair_txt)
         return len(entries), len(sets), merged_count
 
     def start_auto_score_merge_workflow(self):
-        """Automatically create merge/pass sets using Score=a*Corr+(1-a)*IoU(top), then advance depth by depth."""
+        """Automatically create merge/pass sets using Score=a*Corr+(1-a)*SSIM, then advance depth by depth."""
         if self.cube is None:
             QMessageBox.warning(self, "No data", "Load data first."); return
         try:
@@ -2717,7 +2757,7 @@ class RR2NMFGui(QMainWindow):
         self._auto_score_active=True
         self._auto_score_target_depth=start
         self._auto_score_stop_after_current=False
-        self.append_log(f"Auto score workflow started: start D{start}, final D{final}, score=a*Corr+(1-a)*IoU(top), threshold={self.spin_auto_score_thresh.value():.1f}%.")
+        self.append_log(f"Auto score workflow started: start D{start}, final D{final}, score=a*Corr+(1-a)*SSIM, threshold={self.spin_auto_score_thresh.value():.1f}%.")
         # First compute to the source depth of the start target.
         params=self.collect_params(include_manual=True, max_manual_depth=start-1)
         params["run_conventional"] = False
@@ -3390,7 +3430,7 @@ This does not modify the current rr-NMF/manual tree results.
                 "random_seed": self.spin_seed.value(),
                 "chunk_size": self.spin_chunk.value(),
             },
-            "view": {"cmap": self.combo_cmap.currentText(), "shape_match_threshold_pct": self.spin_shape_match_pct.value() if hasattr(self, "spin_shape_match_pct") else 80.0, "shape_match_window_energy": self.spin_shape_match_window.value() if hasattr(self, "spin_shape_match_window") else 21.0, "auto_corr_weight": self.spin_auto_corr_weight.value() if hasattr(self,"spin_auto_corr_weight") else 0.40, "auto_top_percent": self.spin_auto_top_pct.value() if hasattr(self,"spin_auto_top_pct") else 15.0, "auto_score_threshold_pct": self.spin_auto_score_thresh.value() if hasattr(self,"spin_auto_score_thresh") else 55.0},
+            "view": {"cmap": self.combo_cmap.currentText(), "shape_match_threshold_pct": self.spin_shape_match_pct.value() if hasattr(self, "spin_shape_match_pct") else 80.0, "shape_match_window_energy": self.spin_shape_match_window.value() if hasattr(self, "spin_shape_match_window") else 21.0, "auto_corr_weight": self.spin_auto_corr_weight.value() if hasattr(self,"spin_auto_corr_weight") else 0.40, "auto_score_threshold_pct": self.spin_auto_score_thresh.value() if hasattr(self,"spin_auto_score_thresh") else 55.0},
         }
 
     def apply_processing_settings(self, cfg):
@@ -3463,7 +3503,6 @@ This does not modify the current rr-NMF/manual tree results.
                     self.spin_shape_match_window.setValue(float(ch))
 
         if hasattr(self, "spin_auto_corr_weight") and "auto_corr_weight" in view: self.spin_auto_corr_weight.setValue(float(view["auto_corr_weight"]))
-        if hasattr(self, "spin_auto_top_pct") and "auto_top_percent" in view: self.spin_auto_top_pct.setValue(float(view["auto_top_percent"]))
         if hasattr(self, "spin_auto_score_thresh") and "auto_score_threshold_pct" in view: self.spin_auto_score_thresh.setValue(float(view["auto_score_threshold_pct"]))
 
         self.update_roi_label()
