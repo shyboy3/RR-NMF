@@ -1,6 +1,6 @@
 
 """
-rr2_nmf_gui_ver6_7_auto_merge_w_tree.py
+rr2_nmf_gui_ver7_1_auto_merge_w_tree.py
 
 Single-file rr-NMF GUI based on the v4.4 workflow, with EELS Interpretation added.
 This file keeps the v4.4-style core workflow in one executable Python file.
@@ -1079,20 +1079,42 @@ def compute_w_morphology_ssim_for_depth(nodes):
     return labels, np.clip(S, 0.0, 1.0)
 
 
+def compute_h_basis_corr_for_depth(nodes, nonnegative_display=True):
+    """Return labels and H-basis shape-correlation matrix for all components in a depth."""
+    labels, specs = [], []
+    for ni, ns in enumerate(nodes or []):
+        for ci, hs in enumerate(getattr(ns, "component_spectra", []) or []):
+            labels.append(f"N{ni}C{ci}")
+            specs.append(np.asarray(hs, dtype=np.float64).reshape(-1))
+    n = len(specs)
+    if n == 0:
+        return labels, np.zeros((0, 0), dtype=np.float64)
+    C = np.eye(n, dtype=np.float64)
+    for i in range(n):
+        for j in range(i + 1, n):
+            c = safe_pearson_1d(specs[i], specs[j])
+            C[i, j] = C[j, i] = c if np.isfinite(c) else 0.0
+    if nonnegative_display:
+        C = np.clip(C, 0.0, 1.0)
+    return labels, C
+
+
 def auto_score_pair_from_entries(e1, e2, corr_weight=0.40):
-    """Score = a*corr + (1-a)*SSIM. Corr is clipped to 0..1 for similarity use."""
+    """Score = a*W-SSIM + (1-a)*H-corr. H-corr is clipped to 0..1 for similarity use."""
     a = float(np.clip(corr_weight, 0.0, 1.0))
     wm1 = np.asarray(e1.get("W_map"), dtype=np.float64)
     wm2 = np.asarray(e2.get("W_map"), dtype=np.float64)
-    corr = safe_pearson_1d(wm1.reshape(-1), wm2.reshape(-1))
-    corr_pos = float(np.clip(corr if np.isfinite(corr) else 0.0, 0.0, 1.0))
-    ssim = ssim_similarity_from_maps(wm1, wm2)
-    score = a * corr_pos + (1.0 - a) * ssim
-    return float(score), corr_pos, float(ssim)
+    hs1 = np.asarray(e1.get("H_spec"), dtype=np.float64).reshape(-1)
+    hs2 = np.asarray(e2.get("H_spec"), dtype=np.float64).reshape(-1)
+    w_ssim = ssim_similarity_from_maps(wm1, wm2)
+    h_corr = safe_pearson_1d(hs1, hs2)
+    h_corr_pos = float(np.clip(h_corr if np.isfinite(h_corr) else 0.0, 0.0, 1.0))
+    score = a * float(w_ssim) + (1.0 - a) * h_corr_pos
+    return float(score), float(w_ssim), h_corr_pos
 
 
 def auto_score_groups_from_entries(entries, corr_weight=0.40, threshold_pct=55.0):
-    """Cluster components by thresholded Score=a*Corr+(1-a)*SSIM using connected components."""
+    """Cluster components by thresholded Score=a*W-SSIM+(1-a)*H-corr using connected components."""
     entries = list(entries or [])
     n = len(entries)
     if n == 0:
@@ -1111,8 +1133,8 @@ def auto_score_groups_from_entries(entries, corr_weight=0.40, threshold_pct=55.0
     pair_rows = []
     for i in range(n):
         for j in range(i + 1, n):
-            score, corr, ssim = auto_score_pair_from_entries(entries[i], entries[j], corr_weight)
-            pair_rows.append({"i": i, "j": j, "label_i": entries[i].get("label", str(i)), "label_j": entries[j].get("label", str(j)), "score": score, "corr": corr, "ssim": ssim})
+            score, w_ssim, h_corr = auto_score_pair_from_entries(entries[i], entries[j], corr_weight)
+            pair_rows.append({"i": i, "j": j, "label_i": entries[i].get("label", str(i)), "label_j": entries[j].get("label", str(j)), "score": score, "w_ssim": w_ssim, "h_corr": h_corr, "ssim": w_ssim, "corr": h_corr})
             if score >= thr:
                 union(i, j)
     bins = {}
@@ -1199,7 +1221,7 @@ def plot_rr_diagnostics_summary(fig, rr, axis, X_for_weight=None, match_threshol
                 axc.set_yticks(range(len(labels))); axc.set_yticklabels(labels, fontsize=6)
             else:
                 axc.set_xticks([]); axc.set_yticks([])
-            if Cdisp.shape[0] <= 18:
+            if Cdisp.shape[0] <= 12:
                 for _ii in range(Cdisp.shape[0]):
                     for _jj in range(Cdisp.shape[1]):
                         axc.text(_jj, _ii, f"{Cdisp[_ii, _jj]:.2f}", ha="center", va="center", fontsize=6)
@@ -1217,7 +1239,7 @@ def plot_rr_diagnostics_summary(fig, rr, axis, X_for_weight=None, match_threshol
                 axs.set_yticks(range(len(labels_s))); axs.set_yticklabels(labels_s, fontsize=6)
             else:
                 axs.set_xticks([]); axs.set_yticks([])
-            if Ssim.shape[0] <= 18:
+            if Ssim.shape[0] <= 12:
                 for _ii in range(Ssim.shape[0]):
                     for _jj in range(Ssim.shape[1]):
                         axs.text(_jj, _ii, f"{Ssim[_ii, _jj]:.2f}", ha="center", va="center", fontsize=6)
@@ -1273,7 +1295,7 @@ def _auto_pair_stats_for_labels(pair_rows, labels):
     if not rows:
         return None
     vals = {}
-    for key in ("score", "corr", "ssim"):
+    for key in ("score", "w_ssim", "h_corr", "corr", "ssim"):
         arr = np.asarray([float(r.get(key, np.nan)) for r in rows], dtype=np.float64)
         arr = arr[np.isfinite(arr)]
         vals[key + "_mean"] = float(np.mean(arr)) if arr.size else np.nan
@@ -1290,7 +1312,7 @@ def plot_auto_merge_w_provenance(fig, manual_depth_groups, cmap="viridis"):
     The display is arranged by depth: source components from D-1 are on the left side
     of each step and the next-depth merged/pass input tiles are on the right. Arrows
     show which source W maps were sent to each merged/pass tile, and labels show
-    Score/Corr/SSIM values used by the auto merge rule.
+    Score/W-SSIM/H-corr values used by the auto merge rule.
     """
     fig.clear()
     groups_by_depth = []
@@ -1303,7 +1325,7 @@ def plot_auto_merge_w_provenance(fig, manual_depth_groups, cmap="viridis"):
         ax = fig.add_subplot(111)
         ax.axis("off")
         ax.text(0.5, 0.55, "No Auto-Step merge provenance yet", ha="center", va="center", fontsize=14)
-        ax.text(0.5, 0.43, "Run Auto Step to create Score/Corr/SSIM merge/pass groups.", ha="center", va="center", fontsize=10)
+        ax.text(0.5, 0.43, "Run Auto Step to create Score/W-SSIM/H-corr merge/pass groups.", ha="center", va="center", fontsize=10)
         return
 
     nsteps = len(groups_by_depth)
@@ -1348,7 +1370,7 @@ def plot_auto_merge_w_provenance(fig, manual_depth_groups, cmap="viridis"):
                 gax.set_xticks([]); gax.set_yticks([])
                 gax.set_title("PASS" if is_pass else "MERGE", fontsize=6, pad=1)
             if stats:
-                metric = f"S {100*stats.get('score_mean', np.nan):.1f}\nC {100*stats.get('corr_mean', np.nan):.1f} / SSIM {100*stats.get('ssim_mean', np.nan):.1f}"
+                metric = f"S {100*stats.get('score_mean', np.nan):.1f}\nW-SSIM {100*stats.get('w_ssim_mean', stats.get('ssim_mean', np.nan)):.1f} / Hcorr {100*stats.get('h_corr_mean', stats.get('corr_mean', np.nan)):.1f}"
             else:
                 metric = "PASS"
             ax.text(x_mid, gy, metric, fontsize=6.5, ha="center", va="center", transform=ax.transAxes,
@@ -1369,7 +1391,7 @@ def plot_auto_merge_w_provenance(fig, manual_depth_groups, cmap="viridis"):
                 ax.annotate("", xy=(x_right-thumb_w*0.55, gy), xytext=(x_left+thumb_w*0.55, sy), xycoords=ax.transAxes, textcoords=ax.transAxes,
                             arrowprops=dict(arrowstyle="->", lw=0.8, alpha=0.55))
 
-    fig.suptitle("Auto-Step W-image merge provenance tree: Score = a·Corr + (1-a)·SSIM", fontsize=14)
+    fig.suptitle("Auto-Step merge provenance tree: Score = a·W-SSIM + (1-a)·H-corr", fontsize=14)
     fig.subplots_adjust(left=0.02, right=0.985, top=0.94, bottom=0.03)
 
 
@@ -2054,7 +2076,7 @@ class RR2NMFGui(QMainWindow):
         self.axis_info=make_default_axis_info((1,1,1)); self.roi_axis_info=make_default_axis_info((1,1,1))
         self.conv_result=None; self.rr_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.bg_applied=False; self._raw_mouse_press=None; self.selected_raw_pixel=None
         self.eds_elements=[]; self.eels_elements=[]; self.eds_sources=[]; self.eels_sources=[]; self.eds_hits=[]; self.eels_hits=[]
-        self._syncing=False; self._auto_score_active=False; self._auto_score_target_depth=None; self._auto_score_stop_after_current=False; self._build_ui()
+        self._syncing=False; self._auto_score_active=False; self._auto_score_target_depth=None; self._auto_score_stop_after_current=False; self._auto_score_unchanged_count=0; self._build_ui()
 
     def _build_ui(self):
         central=QWidget(); self.setCentralWidget(central); layout=QHBoxLayout(central); split=QSplitter(Qt.Horizontal); layout.addWidget(split)
@@ -2138,10 +2160,11 @@ class RR2NMFGui(QMainWindow):
         self.spin_shape_match_pct=QDoubleSpinBox(); self.spin_shape_match_pct.setRange(0,100); self.spin_shape_match_pct.setDecimals(1); self.spin_shape_match_pct.setValue(80.0); self.spin_shape_match_pct.setSuffix(" %"); self.spin_shape_match_pct.valueChanged.connect(self.refresh_views)
         self.spin_shape_match_window=QDoubleSpinBox(); self.spin_shape_match_window.setRange(0.0,1e9); self.spin_shape_match_window.setDecimals(6); self.spin_shape_match_window.setValue(21.0); self.spin_shape_match_window.setSingleStep(1.0); self.spin_shape_match_window.setSuffix(" eV"); self.spin_shape_match_window.setToolTip("Energy-axis window width in eV/axis units. Converted to an odd number of channels internally."); self.spin_shape_match_window.valueChanged.connect(self.refresh_views)
         vg=QGroupBox("View / Run"); vf=QFormLayout(vg); vf.addRow("Colormap",self.combo_cmap); vf.addRow("H/raw shape-match threshold", self.spin_shape_match_pct); vf.addRow("H/raw shape-match window width (eV)", self.spin_shape_match_window)
-        self.spin_auto_corr_weight=QDoubleSpinBox(); self.spin_auto_corr_weight.setRange(0.0,1.0); self.spin_auto_corr_weight.setDecimals(3); self.spin_auto_corr_weight.setSingleStep(0.05); self.spin_auto_corr_weight.setValue(0.40); self.spin_auto_corr_weight.setToolTip("a in Score = a*Corr + (1-a)*SSIM")
+        self.spin_auto_corr_weight=QDoubleSpinBox(); self.spin_auto_corr_weight.setRange(0.0,1.0); self.spin_auto_corr_weight.setDecimals(3); self.spin_auto_corr_weight.setSingleStep(0.05); self.spin_auto_corr_weight.setValue(0.40); self.spin_auto_corr_weight.setToolTip("a in Score = a*W-SSIM + (1-a)*H-corr")
         self.lbl_auto_iou_weight=QLabel("0.600"); self.spin_auto_corr_weight.valueChanged.connect(lambda v: self.lbl_auto_iou_weight.setText(f"{1.0-float(v):.3f}"))
         self.spin_auto_score_thresh=QDoubleSpinBox(); self.spin_auto_score_thresh.setRange(0.0,100.0); self.spin_auto_score_thresh.setDecimals(1); self.spin_auto_score_thresh.setSingleStep(5.0); self.spin_auto_score_thresh.setValue(55.0); self.spin_auto_score_thresh.setSuffix(" %")
-        vf.addRow("Auto score Corr weight a", self.spin_auto_corr_weight); vf.addRow("Auto score SSIM weight 1-a", self.lbl_auto_iou_weight); vf.addRow("Auto score threshold", self.spin_auto_score_thresh)
+        self.spin_auto_patience=QSpinBox(); self.spin_auto_patience.setRange(1,20); self.spin_auto_patience.setValue(2); self.spin_auto_patience.setToolTip("Stop Auto-Step after this many consecutive depth steps with unchanged dataset count, applied from depth >= 3.")
+        vf.addRow("Auto score W-SSIM weight a", self.spin_auto_corr_weight); vf.addRow("Auto score H-corr weight 1-a", self.lbl_auto_iou_weight); vf.addRow("Auto score threshold", self.spin_auto_score_thresh); vf.addRow("Auto unchanged-count patience", self.spin_auto_patience)
         self.btn_run=QPushButton("Run Full Analysis on ROI (Conv + rr)"); self.btn_run.clicked.connect(self.run_analysis)
         self.btn_run_conv_only=QPushButton("Run Conventional NMF Only on ROI")
         self.btn_run_conv_only.clicked.connect(self.run_conventional_only)
@@ -2172,6 +2195,7 @@ class RR2NMFGui(QMainWindow):
         self.canvas_eels=Canvas(12.5,5.2); self.tabs.addTab(self._build_eels_tab(),"EELS Interpretation")
         self.table_energy=QTableWidget(); self.tabs.addTab(self.table_energy,"Energy Table")
         self.table_nodes=QTableWidget(); self.tabs.addTab(self.table_nodes,"Node Table")
+        self.table_diag_matrix=QTableWidget(); self.tabs.addTab(self.table_diag_matrix,"rr Matrix Values")
 
     def _build_combine_panel(self):
         box=QGroupBox("Manual Multi-Depth Merge: start depth D means merge at D, D+1, ... final depth"); l=QHBoxLayout(box)
@@ -2730,15 +2754,28 @@ class RR2NMFGui(QMainWindow):
             c["auto_pair_stats"] = _auto_pair_stats_for_labels(pairs, labels)
             sets.append(c)
         self.manual_depth_groups[int(target_depth)] = sets
+
+        # Data-count based stopping should compare the number of datasets that entered
+        # the current source depth with the number of datasets generated for the next
+        # target depth. This is different from len(entries), which is the number of
+        # source-depth NMF components (= source datasets * rank).
+        if source_depth in getattr(self, "manual_depth_groups", {}):
+            source_data_count = len(self.manual_depth_groups.get(source_depth, []))
+        else:
+            try:
+                source_data_count = len(self.rr_result.node_summaries_by_depth[source_depth])
+            except Exception:
+                source_data_count = 0
+
         best_pairs=sorted(pairs, key=lambda r: r.get("score",0.0), reverse=True)[:8]
-        pair_txt="; ".join([f"{r['label_i']}+{r['label_j']}: score={100*r['score']:.1f}% corr={100*r['corr']:.1f}% SSIM={100*r['ssim']:.1f}%" for r in best_pairs])
-        self.append_log(f"Auto score grouping for target D{target_depth} from source D{source_depth}: {len(entries)} input components -> {len(sets)} next-depth set(s), merged_groups={merged_count}, threshold={self.spin_auto_score_thresh.value():.1f}%, a={self.spin_auto_corr_weight.value():.3f}, ssim_weight={1.0-self.spin_auto_corr_weight.value():.3f}")
+        pair_txt="; ".join([f"{r['label_i']}+{r['label_j']}: score={100*r['score']:.1f}% W-SSIM={100*r.get('w_ssim', r.get('ssim', np.nan)):.1f}% Hcorr={100*r.get('h_corr', r.get('corr', np.nan)):.1f}%" for r in best_pairs])
+        self.append_log(f"Auto score grouping for target D{target_depth} from source D{source_depth}: {len(entries)} source components from {source_data_count} source dataset(s) -> {len(sets)} next-depth dataset(s), merged_groups={merged_count}, threshold={self.spin_auto_score_thresh.value():.1f}%, a={self.spin_auto_corr_weight.value():.3f}, h_corr_weight={1.0-self.spin_auto_corr_weight.value():.3f}")
         if pair_txt:
-            self.append_log("Top auto-score pairs: " + pair_txt)
-        return len(entries), len(sets), merged_count
+            self.append_log("Top auto-score pairs (Score / W-SSIM / H-corr): " + pair_txt)
+        return source_data_count, len(entries), len(sets), merged_count
 
     def start_auto_score_merge_workflow(self):
-        """Automatically create merge/pass sets using Score=a*Corr+(1-a)*SSIM, then advance depth by depth."""
+        """Automatically create merge/pass sets using Score=a*W-SSIM+(1-a)*H-corr, then advance depth by depth."""
         if self.cube is None:
             QMessageBox.warning(self, "No data", "Load data first."); return
         try:
@@ -2757,7 +2794,8 @@ class RR2NMFGui(QMainWindow):
         self._auto_score_active=True
         self._auto_score_target_depth=start
         self._auto_score_stop_after_current=False
-        self.append_log(f"Auto score workflow started: start D{start}, final D{final}, score=a*Corr+(1-a)*SSIM, threshold={self.spin_auto_score_thresh.value():.1f}%.")
+        self._auto_score_unchanged_count=0
+        self.append_log(f"Auto score workflow started: start D{start}, final D{final}, score=a*W-SSIM+(1-a)*H-corr, threshold={self.spin_auto_score_thresh.value():.1f}%.")
         # First compute to the source depth of the start target.
         params=self.collect_params(include_manual=True, max_manual_depth=start-1)
         params["run_conventional"] = False
@@ -2785,7 +2823,7 @@ class RR2NMFGui(QMainWindow):
             if computed_max >= target:
                 if self._auto_score_stop_after_current:
                     self._auto_score_active=False
-                    self.append_log(f"Auto score workflow stopped after D{target}: no component count reduction after D>=3.")
+                    self.append_log(f"Auto score workflow stopped after D{target}: unchanged dataset-count patience reached.")
                     self.refresh_rr_component_list()
                     return
                 self._auto_score_target_depth=target+1
@@ -2810,11 +2848,22 @@ class RR2NMFGui(QMainWindow):
                 self.worker.failed.connect(self.on_analysis_failed)
                 self.worker.start()
                 return
-            input_count, output_count, merged_count = self._build_auto_score_sets_for_target(target)
+            source_data_count, source_component_count, output_count, merged_count = self._build_auto_score_sets_for_target(target)
             self._sync_current_combined_alias()
             self.refresh_rr_component_list()
-            # Stop criterion requested for D>=3: if the next-depth data count is unchanged, run this depth and then stop.
-            self._auto_score_stop_after_current = (target >= 3 and output_count == input_count)
+            # Stop criterion requested for D>=3 with patience:
+            # compare DATASET counts, not component counts. If the next-depth dataset count
+            # is unchanged for N consecutive depth steps, stop after computing the current target.
+            if target >= 3 and output_count == source_data_count:
+                self._auto_score_unchanged_count = int(getattr(self, "_auto_score_unchanged_count", 0)) + 1
+            else:
+                self._auto_score_unchanged_count = 0
+            patience = int(self.spin_auto_patience.value()) if hasattr(self, "spin_auto_patience") else 2
+            self._auto_score_stop_after_current = (target >= 3 and self._auto_score_unchanged_count >= patience)
+            if self._auto_score_stop_after_current:
+                self.append_log(f"Auto score stop scheduled after D{target}: dataset count unchanged for {self._auto_score_unchanged_count}/{patience} consecutive step(s) ({source_data_count} -> {output_count}).")
+            elif target >= 3 and output_count == source_data_count:
+                self.append_log(f"Auto score unchanged-count patience: {self._auto_score_unchanged_count}/{patience} consecutive step(s) ({source_data_count} -> {output_count}); continuing.")
             roi,X,shape,axis=self.get_roi_cube_and_X()
             params=self.collect_params(include_manual=True, max_manual_depth=target)
             params["run_conventional"] = False
@@ -2897,12 +2946,49 @@ This does not modify the current rr-NMF/manual tree results.
         else: self.canvas_tree.clear()
         if hasattr(self, "canvas_diag"):
             plot_rr_diagnostics_summary(self.canvas_diag.fig,self.rr_result,self.roi_axis_info if self.roi_axis_info is not None else make_default_axis_info((1,1,1)),X_for_weight=getattr(self,"X",None),match_threshold_pct=match_pct,match_window=match_window); self.canvas_diag.set_base(); self.canvas_diag.draw()
+            self.refresh_diag_matrix_table()
         if hasattr(self, "canvas_auto_prov"):
             plot_auto_merge_w_provenance(self.canvas_auto_prov.fig, getattr(self, "manual_depth_groups", {}), cmap=self.combo_cmap.currentText() if hasattr(self, "combo_cmap") else "viridis"); self.canvas_auto_prov.set_base(); self.canvas_auto_prov.draw()
         if self.conv_result is not None: plot_conv(self.canvas_conv.fig,self.conv_result,self.roi_axis_info,cmap); self.canvas_conv.set_base(); self.canvas_conv.draw()
         else: self.canvas_conv.clear()
         plot_energy(self.canvas_energy.fig,self.conv_result,self.rr_result); self.canvas_energy.set_base(); self.canvas_energy.draw()
         self.refresh_tables(); self.refresh_rr_component_list()
+
+    def refresh_diag_matrix_table(self):
+        """Exact numeric W-corr, W-SSIM and H-corr matrices in a table.
+
+        Heatmaps stay visually compact in the summary tab; this table preserves exact
+        values when there are too many components to annotate legibly inside cells.
+        """
+        if not hasattr(self, "table_diag_matrix"):
+            return
+        tbl = self.table_diag_matrix
+        rows = []
+        if self.rr_result is not None:
+            for d, nodes in enumerate(self.rr_result.node_summaries_by_depth):
+                for metric, func in [
+                    ("W Corr", compute_w_morphology_corr_for_depth),
+                    ("W SSIM", compute_w_morphology_ssim_for_depth),
+                    ("H Corr", compute_h_basis_corr_for_depth),
+                ]:
+                    try:
+                        labels, M = func(nodes)
+                    except Exception:
+                        labels, M = [], np.zeros((0, 0), dtype=np.float64)
+                    for i, li in enumerate(labels):
+                        for j, lj in enumerate(labels):
+                            if j < i:
+                                continue
+                            val = float(M[i, j]) if M.size else np.nan
+                            rows.append([d, metric, li, lj, val])
+        tbl.setRowCount(len(rows)); tbl.setColumnCount(5)
+        tbl.setHorizontalHeaderLabels(["depth", "metric", "item_i", "item_j", "value"]);
+        for r, row in enumerate(rows):
+            for c, val in enumerate(row):
+                txt = f"{val:.4f}" if c == 4 and isinstance(val, float) and np.isfinite(val) else str(val)
+                tbl.setItem(r, c, QTableWidgetItem(txt))
+        tbl.resizeColumnsToContents()
+
 
     def refresh_rr_component_list(self):
         if not hasattr(self,"list_rr_components"): return
@@ -3430,7 +3516,7 @@ This does not modify the current rr-NMF/manual tree results.
                 "random_seed": self.spin_seed.value(),
                 "chunk_size": self.spin_chunk.value(),
             },
-            "view": {"cmap": self.combo_cmap.currentText(), "shape_match_threshold_pct": self.spin_shape_match_pct.value() if hasattr(self, "spin_shape_match_pct") else 80.0, "shape_match_window_energy": self.spin_shape_match_window.value() if hasattr(self, "spin_shape_match_window") else 21.0, "auto_corr_weight": self.spin_auto_corr_weight.value() if hasattr(self,"spin_auto_corr_weight") else 0.40, "auto_score_threshold_pct": self.spin_auto_score_thresh.value() if hasattr(self,"spin_auto_score_thresh") else 55.0},
+            "view": {"cmap": self.combo_cmap.currentText(), "shape_match_threshold_pct": self.spin_shape_match_pct.value() if hasattr(self, "spin_shape_match_pct") else 80.0, "shape_match_window_energy": self.spin_shape_match_window.value() if hasattr(self, "spin_shape_match_window") else 21.0, "auto_corr_weight": self.spin_auto_corr_weight.value() if hasattr(self,"spin_auto_corr_weight") else 0.40, "auto_score_threshold_pct": self.spin_auto_score_thresh.value() if hasattr(self,"spin_auto_score_thresh") else 55.0, "auto_unchanged_patience": self.spin_auto_patience.value() if hasattr(self,"spin_auto_patience") else 2},
         }
 
     def apply_processing_settings(self, cfg):
@@ -3504,6 +3590,7 @@ This does not modify the current rr-NMF/manual tree results.
 
         if hasattr(self, "spin_auto_corr_weight") and "auto_corr_weight" in view: self.spin_auto_corr_weight.setValue(float(view["auto_corr_weight"]))
         if hasattr(self, "spin_auto_score_thresh") and "auto_score_threshold_pct" in view: self.spin_auto_score_thresh.setValue(float(view["auto_score_threshold_pct"]))
+        if hasattr(self, "spin_auto_patience") and "auto_unchanged_patience" in view: self.spin_auto_patience.setValue(int(view["auto_unchanged_patience"]))
 
         self.update_roi_label()
         if hasattr(self, "refresh_rr_component_list"):
