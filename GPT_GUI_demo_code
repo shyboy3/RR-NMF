@@ -1188,6 +1188,37 @@ def auto_score_groups_from_entries(entries, corr_weight=0.50, threshold_pct=55.0
     groups = [[e for _, e in g] for g in indexed_groups]
     return groups, pair_rows
 
+
+
+def normalize_map_for_display(wm, eps=1e-12):
+    """Normalize a W-like image to 0..1 for provenance-only display."""
+    a = np.asarray(wm, dtype=np.float64)
+    a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
+    mn = float(np.nanmin(a)) if a.size else 0.0
+    mx = float(np.nanmax(a)) if a.size else 0.0
+    if mx - mn <= eps:
+        return np.zeros_like(a, dtype=np.float64)
+    return (a - mn) / (mx - mn)
+
+
+def combine_w_maps_for_provenance(entries):
+    """Return a W-only visual summary for a merged/pass set.
+
+    This is deliberately not the child-matrix summed-intensity image.  It is used only
+    to show which morphology is being passed/merged, so PASS output thumbnails remain
+    visually identical to their source W image.
+    """
+    maps = []
+    for e in entries or []:
+        wm = e.get("W_map", None) if isinstance(e, dict) else None
+        if wm is not None:
+            maps.append(normalize_map_for_display(wm))
+    if not maps:
+        return None
+    if len(maps) == 1:
+        return maps[0]
+    return np.nanmean(np.stack(maps, axis=0), axis=0)
+
 def local_shape_match_mask(h, w, threshold_pct=80.0, window=None):
     """Find energy-channel regions where H and weighted raw have local shape agreement.
 
@@ -1349,93 +1380,127 @@ def _auto_pair_stats_for_labels(pair_rows, labels):
 
 
 
-def plot_auto_merge_w_provenance(fig, manual_depth_groups, cmap="viridis"):
-    """Tree-like Auto-Step merge provenance using W/combined images only.
+def plot_auto_merge_w_provenance(fig, rr=None, manual_depth_groups=None, cmap="viridis"):
+    """Depth-wise Auto-Step provenance tree.
 
-    The display is arranged by depth: source components from D-1 are on the left side
-    of each step and the next-depth merged/pass input tiles are on the right. Arrows
-    show which source W maps were sent to each merged/pass tile, and labels show
-    Score/W-downCorr/H-corr values used by the auto merge rule.
+    Columns follow the rr-NMF depth order.  Each column shows that depth's W-component
+    results and, below them, the merge/pass outputs generated from that same depth.
+    Arrows show:
+      source W component -> merge/pass output -> next-depth node result.
+    This view is diagnostic only; thumbnails are W-only provenance images.
     """
     fig.clear()
-    groups_by_depth = []
-    for d, sets in sorted((manual_depth_groups or {}).items(), key=lambda kv: int(kv[0])):
-        auto_sets = [c for c in (sets or []) if c.get("auto_score", False)]
-        if auto_sets:
-            groups_by_depth.append((int(d), auto_sets))
-    if not groups_by_depth:
+    manual_depth_groups = manual_depth_groups or {}
+    rr_depths = list(getattr(rr, "node_summaries_by_depth", []) or [])
+    if not rr_depths and not manual_depth_groups:
         fig.set_size_inches(12, 5, forward=True)
-        ax = fig.add_subplot(111)
-        ax.axis("off")
+        ax = fig.add_subplot(111); ax.axis("off")
         ax.text(0.5, 0.55, "No Auto-Step merge provenance yet", ha="center", va="center", fontsize=14)
-        ax.text(0.5, 0.43, "Run Auto Step to create Score/W-downCorr/H-corr merge/pass groups.", ha="center", va="center", fontsize=10)
+        ax.text(0.5, 0.43, "Run Auto Step to create merge/pass groups.", ha="center", va="center", fontsize=10)
         return
 
-    nsteps = len(groups_by_depth)
-    max_rows = max([max(sum(max(1, len(c.get("member_maps", []) or [])) for c in sets), len(sets)) for _, sets in groups_by_depth] + [1])
-    fig.set_size_inches(max(16, 6.2 * nsteps), max(7, 1.15 * max_rows + 2.2), forward=True)
+    max_depth = max([len(rr_depths)-1] + [int(k)-1 for k in manual_depth_groups.keys()] + [0])
+    ncols = max_depth + 1
+
+    # Collect source W components per depth.
+    comp_by_depth = {}
+    for d, nodes in enumerate(rr_depths):
+        comps = []
+        for ni, ns in enumerate(nodes or []):
+            for ci, wm in enumerate(getattr(ns, "component_maps", []) or []):
+                comps.append({"label": f"D{d} N{ni} C{ci}", "map": wm, "node": ni, "component": ci})
+        comp_by_depth[d] = comps
+
+    max_items = 1
+    for d in range(ncols):
+        out_sets = [c for c in (manual_depth_groups.get(d+1, []) or []) if c.get("auto_score", False)]
+        max_items = max(max_items, len(comp_by_depth.get(d, [])), len(out_sets))
+
+    fig.set_size_inches(max(18, ncols * 3.3), max(8.0, 0.55 * max_items + 4.2), forward=True)
     ax = fig.add_subplot(111)
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
-    ax.axis("off")
+    ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.axis("off")
 
-    col_w = 1.0 / max(1, nsteps)
-    thumb_w = min(0.055, col_w * 0.20)
-    thumb_h = min(0.075, 0.72 / max(3, max_rows))
+    col_w = 1.0 / max(1, ncols)
+    thumb_w = min(0.052, col_w * 0.20)
+    thumb_h = min(0.070, 0.34 / max(1, max_items))
+    comp_top, comp_bottom = 0.89, 0.52
+    out_top, out_bottom = 0.39, 0.10
 
-    for si, (target_depth, sets) in enumerate(groups_by_depth):
-        x_left = si * col_w + col_w * 0.08
-        x_mid = si * col_w + col_w * 0.47
-        x_right = si * col_w + col_w * 0.78
-        ax.text(si * col_w + col_w * 0.5, 0.975, f"D{target_depth-1} → D{target_depth}", ha="center", va="top", fontsize=12, fontweight="bold", transform=ax.transAxes)
-        ax.text(x_left, 0.93, "source W", ha="center", va="top", fontsize=8, transform=ax.transAxes)
-        ax.text(x_right, 0.93, "next input", ha="center", va="top", fontsize=8, transform=ax.transAxes)
+    pos_comp = {}
+    pos_out = {}
 
-        total_members = sum(max(1, len(c.get("member_maps", []) or [])) for c in sets)
-        src_slots = max(total_members, 1)
-        grp_slots = max(len(sets), 1)
-        src_y_positions = np.linspace(0.84, 0.12, src_slots) if src_slots > 1 else np.array([0.50])
-        grp_y_positions = np.linspace(0.82, 0.14, grp_slots) if grp_slots > 1 else np.array([0.50])
-        src_idx = 0
-        for gi, c in enumerate(sets):
-            gy = float(grp_y_positions[gi])
-            members = list(c.get("members", []) or [])
-            member_maps = list(c.get("member_maps", []) or [])
-            is_pass = bool(c.get("pass_through", False)) or len(member_maps) <= 1
-            pair_rows = c.get("auto_pair_details", []) or []
-            stats = c.get("auto_pair_stats", None) or _auto_pair_stats_for_labels(pair_rows, members)
-            gimg = c.get("image", None)
+    for d in range(ncols):
+        xc = d * col_w + col_w * 0.50
+        x_comp = d * col_w + col_w * 0.38
+        x_out = d * col_w + col_w * 0.70
+        ax.text(xc, 0.975, f"Depth {d}", ha="center", va="top", fontsize=12, fontweight="bold", transform=ax.transAxes)
+        ax.text(x_comp, 0.935, "W results", ha="center", va="top", fontsize=8, transform=ax.transAxes)
+        ax.text(x_out, 0.455, "merge/pass output", ha="center", va="bottom", fontsize=8, transform=ax.transAxes)
 
-            # Target merged/pass tile.
+        comps = comp_by_depth.get(d, [])
+        ys = np.linspace(comp_top, comp_bottom, len(comps)) if len(comps) > 1 else np.array([(comp_top+comp_bottom)/2])
+        for k, comp in enumerate(comps):
+            y = float(ys[k]) if len(comps) else 0.70
+            lab = comp["label"]
+            pos_comp[lab] = (x_comp, y)
+            iax = inset_axes(ax, width="100%", height="100%", bbox_to_anchor=(x_comp-thumb_w/2, y-thumb_h/2, thumb_w, thumb_h), bbox_transform=ax.transAxes, borderpad=0)
+            iax.imshow(comp["map"], cmap=cmap, origin="upper", aspect="equal")
+            iax.set_xticks([]); iax.set_yticks([])
+            iax.set_title(lab.replace(" ", ""), fontsize=5.2, pad=1)
+
+        out_sets = [c for c in (manual_depth_groups.get(d+1, []) or []) if c.get("auto_score", False)]
+        ys2 = np.linspace(out_top, out_bottom, len(out_sets)) if len(out_sets) > 1 else np.array([(out_top+out_bottom)/2])
+        for gi, c in enumerate(out_sets):
+            y = float(ys2[gi]) if len(out_sets) else 0.22
+            out_key = (d+1, gi)
+            pos_out[out_key] = (x_out, y)
+            members = list(c.get("member_labels", c.get("members", [])) or [])
+            stats = c.get("auto_pair_stats", {}) or {}
+            is_pass = bool(c.get("pass_through", False)) or len(members) <= 1
+            gimg = c.get("provenance_image", None)
+            if gimg is None:
+                # Backward-compatible fallback for older saved sets.
+                maps = list(c.get("member_maps", []) or [])
+                if maps:
+                    gimg = maps[0] if is_pass else np.nanmean(np.stack([normalize_map_for_display(m) for m in maps], axis=0), axis=0)
+                else:
+                    gimg = c.get("image", None)
             if gimg is not None:
-                gax = inset_axes(ax, width="100%", height="100%", bbox_to_anchor=(x_right-thumb_w/2, gy-thumb_h/2, thumb_w, thumb_h), bbox_transform=ax.transAxes, borderpad=0)
+                gax = inset_axes(ax, width="100%", height="100%", bbox_to_anchor=(x_out-thumb_w/2, y-thumb_h/2, thumb_w, thumb_h), bbox_transform=ax.transAxes, borderpad=0)
                 gax.imshow(gimg, cmap=cmap, origin="upper", aspect="equal")
                 gax.set_xticks([]); gax.set_yticks([])
-                gax.set_title("PASS" if is_pass else "MERGE", fontsize=6, pad=1)
-            if stats:
-                metric = f"S {100*stats.get('score_mean', np.nan):.1f}\nWdownCorr {100*stats.get('w_corr_down_mean', np.nan):.1f} / Hcorr {100*stats.get('h_corr_mean', stats.get('corr_mean', np.nan)):.1f}"
-            else:
+                gax.set_title(("PASS" if is_pass else "MERGE") + f" G{gi+1}", fontsize=5.5, pad=1)
+            if is_pass:
                 metric = "PASS"
-            ax.text(x_mid, gy, metric, fontsize=6.5, ha="center", va="center", transform=ax.transAxes,
-                    bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="0.6", alpha=0.8))
+            else:
+                metric = f"S {100*stats.get('score_mean', np.nan):.1f}\nW {100*stats.get('w_corr_down_mean', np.nan):.1f} / H {100*stats.get('h_corr_mean', stats.get('corr_mean', np.nan)):.1f}"
+            ax.text(x_out + thumb_w*1.05, y, metric, fontsize=5.8, ha="left", va="center", transform=ax.transAxes,
+                    bbox=dict(boxstyle="round,pad=0.12", fc="white", ec="0.65", alpha=0.82))
+            # Source component -> merge/pass output arrows.
+            for mlab in members:
+                if mlab in pos_comp:
+                    sx, sy = pos_comp[mlab]
+                    ax.annotate("", xy=(x_out-thumb_w*0.58, y), xytext=(sx+thumb_w*0.58, sy), xycoords=ax.transAxes, textcoords=ax.transAxes,
+                                arrowprops=dict(arrowstyle="->", lw=0.75, alpha=0.50))
 
-            # Source member thumbnails and arrows.
-            if not member_maps:
-                member_maps = [None]
-            for mi, wm in enumerate(member_maps):
-                sy = float(src_y_positions[min(src_idx, len(src_y_positions)-1)])
-                src_idx += 1
-                if wm is not None:
-                    iax = inset_axes(ax, width="100%", height="100%", bbox_to_anchor=(x_left-thumb_w/2, sy-thumb_h/2, thumb_w, thumb_h), bbox_transform=ax.transAxes, borderpad=0)
-                    iax.imshow(wm, cmap=cmap, origin="upper", aspect="equal")
-                    iax.set_xticks([]); iax.set_yticks([])
-                    lab = _short_component_label(members[mi] if mi < len(members) else f"M{mi}")
-                    iax.set_title(lab, fontsize=5.5, pad=1)
-                ax.annotate("", xy=(x_right-thumb_w*0.55, gy), xytext=(x_left+thumb_w*0.55, sy), xycoords=ax.transAxes, textcoords=ax.transAxes,
-                            arrowprops=dict(arrowstyle="->", lw=0.8, alpha=0.55))
+        # Merge/pass output from this depth -> next-depth NMF result node.
+        # In run_rr_nmf, manual groups for target D(d+1) become nodes in depth d+1
+        # in the same order. Connect each output to the first W result of that node.
+        if d + 1 < ncols and (d+1) in manual_depth_groups:
+            next_nodes = rr_depths[d+1] if d+1 < len(rr_depths) else []
+            for gi, c in enumerate([c for c in (manual_depth_groups.get(d+1, []) or []) if c.get("auto_score", False)]):
+                if gi >= len(next_nodes):
+                    continue
+                target_label = f"D{d+1} N{gi} C0"
+                if (d+1, gi) in pos_out and target_label in pos_comp:
+                    ox, oy = pos_out[(d+1, gi)]
+                    tx, ty = pos_comp[target_label]
+                    ax.annotate("", xy=(tx-thumb_w*0.62, ty), xytext=(ox+thumb_w*0.62, oy), xycoords=ax.transAxes, textcoords=ax.transAxes,
+                                arrowprops=dict(arrowstyle="-|>", lw=1.05, alpha=0.72, color="0.25"))
 
-    fig.suptitle("Auto-Step merge provenance tree: Score = a·W-downCorr + (1-a)·H-corr", fontsize=14)
-    fig.subplots_adjust(left=0.02, right=0.985, top=0.94, bottom=0.03)
+    ax.text(0.01, 0.025, "Note: merge/pass thumbnails are W-only provenance images. PASS output should match its source W morphology.", fontsize=8, ha="left", va="bottom", transform=ax.transAxes)
+    fig.suptitle("Auto-Step merge provenance: W result → merge/pass output → next-depth result", fontsize=14)
+    fig.subplots_adjust(left=0.015, right=0.985, top=0.94, bottom=0.04)
 
 
 class Canvas(FigureCanvas):
@@ -1611,9 +1676,10 @@ def plot_conv(fig, conv, axis, cmap="viridis", maxn=20):
     fig.subplots_adjust(left=.04,right=.98,top=.96,bottom=.05,hspace=.75,wspace=.2)
 
 
-def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max", match_threshold_pct=80.0, match_window=21, w_downsample_factor=4):
+def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max", match_threshold_pct=80.0, match_window=21, w_downsample_factor=4, manual_depth_groups=None):
     fig.clear()
     depths = rr.node_summaries_by_depth
+    manual_depth_groups = manual_depth_groups or {}
 
     # Generalized layout for recursive rank >= 2.
     # Each node occupies "rank" columns:
@@ -1624,7 +1690,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
     #   row 5: residual spectrum spanning rank columns
     rank = max(1, int(getattr(rr, "rank", 2)))
     cols_node = rank
-    rows_node = 5  # W, H, spacer, residual image, residual spectrum; W-corr is one per depth after all node rows
+    rows_node = 5  # W, H, spacer, residual image, residual spectrum
 
     # Keep the display reasonably wide without forcing too many nodes per row.
     # Examples:
@@ -1645,9 +1711,14 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
             # rows: W image, H spectrum, spacer, residual image, residual spectrum
             ratios.extend([3.0, 1.0, 0.30, 3.0, 1.0])
             cur += rows_node
-        # One compact W-corr matrix per depth, placed below all node rows.
-        ratios.extend([0.52, 1.45, 0.20])
-        cur += 3
+        # Optional merge/pass output row from this depth to the next-depth input.
+        out_sets = manual_depth_groups.get(d + 1, []) if isinstance(manual_depth_groups, dict) else []
+        if out_sets:
+            ratios.extend([0.42, 2.10, 0.35])
+            cur += 3
+        else:
+            ratios.append(0.42)
+            cur += 1
 
     node_cols = max_nodes * cols_node
     total_cols = node_cols
@@ -1768,40 +1839,44 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                 sp.grid(True, alpha=0.25)
                 sp.tick_params(labelsize=7)
 
-        # Compact per-depth W morphology similarity matrix, below all node rows for this depth.
-        try:
-            labels_corr, Ccorr = compute_w_morphology_downcorr_for_depth(nodes, factor=w_downsample_factor, nonnegative_display=True)
-            if Ccorr.size:
-                # Place the matrix below all node rows for this depth.
-                # Keep it in the first node-width block so it remains visible without
-                # horizontal scrolling, but make the row calculation depth-local.
-                corr_row = starts[d] + 1 + wraps_d * rows_node + 1
-                holder_corr = fig.add_subplot(gs[corr_row, 0:min(total_cols, max(rank*2, rank+1))])
-                holder_corr.axis("off")
-                labels_hcorr, Hcorr = compute_h_basis_corr_for_depth(nodes)
-                corr_ax = inset_axes(holder_corr, width="46%", height="95%", loc="lower left", borderpad=0.0)
-                imcorr = corr_ax.imshow(Ccorr, vmin=0, vmax=1, cmap="viridis", aspect="equal")
-                corr_ax.set_title(f"W DownCorr\nf={int(w_downsample_factor)}", fontsize=7, pad=2)
-                hcorr_ax = inset_axes(holder_corr, width="46%", height="95%", loc="lower right", borderpad=0.0)
-                imssim = hcorr_ax.imshow(Hcorr, vmin=0, vmax=1, cmap="viridis", aspect="equal")
-                hcorr_ax.set_title("H Corr", fontsize=7, pad=2)
-                for _ax, _labels in [(corr_ax, labels_corr), (hcorr_ax, labels_hcorr)]:
-                    if len(_labels) <= 10:
-                        _ax.set_xticks(range(len(_labels)))
-                        _ax.set_yticks(range(len(_labels)))
-                        _ax.set_xticklabels(_labels, rotation=90, fontsize=4)
-                        _ax.set_yticklabels(_labels, fontsize=4)
-                    else:
-                        _ax.set_xticks([]); _ax.set_yticks([])
-                    _ax.tick_params(length=1, pad=1)
-                cax = inset_axes(holder_corr, width="2.5%", height="75%", loc="center right", borderpad=0.15)
-                cb = fig.colorbar(imssim, cax=cax)
-                cb.ax.tick_params(labelsize=5, pad=1)
-        except Exception:
-            pass
+        # Optional merged/pass-through output produced from this depth.
+        out_sets = manual_depth_groups.get(d + 1, []) if isinstance(manual_depth_groups, dict) else []
+        if out_sets:
+            try:
+                out_title_row = starts[d] + 1 + wraps_d * rows_node
+                out_img_row = out_title_row + 1
+                axm = fig.add_subplot(gs[out_title_row, :])
+                axm.axis("off")
+                label_next = f"D{d} merge/pass outputs → D{d+1} input"
+                if d + 1 > len(depths) - 1:
+                    label_next = f"D{d} final merge/pass outputs"
+                axm.text(0.0, 0.65, label_next, fontsize=10, fontweight="bold", va="center")
+                max_out = min(len(out_sets), total_cols)
+                for oi, c in enumerate(out_sets[:max_out]):
+                    axo = fig.add_subplot(gs[out_img_row, oi])
+                    img = c.get("provenance_image", None)
+                    if img is None:
+                        maps = list(c.get("member_maps", []) or [])
+                        if maps:
+                            img = maps[0] if (c.get("pass_through", False) or len(maps) <= 1) else np.nanmean(np.stack([normalize_map_for_display(m) for m in maps], axis=0), axis=0)
+                        else:
+                            img = c.get("image", None)
+                    if img is not None:
+                        im = axo.imshow(img, cmap=cmap, origin="upper", aspect="equal")
+                        add_colorbar(fig, axo, im)
+                    kind = "PASS" if c.get("pass_through", False) else "MERGE"
+                    members = ", ".join(map(str, c.get("members", []) or c.get("member_labels", []) or []))
+                    members = _short_text(members, 55)
+                    axo.set_title(f"{kind} {oi+1}\n{members}", fontsize=7)
+                    axo.set_xticks([]); axo.set_yticks([])
+                if len(out_sets) > max_out:
+                    ax_more = fig.add_subplot(gs[out_img_row, max_out-1])
+                    ax_more.text(0.5, -0.18, f"+{len(out_sets)-max_out} more", transform=ax_more.transAxes, ha="center", va="top", fontsize=7)
+            except Exception:
+                pass
 
     fig.suptitle(f"rr-NMF Tree rank={rank}: H basis with weighted raw overlay", fontsize=14)
-    fig.subplots_adjust(left=0.012, right=0.988, top=0.965, bottom=0.025, hspace=0.28, wspace=0.70)
+    fig.subplots_adjust(left=0.012, right=0.988, top=0.965, bottom=0.025, hspace=0.42, wspace=0.70)
 
 
 def plot_energy(fig, conv, rr):
@@ -2795,6 +2870,11 @@ class RR2NMFGui(QMainWindow):
             c["target_depth"] = int(target_depth)
             c["auto_score"] = True
             c["member_maps"] = [np.asarray(e.get("W_map"), dtype=np.float32).copy() for e in g if e.get("W_map") is not None]
+            c["member_labels"] = labels
+            # W-only provenance image.  Do not use c["image"] here because that is a
+            # child-matrix summed-intensity image and can look different from the source
+            # W map even for PASS data.
+            c["provenance_image"] = combine_w_maps_for_provenance(g)
             c["auto_pair_details"] = [r for r in pairs if r.get("label_i") in labels and r.get("label_j") in labels]
             c["auto_pair_stats"] = _auto_pair_stats_for_labels(pairs, labels)
             sets.append(c)
@@ -2827,6 +2907,26 @@ class RR2NMFGui(QMainWindow):
         if pair_txt:
             self.append_log("Top auto-score pairs (Score / W-downCorr / H-corr): " + pair_txt)
         return source_data_count, len(entries), len(sets), merged_count
+
+    def _ensure_final_auto_output_sets(self, final_depth):
+        """Build final merge/pass output sets from the final displayed depth for provenance only.
+
+        Recursive depth N means D0..DN are NMF results.  The final user-facing
+        result after Auto-Step is the merge/pass output made from DN, even though
+        it is not decomposed further.  Store those output sets at key N+1 so the
+        Auto Merge W Tree can show D(N) final merge/pass results.
+        """
+        try:
+            final_depth = int(final_depth)
+            key = final_depth + 1
+            if key in getattr(self, "manual_depth_groups", {}):
+                return
+            if self.rr_result is None or len(self.rr_result.node_summaries_by_depth) - 1 < final_depth:
+                return
+            self._build_auto_score_sets_for_target(key)
+            self.append_log(f"Built final Auto-Step merge/pass output from D{final_depth} for display only; no D{key} NMF is run.")
+        except Exception:
+            self.append_log("Final Auto-Step output build failed:\n" + traceback.format_exc())
 
     def start_auto_score_merge_workflow(self):
         """Automatically create merge/pass sets using Score=a*W-downsample-corr+(1-a)*H-corr, then advance depth by depth."""
@@ -2868,6 +2968,7 @@ class RR2NMFGui(QMainWindow):
             final=int(self.spin_depth.value())
             target=int(self._auto_score_target_depth or self.spin_manual_depth.value())
             if target > final:
+                self._ensure_final_auto_output_sets(final)
                 self._auto_score_active=False
                 self.append_log("Auto score workflow complete: reached final recursive depth.")
                 self.refresh_rr_component_list()
@@ -2876,16 +2977,18 @@ class RR2NMFGui(QMainWindow):
             # If we have just computed target depth, decide whether to advance or stop.
             if computed_max >= target:
                 if self._auto_score_stop_after_current:
+                    self._ensure_final_auto_output_sets(target)
                     self._auto_score_active=False
                     self.append_log(
                         f"Auto score workflow stopped after D{target}: "
-                        "unchanged dataset-count patience reached."
+                        "unchanged dataset-count patience reached. Final merge/pass output from the stopped depth was built for display only."
                     )
                     self.refresh_rr_component_list()
                     return
                 self._auto_score_target_depth=target+1
                 target=int(self._auto_score_target_depth)
                 if target > final:
+                    self._ensure_final_auto_output_sets(final)
                     self._auto_score_active=False
                     self.append_log("Auto score workflow complete: reached final recursive depth.")
                     self.refresh_rr_component_list()
@@ -2999,13 +3102,13 @@ This does not modify the current rr-NMF/manual tree results.
             except Exception: self.canvas_raw.clear()
         match_pct = self.spin_shape_match_pct.value() if hasattr(self, "spin_shape_match_pct") else 80.0
         match_window = self.energy_width_to_window_channels(self.spin_shape_match_window.value(), self.roi_axis_info, len(self.roi_axis_info.energy_axis) if self.roi_axis_info is not None else None) if hasattr(self, "spin_shape_match_window") else 21
-        if self.rr_result is not None: plot_rr(self.canvas_tree.fig,self.rr_result,self.roi_axis_info,cmap,X_for_weight=getattr(self,"X",None),overlay_mode="max",match_threshold_pct=match_pct,match_window=match_window,w_downsample_factor=self.spin_auto_w_downsample.value() if hasattr(self,"spin_auto_w_downsample") else 4); self.canvas_tree.set_base(); self.canvas_tree.draw()
+        if self.rr_result is not None: plot_rr(self.canvas_tree.fig,self.rr_result,self.roi_axis_info,cmap,X_for_weight=getattr(self,"X",None),overlay_mode="max",match_threshold_pct=match_pct,match_window=match_window,w_downsample_factor=self.spin_auto_w_downsample.value() if hasattr(self,"spin_auto_w_downsample") else 4, manual_depth_groups=getattr(self,"manual_depth_groups",{})); self.canvas_tree.set_base(); self.canvas_tree.draw()
         else: self.canvas_tree.clear()
         if hasattr(self, "canvas_diag"):
             plot_rr_diagnostics_summary(self.canvas_diag.fig,self.rr_result,self.roi_axis_info if self.roi_axis_info is not None else make_default_axis_info((1,1,1)),X_for_weight=getattr(self,"X",None),match_threshold_pct=match_pct,match_window=match_window,w_downsample_factor=self.spin_auto_w_downsample.value() if hasattr(self,"spin_auto_w_downsample") else 4); self.canvas_diag.set_base(); self.canvas_diag.draw()
             self.refresh_diag_matrix_table()
         if hasattr(self, "canvas_auto_prov"):
-            plot_auto_merge_w_provenance(self.canvas_auto_prov.fig, getattr(self, "manual_depth_groups", {}), cmap=self.combo_cmap.currentText() if hasattr(self, "combo_cmap") else "viridis"); self.canvas_auto_prov.set_base(); self.canvas_auto_prov.draw()
+            plot_auto_merge_w_provenance(self.canvas_auto_prov.fig, self.rr_result, getattr(self, "manual_depth_groups", {}), cmap=self.combo_cmap.currentText() if hasattr(self, "combo_cmap") else "viridis"); self.canvas_auto_prov.set_base(); self.canvas_auto_prov.draw()
         if self.conv_result is not None: plot_conv(self.canvas_conv.fig,self.conv_result,self.roi_axis_info,cmap); self.canvas_conv.set_base(); self.canvas_conv.draw()
         else: self.canvas_conv.clear()
         plot_energy(self.canvas_energy.fig,self.conv_result,self.rr_result); self.canvas_energy.set_base(); self.canvas_energy.draw()
