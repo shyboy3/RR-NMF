@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.decomposition import NMF
+from sklearn.decomposition import NMF, PCA
 
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
@@ -71,6 +71,18 @@ class ConventionalNMFResult:
     energy_records: pd.DataFrame
     h_corr: np.ndarray
     w_corr: np.ndarray
+
+
+
+
+@dataclass
+class PCAResult:
+    scores: np.ndarray
+    components: np.ndarray
+    W_images: List[np.ndarray]
+    H_spectra: List[np.ndarray]
+    explained_variance_ratio: np.ndarray
+    mean_spectrum: np.ndarray
 
 
 @dataclass
@@ -878,6 +890,26 @@ def run_conventional_nmf(X, image_shape, n_components=20, max_iter=300, init="ra
     return ConventionalNMFResult(W, H, Wimgs, Hspecs, rimg, rspec, pd.DataFrame(recs), corrH, corrW)
 
 
+
+def run_pca_analysis(X, image_shape, n_components=10, random_state=0):
+    """PCA baseline on the same ROI matrix used by NMF.
+
+    X is pixels x spectral channels.  PCA components may be signed; W images
+    show PC scores and H spectra show principal components in original PCA units.
+    """
+    X = np.asarray(X, dtype=np.float32)
+    ih, iw = image_shape
+    nmax = max(1, min(int(n_components), X.shape[0], X.shape[1]))
+    model = PCA(n_components=nmax, random_state=random_state)
+    scores = model.fit_transform(X)
+    comps = model.components_
+    Wimgs = [scores[:, i].reshape(ih, iw) for i in range(nmax)]
+    Hspecs = [comps[i].copy() for i in range(nmax)]
+    return PCAResult(scores=scores, components=comps, W_images=Wimgs, H_spectra=Hspecs,
+                     explained_variance_ratio=model.explained_variance_ratio_.copy(),
+                     mean_spectrum=model.mean_.copy())
+
+
 def run_rr_nmf(X, image_shape, rank=2, max_depth=3, residual_mode="redistribute_equal", residual_nonnegative="clip", decompose_residual_branch=False, max_iter=300, init="random", solver="mu", random_state=0, chunk_size=2048, manual_groups=None):
     X = nonnegative(X, "clip").astype(np.float32)
     ih, iw = image_shape
@@ -1288,6 +1320,29 @@ def compute_residual_free_mergepass_corr(rr, manual_depth_groups, target_key, w_
     return labels, _corr_matrix_from_vectors(wvecs), _corr_matrix_from_vectors(hvecs)
 
 
+def matrix_diagonality_score(M):
+    """Return a compact 0-1 diagonal-dominance score for similarity matrices.
+
+    1 means diagonal is much stronger than off-diagonal similarity; 0 means
+    off-diagonal similarity is as large as the diagonal on average.
+    """
+    if M is None:
+        return np.nan
+    A = np.clip(np.asarray(M, dtype=np.float64), 0.0, 1.0)
+    if A.ndim != 2 or A.size == 0:
+        return np.nan
+    n = min(A.shape)
+    if n <= 1:
+        return 1.0
+    diag_mean = float(np.nanmean(np.diag(A[:n, :n])))
+    mask = ~np.eye(n, dtype=bool)
+    off = A[:n, :n][mask]
+    off_mean = float(np.nanmean(off)) if off.size else 0.0
+    if not np.isfinite(diag_mean) or diag_mean <= 1e-12:
+        return np.nan
+    return float(np.clip((diag_mean - off_mean) / max(diag_mean, 1e-12), 0.0, 1.0))
+
+
 def _plot_corr_heatmap(ax, fig, labels, M, title, annotate_limit=14):
     if M is None or M.size == 0:
         ax.axis("off")
@@ -1296,7 +1351,9 @@ def _plot_corr_heatmap(ax, fig, labels, M, title, annotate_limit=14):
         return
     Mdisp = np.clip(np.asarray(M, dtype=np.float64), 0.0, 1.0)
     im = ax.imshow(Mdisp, vmin=0, vmax=1, cmap="viridis", aspect="equal")
-    ax.set_title(title, fontsize=10)
+    diag_score = matrix_diagonality_score(Mdisp)
+    diag_txt = f" | diag={diag_score:.2f}" if np.isfinite(diag_score) else ""
+    ax.set_title(f"{title}{diag_txt}", fontsize=10)
     if len(labels) <= 24:
         ax.set_xticks(range(len(labels)))
         ax.set_xticklabels(labels, rotation=90, fontsize=5.5)
@@ -1415,7 +1472,9 @@ def plot_rr_diagnostics_summary(fig, rr, axis, X_for_weight=None, match_threshol
         if C.size:
             Cdisp = np.clip(C, 0.0, 1.0)
             im = axc.imshow(Cdisp, vmin=0, vmax=1, cmap="viridis", aspect="equal")
-            axc.set_title(f"Depth {d}: W DownCorr similarity (factor={int(w_downsample_factor)})", fontsize=11)
+            diag_c = matrix_diagonality_score(Cdisp)
+            diag_txt = f" | diag={diag_c:.2f}" if np.isfinite(diag_c) else ""
+            axc.set_title(f"Depth {d}: W DownCorr similarity (factor={int(w_downsample_factor)}){diag_txt}", fontsize=11)
             if len(labels) <= 24:
                 axc.set_xticks(range(len(labels))); axc.set_xticklabels(labels, rotation=90, fontsize=6)
                 axc.set_yticks(range(len(labels))); axc.set_yticklabels(labels, fontsize=6)
@@ -1433,7 +1492,9 @@ def plot_rr_diagnostics_summary(fig, rr, axis, X_for_weight=None, match_threshol
         labels_h, Hcorr = compute_h_basis_corr_for_depth(nodes)
         if Hcorr.size:
             im2 = axs.imshow(np.clip(Hcorr, 0.0, 1.0), vmin=0, vmax=1, cmap="viridis", aspect="equal")
-            axs.set_title(f"Depth {d}: H Corr similarity", fontsize=11)
+            diag_h = matrix_diagonality_score(Hcorr)
+            diag_txt_h = f" | diag={diag_h:.2f}" if np.isfinite(diag_h) else ""
+            axs.set_title(f"Depth {d}: H Corr similarity{diag_txt_h}", fontsize=11)
             if len(labels_h) <= 24:
                 axs.set_xticks(range(len(labels_h))); axs.set_xticklabels(labels_h, rotation=90, fontsize=6)
                 axs.set_yticks(range(len(labels_h))); axs.set_yticklabels(labels_h, fontsize=6)
@@ -1580,7 +1641,7 @@ def plot_auto_merge_w_provenance(fig, rr=None, manual_depth_groups=None, cmap="v
     # Plot result columns.
     for d in result_depths:
         x = x_from_slot(2 * d)
-        ax.text(x, 0.975, f"Depth {d}\nW results", ha="center", va="top", fontsize=10, fontweight="bold", transform=ax.transAxes)
+        ax.text(x, 0.975, f"Depth {d}\nW results", ha="center", va="top", fontsize=11, fontweight="bold", transform=ax.transAxes)
         comps = comp_by_depth.get(d, [])
         ys = np.linspace(y_top, y_bottom, len(comps)) if len(comps) > 1 else np.array([(y_top + y_bottom) / 2])
         for k, comp in enumerate(comps):
@@ -1590,7 +1651,7 @@ def plot_auto_merge_w_provenance(fig, rr=None, manual_depth_groups=None, cmap="v
             iax = inset_axes(ax, width="100%", height="100%", bbox_to_anchor=(x-thumb_w/2, y-thumb_h/2, thumb_w, thumb_h), bbox_transform=ax.transAxes, borderpad=0)
             iax.imshow(comp["map"], cmap=cmap, origin="upper", aspect="equal")
             iax.set_xticks([]); iax.set_yticks([])
-            iax.set_title(lab.replace(" ", ""), fontsize=5.4, pad=1)
+            iax.set_title(lab.replace(" ", ""), fontsize=6.4, pad=1)
 
     # Plot merge/pass columns between source and next result depth.
     for key in output_keys:
@@ -1602,7 +1663,7 @@ def plot_auto_merge_w_provenance(fig, rr=None, manual_depth_groups=None, cmap="v
         title = f"D{source_depth} → D{key}\nmerge/pass"
         if key > max_result_depth:
             title = f"D{source_depth}\nFINAL merge/pass"
-        ax.text(x, 0.975, title, ha="center", va="top", fontsize=9, fontweight="bold", transform=ax.transAxes)
+        ax.text(x, 0.975, title, ha="center", va="top", fontsize=10.5, fontweight="bold", transform=ax.transAxes)
         ys = np.linspace(y_top, y_bottom, len(out_sets)) if len(out_sets) > 1 else np.array([(y_top + y_bottom) / 2])
         for gi, c in enumerate(out_sets):
             y = float(ys[gi])
@@ -1621,26 +1682,26 @@ def plot_auto_merge_w_provenance(fig, rr=None, manual_depth_groups=None, cmap="v
                 gax = inset_axes(ax, width="100%", height="100%", bbox_to_anchor=(x-thumb_w/2, y-thumb_h/2, thumb_w, thumb_h), bbox_transform=ax.transAxes, borderpad=0)
                 gax.imshow(gimg, cmap=cmap, origin="upper", aspect="equal")
                 gax.set_xticks([]); gax.set_yticks([])
-                gax.set_title(("PASS" if is_pass else "MERGE") + f" G{gi+1}", fontsize=5.5, pad=1)
+                gax.set_title(("PASS" if is_pass else "MERGE") + f" G{gi+1}", fontsize=6.5, pad=1)
             if is_pass:
                 metric = "PASS"
             else:
                 metric = f"S {100*stats.get('score_mean', np.nan):.1f}\nW {100*stats.get('w_corr_down_mean', np.nan):.1f}/H {100*stats.get('h_corr_mean', stats.get('corr_mean', np.nan)):.1f}"
-            ax.text(x + thumb_w*0.72, y, metric, fontsize=5.7, ha="left", va="center", transform=ax.transAxes,
+            ax.text(x + thumb_w*0.72, y, metric, fontsize=7.0, ha="left", va="center", transform=ax.transAxes,
                     bbox=dict(boxstyle="round,pad=0.10", fc="white", ec="0.65", alpha=0.82))
             # source component -> merge/pass output
             for mlab in members:
                 if mlab in pos_comp:
                     sx, sy = pos_comp[mlab]
-                    ax.annotate("", xy=(x-thumb_w*0.60, y), xytext=(sx+thumb_w*0.60, sy), xycoords=ax.transAxes, textcoords=ax.transAxes,
-                                arrowprops=dict(arrowstyle="->", lw=0.75, alpha=0.50))
+                    ax.annotate("", xy=(x-thumb_w*0.52, y), xytext=(sx+thumb_w*0.52, sy), xycoords=ax.transAxes, textcoords=ax.transAxes,
+                                arrowprops=dict(arrowstyle="-|>", lw=1.15, alpha=0.68))
             # merge/pass output -> next-depth result node.  The gi-th output becomes node gi at depth key.
             if key <= max_result_depth:
                 target_labels = [lab for lab in pos_comp if lab.startswith(f"D{key} N{gi} C")]
                 for tlab in target_labels:
                     tx, ty = pos_comp[tlab]
-                    ax.annotate("", xy=(tx-thumb_w*0.62, ty), xytext=(x+thumb_w*0.62, y), xycoords=ax.transAxes, textcoords=ax.transAxes,
-                                arrowprops=dict(arrowstyle="-|>", lw=0.85, alpha=0.55, color="0.25"))
+                    ax.annotate("", xy=(tx-thumb_w*0.52, ty), xytext=(x+thumb_w*0.52, y), xycoords=ax.transAxes, textcoords=ax.transAxes,
+                                arrowprops=dict(arrowstyle="-|>", lw=1.20, alpha=0.70, color="0.25"))
 
     ax.text(0.01, 0.025, "W-only provenance tree. Final merge/pass outputs are shown after the last recursive depth and do not add residual/r.", fontsize=8, ha="left", va="bottom", transform=ax.transAxes)
     fig.suptitle("Auto-Step merge provenance: depth results → merge/pass outputs → next-depth results", fontsize=14)
@@ -1844,6 +1905,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
     #   rank=4 -> 2 nodes/row => 8 component columns
     max_nodes = max(1, min(4, 10 // max(1, rank)))
 
+    node_cols = max_nodes * cols_node
     ratios = []
     starts = []
     cur = 0
@@ -1856,16 +1918,19 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
             # rows: W image, H spectrum, spacer, residual image, residual spectrum, inter-wrap spacer
             ratios.extend([3.0, 1.0, 0.55, 3.0, 1.0, 0.85])
             cur += rows_node
-        # Optional merge/pass output row from this depth to the next-depth input.
+        # Optional merge/pass output rows from this depth to the next-depth input.
         out_sets = manual_depth_groups.get(d + 1, []) if isinstance(manual_depth_groups, dict) else []
         if out_sets:
-            ratios.extend([0.42, 2.10, 0.35])
-            cur += 3
+            out_wraps = max(1, int(np.ceil(len(out_sets) / max(1, node_cols))))
+            ratios.append(0.48)
+            cur += 1
+            for _ow in range(out_wraps):
+                ratios.extend([2.10, 0.22])
+                cur += 2
         else:
-            ratios.append(0.42)
+            ratios.append(0.50)
             cur += 1
 
-    node_cols = max_nodes * cols_node
     total_cols = node_cols
     fig.set_size_inches(max(26.0, node_cols * 4.1), max(8, sum(ratios) * 1.50), forward=True)
     gs = fig.add_gridspec(cur, total_cols, height_ratios=ratios)
@@ -1989,16 +2054,17 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
         if out_sets:
             try:
                 out_title_row = starts[d] + 1 + wraps_d * rows_node
-                out_img_row = out_title_row + 1
+                out_img_start = out_title_row + 1
                 axm = fig.add_subplot(gs[out_title_row, :])
                 axm.axis("off")
                 label_next = f"D{d} merge/pass outputs → D{d+1} input"
                 if d + 1 > len(depths) - 1:
-                    label_next = f"D{d} final merge/pass outputs"
+                    label_next = f"D{d} FINAL RESULT merge/pass outputs (no residual/r)"
                 axm.text(0.0, 0.65, label_next, fontsize=10, fontweight="bold", va="center")
-                max_out = min(len(out_sets), total_cols)
-                for oi, c in enumerate(out_sets[:max_out]):
-                    axo = fig.add_subplot(gs[out_img_row, oi])
+                for oi, c in enumerate(out_sets):
+                    out_row = out_img_start + 2 * (oi // max(1, total_cols))
+                    out_col = oi % max(1, total_cols)
+                    axo = fig.add_subplot(gs[out_row, out_col])
                     img = c.get("provenance_image", None)
                     if img is None:
                         maps = list(c.get("member_maps", []) or [])
@@ -2014,15 +2080,60 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
                     members = _short_text(members, 55)
                     axo.set_title(f"{kind} {oi+1}\n{members}", fontsize=7)
                     axo.set_xticks([]); axo.set_yticks([])
-                if len(out_sets) > max_out:
-                    ax_more = fig.add_subplot(gs[out_img_row, max_out-1])
-                    ax_more.text(0.5, -0.18, f"+{len(out_sets)-max_out} more", transform=ax_more.transAxes, ha="center", va="top", fontsize=7)
             except Exception:
                 pass
 
     fig.suptitle(f"rr-NMF Tree rank={rank}: H basis with weighted raw overlay", fontsize=14)
-    fig.subplots_adjust(left=0.012, right=0.988, top=0.965, bottom=0.025, hspace=0.42, wspace=0.70)
+    fig.subplots_adjust(left=0.012, right=0.988, top=0.965, bottom=0.025, hspace=0.58, wspace=0.70)
 
+
+
+def plot_pca_result(fig, pca, axis, cmap="coolwarm", maxn=20):
+    fig.clear()
+    if pca is None:
+        fig.set_size_inches(12, 5, forward=True)
+        ax = fig.add_subplot(111); ax.axis("off")
+        ax.text(0.5, 0.5, "Run PCA first", ha="center", va="center", fontsize=14)
+        return
+    n = min(maxn, len(pca.W_images))
+    rows = int(np.ceil(max(1, n) / 2.0)) + 1
+    fig.set_size_inches(18, max(7, rows * 3.0), forward=True)
+    gs = fig.add_gridspec(rows, 4, width_ratios=[1.0, 1.4, 1.0, 1.4])
+    xev = None
+    for i in range(n):
+        r = i // 2
+        c = (i % 2) * 2
+        ax = fig.add_subplot(gs[r, c])
+        sp = fig.add_subplot(gs[r, c + 1])
+        im = ax.imshow(pca.W_images[i], cmap=cmap, origin="upper", aspect="equal")
+        evr = float(pca.explained_variance_ratio[i]) * 100 if i < len(pca.explained_variance_ratio) else np.nan
+        ax.set_title(f"PC{i+1} score map\nEVR={evr:.2f}%", fontsize=9)
+        ax.set_xticks([]); ax.set_yticks([])
+        add_colorbar(fig, ax, im)
+        spec = np.asarray(pca.H_spectra[i])
+        x = axis.energy_axis if len(axis.energy_axis) == len(spec) else np.arange(len(spec))
+        sp.plot(x, spec, linewidth=1.1)
+        sp.axhline(0, color="0.35", lw=0.7, alpha=0.6)
+        sp.set_title(f"PC{i+1} loading", fontsize=9)
+        sp.set_xlabel(axis.energy_label, fontsize=8)
+        sp.grid(True, alpha=0.25)
+        sp.tick_params(labelsize=7)
+    axv = fig.add_subplot(gs[rows - 1, 0:2])
+    vals = np.asarray(pca.explained_variance_ratio, dtype=float) * 100.0
+    axv.bar(np.arange(1, len(vals) + 1), vals)
+    axv.set_title("PCA explained variance ratio")
+    axv.set_xlabel("Principal component")
+    axv.set_ylabel("EVR (%)")
+    axv.grid(True, axis="y", alpha=0.25)
+    axc = fig.add_subplot(gs[rows - 1, 2:4])
+    axc.plot(np.arange(1, len(vals) + 1), np.cumsum(vals), marker="o")
+    axc.set_ylim(0, min(100.0, max(5.0, float(np.nanmax(np.cumsum(vals))) * 1.05 if vals.size else 100.0)))
+    axc.set_title("Cumulative explained variance")
+    axc.set_xlabel("Principal component")
+    axc.set_ylabel("Cumulative EVR (%)")
+    axc.grid(True, alpha=0.25)
+    fig.suptitle("PCA baseline decomposition", fontsize=14)
+    fig.subplots_adjust(left=0.04, right=0.985, top=0.94, bottom=0.06, hspace=0.75, wspace=0.28)
 
 def plot_energy(fig, conv, rr):
     fig.clear(); fig.set_size_inches(12,7, forward=True)
@@ -2344,7 +2455,7 @@ class RR2NMFGui(QMainWindow):
         super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v7.2 W-downCorr + H-corr"); self.resize(1850,1080)
         self.cube=None; self.original_cube=None; self.roi_cube=None; self.X=None; self.image_shape=None
         self.axis_info=make_default_axis_info((1,1,1)); self.roi_axis_info=make_default_axis_info((1,1,1))
-        self.conv_result=None; self.rr_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.bg_applied=False; self._raw_mouse_press=None; self.selected_raw_pixel=None
+        self.conv_result=None; self.rr_result=None; self.pca_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.bg_applied=False; self._raw_mouse_press=None; self.selected_raw_pixel=None
         self.eds_elements=[]; self.eels_elements=[]; self.eds_sources=[]; self.eels_sources=[]; self.eds_hits=[]; self.eels_hits=[]
         self._syncing=False; self._auto_score_active=False; self._auto_score_target_depth=None; self._auto_score_stop_after_current=False; self._auto_score_unchanged_count=0; self._build_ui()
 
@@ -2407,6 +2518,7 @@ class RR2NMFGui(QMainWindow):
         ng=QGroupBox("NMF Settings"); nf=QFormLayout(ng)
         self.chk_conv=QCheckBox("Run conventional NMF"); self.chk_conv.setChecked(True)
         self.spin_k=QSpinBox(); self.spin_k.setRange(1,200); self.spin_k.setValue(20)
+        self.spin_pca_k=QSpinBox(); self.spin_pca_k.setRange(1,500); self.spin_pca_k.setValue(20)
         self.chk_rr=QCheckBox("Run recursive NMF"); self.chk_rr.setChecked(True)
         self.spin_rank=QSpinBox(); self.spin_rank.setRange(2,10); self.spin_rank.setValue(2)
         self.spin_depth=QSpinBox(); self.spin_depth.setRange(0,9999); self.spin_depth.setValue(3); self.spin_depth.setToolTip("No practical GUI limit; use with care because node count and plots can grow quickly.")
@@ -2422,7 +2534,7 @@ class RR2NMFGui(QMainWindow):
         self.combo_solver=QComboBox(); self.combo_solver.addItems(["mu","cd"])
         self.spin_seed=QSpinBox(); self.spin_seed.setRange(0,999999); self.spin_seed.setValue(0)
         self.spin_chunk=QSpinBox(); self.spin_chunk.setRange(128,50000); self.spin_chunk.setValue(2048)
-        for lab,w in [(None,self.chk_conv),("Conventional k",self.spin_k),(None,self.chk_rr),("Recursive rank",self.spin_rank),("Recursive depth",self.spin_depth),(None,self.chk_manual_depth),("Manual start depth",self.spin_manual_depth),("Residual mode",self.combo_res_mode),("Residual nonnegative",self.combo_res_nn),(None,self.chk_decomp_res),("Max iter",self.spin_iter),("Init",self.combo_init),("Solver",self.combo_solver),("Random seed",self.spin_seed),("Chunk size",self.spin_chunk)]:
+        for lab,w in [(None,self.chk_conv),("Conventional k",self.spin_k),("PCA components",self.spin_pca_k),(None,self.chk_rr),("Recursive rank",self.spin_rank),("Recursive depth",self.spin_depth),(None,self.chk_manual_depth),("Manual start depth",self.spin_manual_depth),("Residual mode",self.combo_res_mode),("Residual nonnegative",self.combo_res_nn),(None,self.chk_decomp_res),("Max iter",self.spin_iter),("Init",self.combo_init),("Solver",self.combo_solver),("Random seed",self.spin_seed),("Chunk size",self.spin_chunk)]:
             nf.addRow(w) if lab is None else nf.addRow(lab,w)
         cl.addWidget(ng)
 
@@ -2439,6 +2551,8 @@ class RR2NMFGui(QMainWindow):
         self.btn_run=QPushButton("Run Full Analysis on ROI (Conv + rr)"); self.btn_run.clicked.connect(self.run_analysis)
         self.btn_run_conv_only=QPushButton("Run Conventional NMF Only on ROI")
         self.btn_run_conv_only.clicked.connect(self.run_conventional_only)
+        self.btn_run_pca_only=QPushButton("Run PCA Only on ROI")
+        self.btn_run_pca_only.clicked.connect(self.run_pca_only)
         self.btn_run_auto_stage=QPushButton("Manual Step: Run/Refresh Current Source Depth")
         self.btn_run_auto_stage.clicked.connect(self.run_auto_until_manual_depth)
         self.btn_continue_manual=QPushButton("Continue One Depth with Current Manual Merge/Pass")
@@ -2452,13 +2566,14 @@ class RR2NMFGui(QMainWindow):
         self.btn_load_settings=QPushButton("Load ROI/BG/NMF Settings")
         self.btn_load_settings.clicked.connect(self.load_processing_settings)
         self.btn_export=QPushButton("Export CSV"); self.btn_export.clicked.connect(self.export_csv)
-        vf.addRow(self.btn_run); vf.addRow(self.btn_run_conv_only); vf.addRow(self.btn_run_auto_stage); vf.addRow(self.btn_continue_manual); vf.addRow(self.btn_auto_score_step); vf.addRow(self.btn_reset_analysis); vf.addRow(self.btn_save_settings); vf.addRow(self.btn_load_settings); vf.addRow(self.btn_export); cl.addWidget(vg)
+        vf.addRow(self.btn_run); vf.addRow(self.btn_run_conv_only); vf.addRow(self.btn_run_pca_only); vf.addRow(self.btn_run_auto_stage); vf.addRow(self.btn_continue_manual); vf.addRow(self.btn_auto_score_step); vf.addRow(self.btn_reset_analysis); vf.addRow(self.btn_save_settings); vf.addRow(self.btn_load_settings); vf.addRow(self.btn_export); cl.addWidget(vg)
         self.log=QTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(180); cl.addWidget(QLabel("Log")); cl.addWidget(self.log); cl.addStretch(1)
 
         self.tabs=QTabWidget(); split.addWidget(self.tabs)
         self.canvas_raw=Canvas(14,5.5); self._connect_raw_roi_mouse(); self.tabs.addTab(PlotPanel(self.canvas_raw),"Raw Data")
         self.canvas_tree=Canvas(14,10); tree_page=QWidget(); tl=QVBoxLayout(tree_page); tl.addWidget(PlotPanel(self.canvas_tree),5); tl.addWidget(self._build_combine_panel(),2); self.tabs.addTab(tree_page,"rr-NMF Tree")
         self.canvas_conv=Canvas(16,10); self.tabs.addTab(PlotPanel(self.canvas_conv),"Conventional NMF")
+        self.canvas_pca=Canvas(16,10); self.tabs.addTab(PlotPanel(self.canvas_pca),"PCA")
         self.canvas_energy=Canvas(12,8); self.tabs.addTab(PlotPanel(self.canvas_energy),"Energy Summary")
         self.canvas_diag=Canvas(16,8); self.tabs.addTab(PlotPanel(self.canvas_diag),"rr Interpretation Summary")
         self.canvas_auto_prov=Canvas(18,8); self.tabs.addTab(PlotPanel(self.canvas_auto_prov),"Auto Merge W Tree")
@@ -2662,7 +2777,7 @@ class RR2NMFGui(QMainWindow):
         if not path: return
         try:
             cube,meta,axis=load_hyperspectral_file(path); cube=nonnegative(cube,"clip")
-            self.cube=cube.copy(); self.original_cube=cube.copy(); self.axis_info=axis; self.roi_axis_info=axis; self.bg_applied=False; self.conv_result=None; self.rr_result=None; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.selected_raw_pixel=None
+            self.cube=cube.copy(); self.original_cube=cube.copy(); self.axis_info=axis; self.roi_axis_info=axis; self.bg_applied=False; self.conv_result=None; self.rr_result=None; self.pca_result=None; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.selected_raw_pixel=None
             self.lbl_file.setText(os.path.basename(path)); self.lbl_shape.setText(str(cube.shape)); self.set_roi_full(); self.set_background_roi_full(); self.refresh_views(); self.refresh_spectrum_sources(); self.append_log(f"Loaded {cube.shape}")
         except Exception as e: QMessageBox.critical(self,"Load failed",str(e)); self.append_log(traceback.format_exc())
 
@@ -2860,7 +2975,7 @@ class RR2NMFGui(QMainWindow):
 
     def reset_background_correction(self):
         if self.original_cube is None: return
-        self.cube=self.original_cube.copy(); self.bg_applied=False; self.conv_result=None; self.rr_result=None; self.lbl_bg.setText("Reset to original"); self.refresh_views(); self.refresh_spectrum_sources()
+        self.cube=self.original_cube.copy(); self.bg_applied=False; self.conv_result=None; self.rr_result=None; self.pca_result=None; self.lbl_bg.setText("Reset to original"); self.refresh_views(); self.refresh_spectrum_sources()
 
     def collect_params(self, include_manual=True, max_manual_depth=None):
         params={"run_conventional":self.chk_conv.isChecked(),"conv_components":self.spin_k.value(),"run_rr":self.chk_rr.isChecked(),"rr_rank":self.spin_rank.value(),"rr_depth":self.spin_depth.value(),"residual_mode":self.combo_res_mode.currentText(),"residual_nonnegative":self.combo_res_nn.currentText(),"decompose_residual_branch":self.chk_decomp_res.isChecked(),"max_iter":self.spin_iter.value(),"init":self.combo_init.currentText(),"solver":self.combo_solver.currentText(),"random_state":self.spin_seed.value(),"chunk_size":self.spin_chunk.value()}
@@ -3210,6 +3325,24 @@ This does not modify the current rr-NMF/manual tree results.
         self.worker.start()
         self.append_log("Running conventional NMF only on current ROI.")
 
+
+    def run_pca_only(self):
+        """Run PCA baseline on the current ROI and update the PCA tab."""
+        try:
+            roi, X, shape, axis = self.get_roi_cube_and_X()
+        except Exception as e:
+            QMessageBox.warning(self, "ROI/Data error", str(e)); return
+        try:
+            self.roi_cube = roi; self.X = X; self.image_shape = shape; self.roi_axis_info = axis
+            k = int(self.spin_pca_k.value()) if hasattr(self, "spin_pca_k") else 20
+            self.append_log(f"Running PCA on current ROI with {k} component(s)...")
+            self.pca_result = run_pca_analysis(X, shape, n_components=k, random_state=self.spin_seed.value() if hasattr(self, "spin_seed") else 0)
+            self.refresh_views()
+            self.append_log("PCA complete.")
+        except Exception as e:
+            QMessageBox.critical(self, "PCA failed", str(e))
+            self.append_log(traceback.format_exc())
+
     def run_analysis(self):
         try: roi,X,shape,axis=self.get_roi_cube_and_X()
         except Exception as e: QMessageBox.warning(self,"ROI/Data error",str(e)); return
@@ -3264,6 +3397,11 @@ This does not modify the current rr-NMF/manual tree results.
             plot_auto_merge_w_provenance(self.canvas_auto_prov.fig, self.rr_result, getattr(self, "manual_depth_groups", {}), cmap=self.combo_cmap.currentText() if hasattr(self, "combo_cmap") else "viridis"); self.canvas_auto_prov.set_base(); self.canvas_auto_prov.draw()
         if self.conv_result is not None: plot_conv(self.canvas_conv.fig,self.conv_result,self.roi_axis_info,cmap); self.canvas_conv.set_base(); self.canvas_conv.draw()
         else: self.canvas_conv.clear()
+        if hasattr(self, "canvas_pca"):
+            if self.pca_result is not None:
+                plot_pca_result(self.canvas_pca.fig, self.pca_result, self.roi_axis_info, cmap="coolwarm", maxn=int(self.spin_pca_k.value()) if hasattr(self, "spin_pca_k") else 20); self.canvas_pca.set_base(); self.canvas_pca.draw()
+            else:
+                self.canvas_pca.clear()
         plot_energy(self.canvas_energy.fig,self.conv_result,self.rr_result); self.canvas_energy.set_base(); self.canvas_energy.draw()
         self.refresh_tables(); self.refresh_rr_component_list()
 
@@ -3415,6 +3553,7 @@ This does not modify the current rr-NMF/manual tree results.
         """Clear analysis results and manual intermediate data while keeping the loaded dataset."""
         self.conv_result=None
         self.rr_result=None
+        self.pca_result=None
         self.roi_cube=None
         self.X=None
         self.image_shape=None
@@ -3426,7 +3565,7 @@ This does not modify the current rr-NMF/manual tree results.
             self.list_rr_components.clear()
         if hasattr(self,"list_rr_combined"):
             self.list_rr_combined.clear()
-        for cname in ("canvas_tree","canvas_conv","canvas_energy","canvas_diag","canvas_combined","canvas_eds","canvas_eels"):
+        for cname in ("canvas_tree","canvas_conv","canvas_pca","canvas_energy","canvas_diag","canvas_auto_prov","canvas_combined","canvas_eds","canvas_eels"):
             c=getattr(self,cname,None)
             if c is not None:
                 c.clear()
