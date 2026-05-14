@@ -1,6 +1,6 @@
 
 """
-rr2_nmf_gui_ver7_4_merge_tree_layout_final_outputs.py
+rr2_nmf_gui_ver7_7_final_outputs_arrows_pca.py
 
 Single-file rr-NMF GUI based on the v4.4 workflow, with EELS Interpretation added.
 This file keeps the v4.4-style core workflow in one executable Python file.
@@ -1628,12 +1628,12 @@ def plot_auto_merge_w_provenance(fig, rr=None, manual_depth_groups=None, cmap="v
         out_sets = [c for c in (manual_depth_groups.get(k, []) or []) if c.get("auto_score", False)]
         max_items = max(max_items, len(out_sets))
 
-    fig.set_size_inches(max(18, len(xslots) * 2.5), max(8.0, 0.50 * max_items + 3.0), forward=True)
+    fig.set_size_inches(max(28, len(xslots) * 4.0), max(9.0, 0.62 * max_items + 3.2), forward=True)
     ax = fig.add_subplot(111)
     ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.axis("off")
 
-    thumb_w = min(0.042, 0.75 / max(8, len(xslots)))
-    thumb_h = min(0.062, 0.76 / max(1, max_items))
+    thumb_w = min(0.066, 0.88 / max(6, len(xslots)))
+    thumb_h = min(0.082, 0.80 / max(1, max_items))
     y_top, y_bottom = 0.88, 0.12
     pos_comp = {}
     pos_out = {}
@@ -1641,7 +1641,7 @@ def plot_auto_merge_w_provenance(fig, rr=None, manual_depth_groups=None, cmap="v
     # Plot result columns.
     for d in result_depths:
         x = x_from_slot(2 * d)
-        ax.text(x, 0.975, f"Depth {d}\nW results", ha="center", va="top", fontsize=11, fontweight="bold", transform=ax.transAxes)
+        ax.text(x, 0.975, f"Depth {d}\nW results", ha="center", va="top", fontsize=12.5, fontweight="bold", transform=ax.transAxes)
         comps = comp_by_depth.get(d, [])
         ys = np.linspace(y_top, y_bottom, len(comps)) if len(comps) > 1 else np.array([(y_top + y_bottom) / 2])
         for k, comp in enumerate(comps):
@@ -1651,7 +1651,7 @@ def plot_auto_merge_w_provenance(fig, rr=None, manual_depth_groups=None, cmap="v
             iax = inset_axes(ax, width="100%", height="100%", bbox_to_anchor=(x-thumb_w/2, y-thumb_h/2, thumb_w, thumb_h), bbox_transform=ax.transAxes, borderpad=0)
             iax.imshow(comp["map"], cmap=cmap, origin="upper", aspect="equal")
             iax.set_xticks([]); iax.set_yticks([])
-            iax.set_title(lab.replace(" ", ""), fontsize=6.4, pad=1)
+            iax.set_title(lab.replace(" ", ""), fontsize=7.8, pad=1.5)
 
     # Plot merge/pass columns between source and next result depth.
     for key in output_keys:
@@ -1663,7 +1663,7 @@ def plot_auto_merge_w_provenance(fig, rr=None, manual_depth_groups=None, cmap="v
         title = f"D{source_depth} → D{key}\nmerge/pass"
         if key > max_result_depth:
             title = f"D{source_depth}\nFINAL merge/pass"
-        ax.text(x, 0.975, title, ha="center", va="top", fontsize=10.5, fontweight="bold", transform=ax.transAxes)
+        ax.text(x, 0.975, title, ha="center", va="top", fontsize=12.0, fontweight="bold", transform=ax.transAxes)
         ys = np.linspace(y_top, y_bottom, len(out_sets)) if len(out_sets) > 1 else np.array([(y_top + y_bottom) / 2])
         for gi, c in enumerate(out_sets):
             y = float(ys[gi])
@@ -1682,26 +1682,26 @@ def plot_auto_merge_w_provenance(fig, rr=None, manual_depth_groups=None, cmap="v
                 gax = inset_axes(ax, width="100%", height="100%", bbox_to_anchor=(x-thumb_w/2, y-thumb_h/2, thumb_w, thumb_h), bbox_transform=ax.transAxes, borderpad=0)
                 gax.imshow(gimg, cmap=cmap, origin="upper", aspect="equal")
                 gax.set_xticks([]); gax.set_yticks([])
-                gax.set_title(("PASS" if is_pass else "MERGE") + f" G{gi+1}", fontsize=6.5, pad=1)
+                gax.set_title(("PASS" if is_pass else "MERGE") + f" G{gi+1}", fontsize=8.0, pad=1.5)
             if is_pass:
                 metric = "PASS"
             else:
                 metric = f"S {100*stats.get('score_mean', np.nan):.1f}\nW {100*stats.get('w_corr_down_mean', np.nan):.1f}/H {100*stats.get('h_corr_mean', stats.get('corr_mean', np.nan)):.1f}"
-            ax.text(x + thumb_w*0.72, y, metric, fontsize=7.0, ha="left", va="center", transform=ax.transAxes,
+            ax.text(x + thumb_w*0.72, y, metric, fontsize=8.6, ha="left", va="center", transform=ax.transAxes,
                     bbox=dict(boxstyle="round,pad=0.10", fc="white", ec="0.65", alpha=0.82))
             # source component -> merge/pass output
             for mlab in members:
                 if mlab in pos_comp:
                     sx, sy = pos_comp[mlab]
-                    ax.annotate("", xy=(x-thumb_w*0.52, y), xytext=(sx+thumb_w*0.52, sy), xycoords=ax.transAxes, textcoords=ax.transAxes,
-                                arrowprops=dict(arrowstyle="-|>", lw=1.15, alpha=0.68))
+                    ax.annotate("", xy=(x-thumb_w*0.58, y), xytext=(sx+thumb_w*0.58, sy), xycoords=ax.transAxes, textcoords=ax.transAxes,
+                                arrowprops=dict(arrowstyle="-|>,head_length=0.9,head_width=0.45", lw=2.0, alpha=0.82, color="0.20"))
             # merge/pass output -> next-depth result node.  The gi-th output becomes node gi at depth key.
             if key <= max_result_depth:
                 target_labels = [lab for lab in pos_comp if lab.startswith(f"D{key} N{gi} C")]
                 for tlab in target_labels:
                     tx, ty = pos_comp[tlab]
-                    ax.annotate("", xy=(tx-thumb_w*0.52, ty), xytext=(x+thumb_w*0.52, y), xycoords=ax.transAxes, textcoords=ax.transAxes,
-                                arrowprops=dict(arrowstyle="-|>", lw=1.20, alpha=0.70, color="0.25"))
+                    ax.annotate("", xy=(tx-thumb_w*0.58, ty), xytext=(x+thumb_w*0.58, y), xycoords=ax.transAxes, textcoords=ax.transAxes,
+                                arrowprops=dict(arrowstyle="-|>,head_length=0.9,head_width=0.45", lw=2.1, alpha=0.86, color="0.10"))
 
     ax.text(0.01, 0.025, "W-only provenance tree. Final merge/pass outputs are shown after the last recursive depth and do not add residual/r.", fontsize=8, ha="left", va="bottom", transform=ax.transAxes)
     fig.suptitle("Auto-Step merge provenance: depth results → merge/pass outputs → next-depth results", fontsize=14)
@@ -1916,7 +1916,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
         cur += 1
         for _ in range(wraps):
             # rows: W image, H spectrum, spacer, residual image, residual spectrum, inter-wrap spacer
-            ratios.extend([3.0, 1.0, 0.55, 3.0, 1.0, 0.85])
+            ratios.extend([3.0, 1.0, 0.85, 3.0, 1.0, 1.05])
             cur += rows_node
         # Optional merge/pass output rows from this depth to the next-depth input.
         out_sets = manual_depth_groups.get(d + 1, []) if isinstance(manual_depth_groups, dict) else []
@@ -2088,7 +2088,7 @@ def plot_rr(fig, rr, axis, cmap="viridis", X_for_weight=None, overlay_mode="max"
 
 
 
-def plot_pca_result(fig, pca, axis, cmap="coolwarm", maxn=20):
+def plot_pca_result(fig, pca, axis, cmap="viridis", maxn=20):
     fig.clear()
     if pca is None:
         fig.set_size_inches(12, 5, forward=True)
@@ -2096,10 +2096,10 @@ def plot_pca_result(fig, pca, axis, cmap="coolwarm", maxn=20):
         ax.text(0.5, 0.5, "Run PCA first", ha="center", va="center", fontsize=14)
         return
     n = min(maxn, len(pca.W_images))
-    rows = int(np.ceil(max(1, n) / 2.0)) + 1
-    fig.set_size_inches(18, max(7, rows * 3.0), forward=True)
+    comp_rows = int(np.ceil(max(1, n) / 2.0))
+    rows = comp_rows + 2
+    fig.set_size_inches(18, max(8, rows * 3.0), forward=True)
     gs = fig.add_gridspec(rows, 4, width_ratios=[1.0, 1.4, 1.0, 1.4])
-    xev = None
     for i in range(n):
         r = i // 2
         c = (i % 2) * 2
@@ -2118,22 +2118,50 @@ def plot_pca_result(fig, pca, axis, cmap="coolwarm", maxn=20):
         sp.set_xlabel(axis.energy_label, fontsize=8)
         sp.grid(True, alpha=0.25)
         sp.tick_params(labelsize=7)
-    axv = fig.add_subplot(gs[rows - 1, 0:2])
+
     vals = np.asarray(pca.explained_variance_ratio, dtype=float) * 100.0
-    axv.bar(np.arange(1, len(vals) + 1), vals)
+    xcomp = np.arange(1, len(vals) + 1)
+    axv = fig.add_subplot(gs[rows - 2, 0:2])
+    axv.bar(xcomp, vals)
     axv.set_title("PCA explained variance ratio")
     axv.set_xlabel("Principal component")
     axv.set_ylabel("EVR (%)")
     axv.grid(True, axis="y", alpha=0.25)
-    axc = fig.add_subplot(gs[rows - 1, 2:4])
-    axc.plot(np.arange(1, len(vals) + 1), np.cumsum(vals), marker="o")
+
+    axc = fig.add_subplot(gs[rows - 2, 2:4])
+    axc.plot(xcomp, np.cumsum(vals), marker="o")
     axc.set_ylim(0, min(100.0, max(5.0, float(np.nanmax(np.cumsum(vals))) * 1.05 if vals.size else 100.0)))
     axc.set_title("Cumulative explained variance")
     axc.set_xlabel("Principal component")
     axc.set_ylabel("Cumulative EVR (%)")
     axc.grid(True, alpha=0.25)
+
+    # PC magnitude diagnostics.  Score RMS reflects how strongly each PC is expressed spatially;
+    # loading L2 norm should be near 1 for sklearn PCA but is shown for completeness.
+    axm = fig.add_subplot(gs[rows - 1, 0:2])
+    try:
+        score_rms = np.sqrt(np.nanmean(np.asarray(pca.scores, dtype=float) ** 2, axis=0))
+    except Exception:
+        score_rms = np.zeros_like(vals)
+    axm.plot(np.arange(1, len(score_rms) + 1), score_rms, marker="o")
+    axm.set_title("PC score magnitude (RMS of scores)")
+    axm.set_xlabel("Principal component")
+    axm.set_ylabel("Score RMS")
+    axm.grid(True, alpha=0.25)
+
+    axl = fig.add_subplot(gs[rows - 1, 2:4])
+    try:
+        loading_amp = np.nanmax(np.abs(np.asarray(pca.components, dtype=float)), axis=1)
+    except Exception:
+        loading_amp = np.zeros_like(vals)
+    axl.plot(np.arange(1, len(loading_amp) + 1), loading_amp, marker="o")
+    axl.set_title("PC loading amplitude (max |loading|)")
+    axl.set_xlabel("Principal component")
+    axl.set_ylabel("max |loading|")
+    axl.grid(True, alpha=0.25)
+
     fig.suptitle("PCA baseline decomposition", fontsize=14)
-    fig.subplots_adjust(left=0.04, right=0.985, top=0.94, bottom=0.06, hspace=0.75, wspace=0.28)
+    fig.subplots_adjust(left=0.04, right=0.985, top=0.94, bottom=0.06, hspace=0.85, wspace=0.28)
 
 def plot_energy(fig, conv, rr):
     fig.clear(); fig.set_size_inches(12,7, forward=True)
@@ -3187,8 +3215,11 @@ class RR2NMFGui(QMainWindow):
         try:
             final_depth = int(final_depth)
             key = final_depth + 1
-            if key in getattr(self, "manual_depth_groups", {}):
+            existing = getattr(self, "manual_depth_groups", {}).get(key, None)
+            if existing and all(bool(c.get("final_no_residual", False)) for c in existing):
                 return
+            if existing:
+                self.manual_depth_groups.pop(key, None)
             if self.rr_result is None or len(self.rr_result.node_summaries_by_depth) - 1 < final_depth:
                 return
             self._build_auto_score_sets_for_target(key, final_no_residual=True)
@@ -3388,7 +3419,14 @@ This does not modify the current rr-NMF/manual tree results.
             except Exception: self.canvas_raw.clear()
         match_pct = self.spin_shape_match_pct.value() if hasattr(self, "spin_shape_match_pct") else 80.0
         match_window = self.energy_width_to_window_channels(self.spin_shape_match_window.value(), self.roi_axis_info, len(self.roi_axis_info.energy_axis) if self.roi_axis_info is not None else None) if hasattr(self, "spin_shape_match_window") else 21
-        if self.rr_result is not None: plot_rr(self.canvas_tree.fig,self.rr_result,self.roi_axis_info,cmap,X_for_weight=getattr(self,"X",None),overlay_mode="max",match_threshold_pct=match_pct,match_window=match_window,w_downsample_factor=self.spin_auto_w_downsample.value() if hasattr(self,"spin_auto_w_downsample") else 4, manual_depth_groups=getattr(self,"manual_depth_groups",{})); self.canvas_tree.set_base(); self.canvas_tree.draw()
+        if self.rr_result is not None:
+            try:
+                final_depth_for_outputs = int(self.spin_depth.value()) if hasattr(self, "spin_depth") else (len(self.rr_result.node_summaries_by_depth) - 1)
+                if len(self.rr_result.node_summaries_by_depth) - 1 >= final_depth_for_outputs and getattr(self, "manual_depth_groups", None):
+                    self._ensure_final_auto_output_sets(final_depth_for_outputs)
+            except Exception:
+                pass
+            plot_rr(self.canvas_tree.fig,self.rr_result,self.roi_axis_info,cmap,X_for_weight=getattr(self,"X",None),overlay_mode="max",match_threshold_pct=match_pct,match_window=match_window,w_downsample_factor=self.spin_auto_w_downsample.value() if hasattr(self,"spin_auto_w_downsample") else 4, manual_depth_groups=getattr(self,"manual_depth_groups",{})); self.canvas_tree.set_base(); self.canvas_tree.draw()
         else: self.canvas_tree.clear()
         if hasattr(self, "canvas_diag"):
             plot_rr_diagnostics_summary(self.canvas_diag.fig,self.rr_result,self.roi_axis_info if self.roi_axis_info is not None else make_default_axis_info((1,1,1)),X_for_weight=getattr(self,"X",None),match_threshold_pct=match_pct,match_window=match_window,w_downsample_factor=self.spin_auto_w_downsample.value() if hasattr(self,"spin_auto_w_downsample") else 4, manual_depth_groups=getattr(self,"manual_depth_groups",{})); self.canvas_diag.set_base(); self.canvas_diag.draw()
@@ -3399,7 +3437,7 @@ This does not modify the current rr-NMF/manual tree results.
         else: self.canvas_conv.clear()
         if hasattr(self, "canvas_pca"):
             if self.pca_result is not None:
-                plot_pca_result(self.canvas_pca.fig, self.pca_result, self.roi_axis_info, cmap="coolwarm", maxn=int(self.spin_pca_k.value()) if hasattr(self, "spin_pca_k") else 20); self.canvas_pca.set_base(); self.canvas_pca.draw()
+                plot_pca_result(self.canvas_pca.fig, self.pca_result, self.roi_axis_info, cmap=self.combo_cmap.currentText() if hasattr(self, "combo_cmap") else "viridis", maxn=int(self.spin_pca_k.value()) if hasattr(self, "spin_pca_k") else 20); self.canvas_pca.set_base(); self.canvas_pca.draw()
             else:
                 self.canvas_pca.clear()
         plot_energy(self.canvas_energy.fig,self.conv_result,self.rr_result); self.canvas_energy.set_base(); self.canvas_energy.draw()
