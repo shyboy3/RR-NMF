@@ -2877,7 +2877,10 @@ class RR2NMFGui(QMainWindow):
             if computed_max >= target:
                 if self._auto_score_stop_after_current:
                     self._auto_score_active=False
-                    self.append_log(f"Auto score workflow stopped after D{target}: unchanged dataset-count patience reached.")
+                    self.append_log(
+                        f"Auto score workflow stopped after D{target}: "
+                        "unchanged dataset-count patience reached."
+                    )
                     self.refresh_rr_component_list()
                     return
                 self._auto_score_target_depth=target+1
