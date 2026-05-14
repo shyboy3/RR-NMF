@@ -2814,7 +2814,16 @@ class RR2NMFGui(QMainWindow):
 
         best_pairs=sorted(pairs, key=lambda r: r.get("score",0.0), reverse=True)[:8]
         pair_txt="; ".join([f"{r['label_i']}+{r['label_j']}: score={100*r['score']:.1f}% WdownCorr={100*r.get('w_corr_down', np.nan):.1f}% Hcorr={100*r.get('h_corr', r.get('corr', np.nan)):.1f}%" for r in best_pairs])
-        self.append_log(f"Auto score grouping for target D{target_depth} from source D{source_depth}: {len(entries)} source components from {source_data_count} source dataset(s) -> {len(sets)} next-depth dataset(s), merged_groups={merged_count}, threshold={self.spin_auto_score_thresh.value():.1f}%, a={self.spin_auto_corr_weight.value():.3f}, h_corr_weight={1.0-self.spin_auto_corr_weight.value():.3f}, W_downsample={self.spin_auto_w_downsample.value() if hasattr(self, "spin_auto_w_downsample") else 4}")
+        w_downsample_val = self.spin_auto_w_downsample.value() if hasattr(self, "spin_auto_w_downsample") else 4
+        self.append_log(
+            f"Auto score grouping for target D{target_depth} from source D{source_depth}: "
+            f"{len(entries)} source components from {source_data_count} source dataset(s) -> "
+            f"{len(sets)} next-depth dataset(s), merged_groups={merged_count}, "
+            f"threshold={self.spin_auto_score_thresh.value():.1f}%, "
+            f"a={self.spin_auto_corr_weight.value():.3f}, "
+            f"h_corr_weight={1.0-self.spin_auto_corr_weight.value():.3f}, "
+            f"W_downsample={w_downsample_val}"
+        )
         if pair_txt:
             self.append_log("Top auto-score pairs (Score / W-downCorr / H-corr): " + pair_txt)
         return source_data_count, len(entries), len(sets), merged_count
