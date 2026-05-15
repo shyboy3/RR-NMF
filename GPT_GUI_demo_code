@@ -1,6 +1,6 @@
 
 """
-rr2_nmf_gui_ver7_7_final_outputs_arrows_pca.py
+rr2_nmf_gui_ver8_0_fullresult_arrow_perf.py
 
 Single-file rr-NMF GUI based on the v4.4 workflow, with EELS Interpretation added.
 This file keeps the v4.4-style core workflow in one executable Python file.
@@ -1625,20 +1625,24 @@ def plot_auto_merge_w_provenance(fig, rr=None, manual_depth_groups=None, cmap="v
         out_sets = [c for c in (manual_depth_groups.get(k, []) or []) if c.get("auto_score", False)]
         max_items = max(max_items, len(out_sets))
 
-    fig_w = max(15.0, min(44.0, ncols * 2.05 + 2.8))
+    # Keep thumbnails readable while leaving enough horizontal space for arrows.
+    # Earlier versions made thumb_w almost equal to the column spacing, which made
+    # arrow segments collapse into tiny strokes between images.
+    fig_w = max(18.0, min(80.0, ncols * 3.05 + 3.5))
     fig_h = max(8.0, 0.62 * max_items + 3.0)
     fig.set_size_inches(fig_w, fig_h, forward=True)
     ax = fig.add_subplot(111)
     ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.axis("off")
 
-    left_margin, right_margin = 0.035, 0.035
+    left_margin, right_margin = 0.030, 0.030
     usable_w = 1.0 - left_margin - right_margin
+    col_gap = usable_w / max(1, ncols - 1)
     def x_for(item):
         if ncols == 1:
             return 0.5
         return left_margin + usable_w * (col_index[item] / (ncols - 1))
 
-    thumb_w = min(0.115, usable_w / max(4.0, ncols * 1.05))
+    thumb_w = min(0.080, max(0.026, col_gap * 0.52))
     thumb_h = min(0.095, 0.78 / max(1, max_items))
     y_top, y_bottom = 0.865, 0.12
 
@@ -1658,11 +1662,12 @@ def plot_auto_merge_w_provenance(fig, rr=None, manual_depth_groups=None, cmap="v
         return iax
 
     def edge_point(x, y, side):
-        # Slightly overreach by 1% of thumbnail width so the arrow visually touches the image box.
+        # Use thumbnail edge in the parent axes coordinate, with a small overreach
+        # so arrows visually touch the image instead of floating in the gap.
         if side == "right":
-            return (x + thumb_w * 0.515, y)
+            return (x + thumb_w * 0.505, y)
         if side == "left":
-            return (x - thumb_w * 0.515, y)
+            return (x - thumb_w * 0.505, y)
         return (x, y)
 
     def draw_arrow(x0, y0, x1, y1, color="0.15", lw=1.85, alpha=0.88, rad=0.0):
@@ -2269,7 +2274,7 @@ def _plot_result_column(fig, gs, col0, title, images, spectra, axis, cmap, maxn=
             sp.set_xlabel(axis.energy_label if axis is not None else "Channel", fontsize=7)
 
 
-def plot_full_result_comparison(fig, conv, pca, rr, manual_depth_groups, axis, selected_depth=0, cmap="viridis", maxn=12, w_downsample_factor=4):
+def plot_full_result_comparison(fig, conv, pca, rr, manual_depth_groups, axis, selected_depth=0, cmap="viridis", maxn=30, w_downsample_factor=4):
     """Compare Conv NMF, PCA, and residual-free merge/pass outputs from selected depth."""
     fig.clear()
     selected_depth = int(max(0, selected_depth))
@@ -2293,14 +2298,19 @@ def plot_full_result_comparison(fig, conv, pca, rr, manual_depth_groups, axis, s
         )
         groups = (manual_depth_groups or {}).get(target_key, []) or []
         lookup = _entry_lookup_by_label(rr)
+        rr_items = []
         for idx, c in enumerate(groups):
             members = list(c.get("member_labels", c.get("members", [])) or [])
             entries = [lookup[m] for m in members if m in lookup]
             if not entries:
                 continue
             ds = build_combined_dataset(entries, _short_set_label(c, idx), use_child_matrix=False)
-            rr_imgs.append(np.asarray(ds["image"]))
-            rr_specs.append(np.asarray(ds["spectrum"]))
+            mat = np.asarray(ds.get("matrix"), dtype=np.float32)
+            energy = float(np.nansum(mat * mat, dtype=np.float64)) if mat.size else 0.0
+            rr_items.append((energy, np.asarray(ds["image"]), np.asarray(ds["spectrum"]), ds.get("name", f"RR {idx+1}")))
+        rr_items.sort(key=lambda t: t[0], reverse=True)
+        rr_imgs = [t[1] for t in rr_items]
+        rr_specs = [t[2] for t in rr_items]
     except Exception:
         rr_imgs, rr_specs = [], []
 
@@ -2310,7 +2320,7 @@ def plot_full_result_comparison(fig, conv, pca, rr, manual_depth_groups, axis, s
     _plot_result_column(fig, gs, 0, "Conventional NMF", conv_imgs, conv_specs, axis, cmap, maxn=maxn)
     _plot_result_column(fig, gs, 2, "PCA", pca_imgs, pca_specs, axis, cmap, maxn=maxn)
     _plot_result_column(fig, gs, 4, f"D{selected_depth} merge/pass\nwithout residual", rr_imgs, rr_specs, axis, cmap, maxn=maxn)
-    fig.suptitle("Full Result Comparison: Conv NMF vs PCA vs selected-depth merge/pass outputs", fontsize=14)
+    fig.suptitle("Full Result Comparison: Conv NMF vs PCA vs selected-depth merge/pass outputs (rr sorted by energy)", fontsize=14)
     fig.subplots_adjust(left=0.025, right=0.99, top=0.92, bottom=0.05, hspace=0.82, wspace=0.42)
 
 def plot_energy(fig, conv, rr):
@@ -2756,11 +2766,14 @@ class RR2NMFGui(QMainWindow):
         full_page=QWidget(); full_lay=QVBoxLayout(full_page)
         full_ctrl=QHBoxLayout()
         full_ctrl.addWidget(QLabel("Depth N for merge/pass without residual"))
-        self.spin_full_depth=QSpinBox(); self.spin_full_depth.setRange(0,9999); self.spin_full_depth.setValue(0); self.spin_full_depth.valueChanged.connect(self.refresh_views)
+        self.spin_full_depth=QSpinBox(); self.spin_full_depth.setRange(0,9999); self.spin_full_depth.setValue(0)
         full_ctrl.addWidget(self.spin_full_depth)
-        full_ctrl.addWidget(QLabel("Max items"))
-        self.spin_full_max=QSpinBox(); self.spin_full_max.setRange(1,200); self.spin_full_max.setValue(12); self.spin_full_max.valueChanged.connect(self.refresh_views)
-        full_ctrl.addWidget(self.spin_full_max); full_ctrl.addStretch(1)
+        full_ctrl.addWidget(QLabel("Max displayed items"))
+        self.spin_full_max=QSpinBox(); self.spin_full_max.setRange(1,9999); self.spin_full_max.setValue(30)
+        full_ctrl.addWidget(self.spin_full_max)
+        self.btn_refresh_full=QPushButton("Refresh Full Result")
+        self.btn_refresh_full.clicked.connect(self.refresh_full_result_view)
+        full_ctrl.addWidget(self.btn_refresh_full); full_ctrl.addStretch(1)
         full_lay.addLayout(full_ctrl); full_lay.addWidget(PlotPanel(self.canvas_full))
         self.tabs.addTab(full_page,"Full Result")
         self.canvas_energy=Canvas(12,8); self.tabs.addTab(PlotPanel(self.canvas_energy),"Energy Summary")
@@ -3561,6 +3574,33 @@ This does not modify the current rr-NMF/manual tree results.
         self._auto_score_active=False
         self._set_run_buttons_enabled(True); QMessageBox.critical(self,"Analysis failed",err); self.append_log(err)
 
+    def refresh_full_result_view(self):
+        """Redraw only the Full Result tab from cached Conv/PCA/rr results.
+
+        This does not rerun NMF/PCA. It reconstructs residual-free selected-depth
+        merge/pass display items and redraws this one canvas only.  Keeping it
+        separate prevents QSpinBox edits in Full Result from triggering expensive
+        redraws of the full rr-NMF Tree and provenance plots.
+        """
+        if not hasattr(self, "canvas_full"):
+            return
+        try:
+            plot_full_result_comparison(
+                self.canvas_full.fig, self.conv_result, self.pca_result, self.rr_result,
+                getattr(self, "manual_depth_groups", {}), self.roi_axis_info,
+                selected_depth=int(self.spin_full_depth.value()) if hasattr(self, "spin_full_depth") else 0,
+                cmap=self.combo_cmap.currentText() if hasattr(self, "combo_cmap") else "viridis",
+                maxn=int(self.spin_full_max.value()) if hasattr(self, "spin_full_max") else 30,
+                w_downsample_factor=self.spin_auto_w_downsample.value() if hasattr(self, "spin_auto_w_downsample") else 4,
+            )
+            self.canvas_full.set_base(); self.canvas_full.draw()
+        except Exception as e:
+            self.canvas_full.clear()
+            try:
+                self.append_log("Full Result redraw failed: " + str(e))
+            except Exception:
+                pass
+
     def refresh_views(self):
         cmap=self.combo_cmap.currentText() if hasattr(self,"combo_cmap") else "viridis"
         if self.cube is not None:
@@ -3603,18 +3643,7 @@ This does not modify the current rr-NMF/manual tree results.
             else:
                 self.canvas_pca.clear()
         if hasattr(self, "canvas_full"):
-            try:
-                plot_full_result_comparison(
-                    self.canvas_full.fig, self.conv_result, self.pca_result, self.rr_result,
-                    getattr(self, "manual_depth_groups", {}), self.roi_axis_info,
-                    selected_depth=int(self.spin_full_depth.value()) if hasattr(self, "spin_full_depth") else 0,
-                    cmap=self.combo_cmap.currentText() if hasattr(self, "combo_cmap") else "viridis",
-                    maxn=int(self.spin_full_max.value()) if hasattr(self, "spin_full_max") else 12,
-                    w_downsample_factor=self.spin_auto_w_downsample.value() if hasattr(self, "spin_auto_w_downsample") else 4,
-                )
-                self.canvas_full.set_base(); self.canvas_full.draw()
-            except Exception:
-                self.canvas_full.clear()
+            self.refresh_full_result_view()
         plot_energy(self.canvas_energy.fig,self.conv_result,self.rr_result); self.canvas_energy.set_base(); self.canvas_energy.draw()
         self.refresh_tables(); self.refresh_rr_component_list()
 
@@ -3847,6 +3876,47 @@ This does not modify the current rr-NMF/manual tree results.
         except Exception as e:
             QMessageBox.critical(self,"Combined rr-NMF failed",str(e)); self.append_log(traceback.format_exc())
 
+    def collect_residual_free_mergepass_sources(self):
+        """Collect rr-NMF merge/pass spectra rebuilt without residual/r.
+
+        These are interpretation sources only.  For every merge/pass group made from
+        source depth D and stored under target key D+1, each output is rebuilt as
+        sum(W_i H_i) from the selected source components.  No residual/r term is
+        added, so the spectra correspond to the pure merged/pass component content.
+        """
+        out = []
+        rr = getattr(self, "rr_result", None)
+        groups_by_depth = getattr(self, "manual_depth_groups", {}) or {}
+        if rr is None or not groups_by_depth:
+            return out
+        lookup = _entry_lookup_by_label(rr)
+        for target_key, groups in sorted(groups_by_depth.items()):
+            try:
+                tk = int(target_key)
+            except Exception:
+                tk = target_key
+            source_depth = int(tk) - 1 if isinstance(tk, int) else tk
+            for idx, c in enumerate(groups or []):
+                members = list(c.get("member_labels", c.get("members", [])) or [])
+                entries = [lookup[m] for m in members if m in lookup]
+                if not entries:
+                    continue
+                try:
+                    ds = build_combined_dataset(entries, _short_set_label(c, idx), use_child_matrix=False)
+                except Exception:
+                    continue
+                label = f"rr Merge/Pass no-R D{source_depth}->{tk} {idx + 1}: {_short_set_label(c, idx)}"
+                out.append({
+                    "label": label,
+                    "spectrum": np.asarray(ds.get("spectrum"), dtype=np.float64),
+                    "axis": self.roi_axis_info,
+                    "image": ds.get("image", None),
+                    "kind": "rr_mergepass_noR",
+                    "pair_key": None,
+                    "source_group": "rr-NMF (Depth Merge/Pass Results)",
+                })
+        return out
+
     def collect_spectrum_sources(self):
         sources = []
         if self.cube is not None:
@@ -3887,6 +3957,7 @@ This does not modify the current rr-NMF/manual tree results.
                             "axis": self.roi_axis_info,
                             "image": wmap,
                             "kind": "basis",
+                            "source_group": "rr-NMF (Depth Results)",
                             "pair_key": pair_key,
                         })
                         if X_for_weight is not None:
@@ -3896,6 +3967,7 @@ This does not modify the current rr-NMF/manual tree results.
                                 "axis": self.roi_axis_info,
                                 "image": wmap,
                                 "kind": "weighted",
+                                "source_group": "rr-NMF (Depth Results)",
                                 "pair_key": pair_key,
                             })
 
@@ -3909,6 +3981,7 @@ This does not modify the current rr-NMF/manual tree results.
                     "axis": self.roi_axis_info,
                     "image": wmap,
                     "kind": "basis",
+                    "source_group": "Conventional NMF",
                     "pair_key": pair_key,
                 })
                 if X_for_weight is not None:
@@ -3918,6 +3991,7 @@ This does not modify the current rr-NMF/manual tree results.
                         "axis": self.roi_axis_info,
                         "image": wmap,
                         "kind": "weighted",
+                        "source_group": "Conventional NMF",
                         "pair_key": pair_key,
                     })
 
@@ -3930,30 +4004,78 @@ This does not modify the current rr-NMF/manual tree results.
                     "axis": self.roi_axis_info,
                     "image": wmap,
                     "kind": "pca",
+                    "source_group": "PCA",
                     "pair_key": None,
                 })
 
-        for d, sets in sorted((getattr(self, "manual_depth_groups", {}) or {}).items()):
-            for idx, combined in enumerate(sets):
-                sources.append({
-                    "label": f"Combined D{int(d)}.{idx + 1}: {combined.get('name', 'Combined')}",
-                    "spectrum": np.asarray(combined["spectrum"]),
-                    "axis": self.roi_axis_info,
-                    "image": combined.get("image", None),
-                    "kind": "combined",
-                    "pair_key": None,
-                })
+        # Residual-free merge/pass spectra are listed separately from ordinary rr-NMF depth results.
+        # They are rebuilt as sum(W_i H_i), without residual/r, for cleaner EDS/EELS interpretation.
+        sources.extend(self.collect_residual_free_mergepass_sources())
         return sources
 
 
+    def _populate_spectrum_source_list(self, list_widget, sources):
+        list_widget.clear()
+        groups = [
+            "Raw",
+            "Conventional NMF",
+            "PCA",
+            "rr-NMF (Depth Results)",
+            "rr-NMF (Depth Merge/Pass Results)",
+        ]
+        used = set()
+        for group in groups:
+            idxs = [i for i, s in enumerate(sources) if s.get("source_group", "Raw") == group]
+            if not idxs:
+                continue
+            header = QListWidgetItem(f"--- {group} ---")
+            header.setFlags(Qt.NoItemFlags)
+            try:
+                header.setForeground(Qt.darkBlue)
+            except Exception:
+                pass
+            list_widget.addItem(header)
+            for i in idxs:
+                item = QListWidgetItem(sources[i]["label"])
+                item.setData(Qt.UserRole, int(i))
+                list_widget.addItem(item)
+                used.add(i)
+        other = [i for i in range(len(sources)) if i not in used]
+        if other:
+            header = QListWidgetItem("--- Other ---")
+            header.setFlags(Qt.NoItemFlags)
+            list_widget.addItem(header)
+            for i in other:
+                item = QListWidgetItem(sources[i]["label"])
+                item.setData(Qt.UserRole, int(i))
+                list_widget.addItem(item)
+
+    def _selected_spectrum_source(self, list_widget):
+        item = list_widget.currentItem()
+        if item is None:
+            return None
+        idx = item.data(Qt.UserRole)
+        if idx is None:
+            return None
+        try:
+            idx = int(idx)
+        except Exception:
+            return None
+        if idx < 0 or idx >= len(getattr(self, "sources", [])):
+            return None
+        return self.sources[idx]
+
     def refresh_spectrum_sources(self):
-        self.sources=self.collect_spectrum_sources()
-        if hasattr(self,"list_eds_src"):
-            self.list_eds_src.clear(); self.list_eels_src.clear()
-            for s in self.sources:
-                self.list_eds_src.addItem(s["label"]); self.list_eels_src.addItem(s["label"])
-            if self.sources:
-                self.list_eds_src.setCurrentRow(0); self.list_eels_src.setCurrentRow(0)
+        self.sources = self.collect_spectrum_sources()
+        if hasattr(self, "list_eds_src"):
+            self._populate_spectrum_source_list(self.list_eds_src, self.sources)
+            self._populate_spectrum_source_list(self.list_eels_src, self.sources)
+            # Select first real source item, not a header.
+            for lw in (self.list_eds_src, self.list_eels_src):
+                for row in range(lw.count()):
+                    if lw.item(row).data(Qt.UserRole) is not None:
+                        lw.setCurrentRow(row)
+                        break
 
 
     def open_eds_periodic_selector(self):
@@ -4030,15 +4152,14 @@ This does not modify the current rr-NMF/manual tree results.
         return None
 
     def run_eds_analysis(self):
-        row = self.list_eds_src.currentRow()
-        if row < 0 or row >= len(self.sources):
+        src = self._selected_spectrum_source(self.list_eds_src)
+        if src is None:
             QMessageBox.warning(self, "No spectrum", "Select a spectrum source.")
             return
         if not self.eds_elements:
             QMessageBox.warning(self, "No elements", "Select elements first.")
             return
 
-        src = self.sources[row]
         spec = np.asarray(src["spectrum"], dtype=np.float64)
         x = energy_axis_as_keV(src["axis"], len(spec))
         peaks = detect_simple_peaks(x, spec, self.spin_eds_prom.value(), self.spin_eds_dist.value())
@@ -4067,15 +4188,14 @@ This does not modify the current rr-NMF/manual tree results.
         self.dataframe_to_table(pd.DataFrame(hits), self.table_eds)
 
     def run_eels_analysis(self):
-        row = self.list_eels_src.currentRow()
-        if row < 0 or row >= len(self.sources):
+        src = self._selected_spectrum_source(self.list_eels_src)
+        if src is None:
             QMessageBox.warning(self, "No spectrum", "Select a spectrum source.")
             return
 
         groups = [i.text() for i in self.list_eels_groups.selectedItems()] or ["All"]
         elements = list(getattr(self, "eels_elements", []))
 
-        src = self.sources[row]
         spec = np.asarray(src["spectrum"], dtype=np.float64)
         x = energy_axis_as_eV(src["axis"], len(spec))
         features = detect_simple_peaks(x, spec, self.spin_eels_prom.value(), self.spin_eels_dist.value())
