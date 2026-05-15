@@ -1763,6 +1763,51 @@ def plot_auto_merge_w_provenance(fig, rr=None, manual_depth_groups=None, cmap="v
     fig.subplots_adjust(left=0.012, right=0.988, top=0.935, bottom=0.045)
 
 
+class Canvas(FigureCanvas):
+    def __init__(self, w=12, h=8):
+        self.fig = Figure(figsize=(w,h), dpi=100)
+        super().__init__(self.fig)
+        self.base = (w,h)
+        self.zoom = 1.0
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.resize_canvas()
+    def resize_canvas(self):
+        w,h = self.fig.get_size_inches()
+        self.setFixedSize(int(w*100), int(h*100))
+    def draw(self, *a, **k):
+        self.resize_canvas()
+        super().draw(*a, **k)
+    def set_base(self):
+        self.base = tuple(self.fig.get_size_inches())
+        self.zoom = 1.0
+    def zoom_in(self): self.zoom *= 1.25; self.apply_zoom()
+    def zoom_out(self): self.zoom /= 1.25; self.apply_zoom()
+    def reset_zoom(self): self.zoom = 1.0; self.apply_zoom()
+    def apply_zoom(self):
+        self.zoom = max(0.2, min(8, self.zoom))
+        self.fig.set_size_inches(self.base[0]*self.zoom, self.base[1]*self.zoom, forward=True)
+        self.draw()
+    def clear(self): self.fig.clear(); self.draw()
+
+
+class PlotPanel(QWidget):
+    def __init__(self, canvas):
+        super().__init__()
+        self.canvas = canvas
+        self.scroll = QScrollArea()
+        self.scroll.setWidget(canvas)
+        self.scroll.setWidgetResizable(False)
+        tb = QHBoxLayout()
+        for txt, cb in [("Zoom +", canvas.zoom_in), ("Zoom -", canvas.zoom_out), ("Reset", canvas.reset_zoom)]:
+            b = QPushButton(txt); b.clicked.connect(cb); tb.addWidget(b)
+        tb.addStretch(1)
+        lay = QVBoxLayout(self)
+        lay.addLayout(tb)
+        lay.addWidget(self.scroll)
+
+
+
+
 def plot_raw(
     fig,
     cube,
