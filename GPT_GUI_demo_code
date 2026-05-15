@@ -32,7 +32,7 @@ import matplotlib
 matplotlib.use("Qt5Agg")
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Rectangle, FancyArrowPatch
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
@@ -1568,14 +1568,14 @@ def _auto_pair_stats_for_labels(pair_rows, labels):
 
 
 def plot_auto_merge_w_provenance(fig, rr=None, manual_depth_groups=None, cmap="viridis"):
-    """Depth-wise Auto-Step provenance tree.
+    """Depth-wise Auto-Step provenance tree with compact, stable arrows.
 
-    The view uses the same left-to-right depth flow as the rr-NMF tree:
-        D0 W results -> merge/pass outputs -> D1 W results -> ... -> final outputs.
+    Flow:
+        Dk W results  ->  Dk merge/pass outputs  ->  D(k+1) W results
 
-    Merge/pass outputs are placed BETWEEN depth columns, not under the source
-    depth.  This keeps arrows readable and makes PASS identity checks easier.
-    Thumbnails are W-only provenance images.
+    The arrows are drawn in figure coordinates from thumbnail edge to thumbnail
+    edge, instead of relying on axis data coordinates.  This avoids reversed or
+    misplaced arrows when merge/pass columns are inserted between depths.
     """
     fig.clear()
     manual_depth_groups = manual_depth_groups or {}
@@ -1588,9 +1588,7 @@ def plot_auto_merge_w_provenance(fig, rr=None, manual_depth_groups=None, cmap="v
         return
 
     max_result_depth = max(0, len(rr_depths) - 1)
-    max_output_key = max([0] + [int(k) for k in manual_depth_groups.keys()])
-    # Result depths are D0..Dmax.  Output key k means source D(k-1) output.
-    max_flow_index = max(max_result_depth, max_output_key)
+    output_keys = sorted([int(k) for k, v in manual_depth_groups.items() if v])
 
     # Precollect W results.
     comp_by_depth = {}
@@ -1601,69 +1599,111 @@ def plot_auto_merge_w_provenance(fig, rr=None, manual_depth_groups=None, cmap="v
                 comps.append({"label": f"D{d} N{ni} C{ci}", "map": wm, "node": ni, "component": ci})
         comp_by_depth[d] = comps
 
-    # Layout: result columns at x = 0, 2, 4...; merge/pass output columns at x = 1, 3, 5...
-    result_depths = list(range(max_result_depth + 1))
-    output_keys = sorted([int(k) for k, v in manual_depth_groups.items() if v])
+    # Build compact ordered columns.  Result columns and merge/pass columns are
+    # interleaved, but the physical figure width per column is intentionally
+    # modest so adjacent depth columns stay visually close.
     xslots = []
-    for d in result_depths:
-        xslots.append(("result", d, 2 * d))
+    for d in range(max_result_depth + 1):
+        xslots.append(("result", d))
         if (d + 1) in output_keys:
-            xslots.append(("output", d + 1, 2 * d + 1))
-    # Show final output key max_depth+1 to the right of the final result if present.
+            xslots.append(("output", d + 1))
     for k in output_keys:
-        if k > max_result_depth and ("output", k, 2 * (k - 1) + 1) not in xslots:
-            xslots.append(("output", k, 2 * (k - 1) + 1))
-    xslots = sorted(xslots, key=lambda t: t[2])
-    slot_values = [t[2] for t in xslots] or [0]
-    xmin, xmax = min(slot_values), max(slot_values)
-    span = max(1, xmax - xmin)
+        if k > max_result_depth and ("output", k) not in xslots:
+            xslots.append(("output", k))
 
-    def x_from_slot(slot):
-        return 0.05 + 0.90 * ((slot - xmin) / span if span > 0 else 0.5)
+    ncols = max(1, len(xslots))
+    col_index = {item: i for i, item in enumerate(xslots)}
 
     max_items = 1
-    for d in result_depths:
+    for d in range(max_result_depth + 1):
         max_items = max(max_items, len(comp_by_depth.get(d, [])))
     for k in output_keys:
         out_sets = [c for c in (manual_depth_groups.get(k, []) or []) if c.get("auto_score", False)]
         max_items = max(max_items, len(out_sets))
 
-    fig.set_size_inches(max(28, len(xslots) * 4.0), max(9.0, 0.62 * max_items + 3.2), forward=True)
+    # More compact than v7.7: the previous 4.0 inch/column caused depth columns
+    # to drift far apart and made arrows look detached from thumbnails.
+    fig_w = max(18.0, min(46.0, ncols * 2.45 + 3.0))
+    fig_h = max(8.0, 0.58 * max_items + 2.9)
+    fig.set_size_inches(fig_w, fig_h, forward=True)
     ax = fig.add_subplot(111)
     ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.axis("off")
 
-    thumb_w = min(0.066, 0.88 / max(6, len(xslots)))
-    thumb_h = min(0.082, 0.80 / max(1, max_items))
-    y_top, y_bottom = 0.88, 0.12
-    pos_comp = {}
-    pos_out = {}
+    left_margin, right_margin = 0.045, 0.045
+    usable_w = 1.0 - left_margin - right_margin
+    def x_for(item):
+        i = col_index[item]
+        if ncols == 1:
+            return 0.5
+        return left_margin + usable_w * (i / (ncols - 1))
 
-    # Plot result columns.
-    for d in result_depths:
-        x = x_from_slot(2 * d)
-        ax.text(x, 0.975, f"Depth {d}\nW results", ha="center", va="top", fontsize=12.5, fontweight="bold", transform=ax.transAxes)
+    # Keep thumbnails readable but prevent overlap when many columns exist.
+    thumb_w = min(0.092, usable_w / max(5.0, ncols * 1.35))
+    thumb_h = min(0.088, 0.78 / max(1, max_items))
+    y_top, y_bottom = 0.875, 0.125
+
+    pos_comp = {}     # label -> (x, y)
+    pos_out = {}      # (key, gi) -> (x, y)
+
+    def add_thumb(x, y, img, title, fontsize=7.6):
+        iax = inset_axes(
+            ax, width="100%", height="100%",
+            bbox_to_anchor=(x - thumb_w/2, y - thumb_h/2, thumb_w, thumb_h),
+            bbox_transform=ax.transAxes, borderpad=0
+        )
+        iax.imshow(img, cmap=cmap, origin="upper", aspect="equal")
+        iax.set_xticks([]); iax.set_yticks([])
+        iax.set_title(title, fontsize=fontsize, pad=1.2)
+        return iax
+
+    def edge_point(x, y, side):
+        # Side-specific edge points in the parent axes coordinate system.
+        if side == "right":
+            return (x + thumb_w * 0.505, y)
+        if side == "left":
+            return (x - thumb_w * 0.505, y)
+        return (x, y)
+
+    def draw_arrow(x0, y0, x1, y1, color="0.15", lw=1.55, alpha=0.84, rad=0.0):
+        # Always draw left-to-right when x1>x0; if labels ever arrive reversed,
+        # this still uses exact supplied start/end, making direction explicit.
+        arr = FancyArrowPatch(
+            (x0, y0), (x1, y1),
+            transform=ax.transAxes,
+            arrowstyle="-|>", mutation_scale=11.5,
+            linewidth=lw, color=color, alpha=alpha,
+            shrinkA=0, shrinkB=0,
+            connectionstyle=f"arc3,rad={rad}"
+        )
+        ax.add_patch(arr)
+
+    # Result columns.
+    for d in range(max_result_depth + 1):
+        item = ("result", d)
+        x = x_for(item)
+        ax.text(x, 0.976, f"Depth {d}\nW results", ha="center", va="top", fontsize=11.2,
+                fontweight="bold", transform=ax.transAxes)
         comps = comp_by_depth.get(d, [])
         ys = np.linspace(y_top, y_bottom, len(comps)) if len(comps) > 1 else np.array([(y_top + y_bottom) / 2])
-        for k, comp in enumerate(comps):
-            y = float(ys[k])
+        for idx, comp in enumerate(comps):
+            y = float(ys[idx])
             lab = comp["label"]
             pos_comp[lab] = (x, y)
-            iax = inset_axes(ax, width="100%", height="100%", bbox_to_anchor=(x-thumb_w/2, y-thumb_h/2, thumb_w, thumb_h), bbox_transform=ax.transAxes, borderpad=0)
-            iax.imshow(comp["map"], cmap=cmap, origin="upper", aspect="equal")
-            iax.set_xticks([]); iax.set_yticks([])
-            iax.set_title(lab.replace(" ", ""), fontsize=7.8, pad=1.5)
+            add_thumb(x, y, comp["map"], lab.replace(" ", ""), fontsize=7.3)
 
-    # Plot merge/pass columns between source and next result depth.
+    # Merge/pass columns and arrows.
     for key in output_keys:
         out_sets = [c for c in (manual_depth_groups.get(key, []) or []) if c.get("auto_score", False)]
         if not out_sets:
             continue
         source_depth = key - 1
-        x = x_from_slot(2 * source_depth + 1)
-        title = f"D{source_depth} → D{key}\nmerge/pass"
-        if key > max_result_depth:
-            title = f"D{source_depth}\nFINAL merge/pass"
-        ax.text(x, 0.975, title, ha="center", va="top", fontsize=12.0, fontweight="bold", transform=ax.transAxes)
+        item = ("output", key)
+        if item not in col_index:
+            continue
+        x = x_for(item)
+        title = f"D{source_depth} → D{key}\nmerge/pass" if key <= max_result_depth else f"D{source_depth}\nFINAL merge/pass"
+        ax.text(x, 0.976, title, ha="center", va="top", fontsize=10.7,
+                fontweight="bold", transform=ax.transAxes)
         ys = np.linspace(y_top, y_bottom, len(out_sets)) if len(out_sets) > 1 else np.array([(y_top + y_bottom) / 2])
         for gi, c in enumerate(out_sets):
             y = float(ys[gi])
@@ -1679,76 +1719,48 @@ def plot_auto_merge_w_provenance(fig, rr=None, manual_depth_groups=None, cmap="v
                 else:
                     gimg = c.get("image", None)
             if gimg is not None:
-                gax = inset_axes(ax, width="100%", height="100%", bbox_to_anchor=(x-thumb_w/2, y-thumb_h/2, thumb_w, thumb_h), bbox_transform=ax.transAxes, borderpad=0)
-                gax.imshow(gimg, cmap=cmap, origin="upper", aspect="equal")
-                gax.set_xticks([]); gax.set_yticks([])
-                gax.set_title(("PASS" if is_pass else "MERGE") + f" G{gi+1}", fontsize=8.0, pad=1.5)
+                add_thumb(x, y, gimg, ("PASS" if is_pass else "MERGE") + f" G{gi+1}", fontsize=7.7)
+
+            # Larger labels, but placed close to merge/pass thumbnail to avoid
+            # stealing arrow space.
             if is_pass:
                 metric = "PASS"
             else:
-                metric = f"S {100*stats.get('score_mean', np.nan):.1f}\nW {100*stats.get('w_corr_down_mean', np.nan):.1f}/H {100*stats.get('h_corr_mean', stats.get('corr_mean', np.nan)):.1f}"
-            ax.text(x + thumb_w*0.72, y, metric, fontsize=8.6, ha="left", va="center", transform=ax.transAxes,
-                    bbox=dict(boxstyle="round,pad=0.10", fc="white", ec="0.65", alpha=0.82))
-            # source component -> merge/pass output
-            for mlab in members:
+                metric = (
+                    f"S {100*stats.get('score_mean', np.nan):.1f}\n"
+                    f"W {100*stats.get('w_corr_down_mean', np.nan):.1f}/"
+                    f"H {100*stats.get('h_corr_mean', stats.get('corr_mean', np.nan)):.1f}"
+                )
+            ax.text(x + thumb_w*0.58, y, metric, fontsize=8.2, ha="left", va="center",
+                    transform=ax.transAxes,
+                    bbox=dict(boxstyle="round,pad=0.10", fc="white", ec="0.65", alpha=0.86))
+
+            # source component -> merge/pass output.  End exactly at left edge of
+            # output thumbnail, start exactly at right edge of source thumbnail.
+            for m_i, mlab in enumerate(members):
                 if mlab in pos_comp:
                     sx, sy = pos_comp[mlab]
-                    ax.annotate("", xy=(x-thumb_w*0.58, y), xytext=(sx+thumb_w*0.58, sy), xycoords=ax.transAxes, textcoords=ax.transAxes,
-                                arrowprops=dict(arrowstyle="-|>,head_length=0.9,head_width=0.45", lw=2.0, alpha=0.82, color="0.20"))
-            # merge/pass output -> next-depth result node.  The gi-th output becomes node gi at depth key.
+                    x0, y0 = edge_point(sx, sy, "right")
+                    x1, y1 = edge_point(x, y, "left")
+                    rad = 0.0 if len(members) <= 1 else (m_i - (len(members)-1)/2) * 0.035
+                    draw_arrow(x0, y0, x1, y1, color="0.20", lw=1.5, alpha=0.78, rad=rad)
+
+            # merge/pass output -> next-depth result node.  The gi-th output is
+            # the input node gi at depth key, so connect to all Dkey Ngi C* maps.
             if key <= max_result_depth:
-                target_labels = [lab for lab in pos_comp if lab.startswith(f"D{key} N{gi} C")]
-                for tlab in target_labels:
+                target_labels = sorted([lab for lab in pos_comp if lab.startswith(f"D{key} N{gi} C")])
+                for t_i, tlab in enumerate(target_labels):
                     tx, ty = pos_comp[tlab]
-                    ax.annotate("", xy=(tx-thumb_w*0.58, ty), xytext=(x+thumb_w*0.58, y), xycoords=ax.transAxes, textcoords=ax.transAxes,
-                                arrowprops=dict(arrowstyle="-|>,head_length=0.9,head_width=0.45", lw=2.1, alpha=0.86, color="0.10"))
+                    x0, y0 = edge_point(x, y, "right")
+                    x1, y1 = edge_point(tx, ty, "left")
+                    rad = 0.0 if len(target_labels) <= 1 else (t_i - (len(target_labels)-1)/2) * 0.025
+                    draw_arrow(x0, y0, x1, y1, color="0.05", lw=1.65, alpha=0.82, rad=rad)
 
-    ax.text(0.01, 0.025, "W-only provenance tree. Final merge/pass outputs are shown after the last recursive depth and do not add residual/r.", fontsize=8, ha="left", va="bottom", transform=ax.transAxes)
-    fig.suptitle("Auto-Step merge provenance: depth results → merge/pass outputs → next-depth results", fontsize=14)
-    fig.subplots_adjust(left=0.015, right=0.985, top=0.94, bottom=0.04)
-
-
-class Canvas(FigureCanvas):
-    def __init__(self, w=12, h=8):
-        self.fig = Figure(figsize=(w,h), dpi=100)
-        super().__init__(self.fig)
-        self.base = (w,h)
-        self.zoom = 1.0
-        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.resize_canvas()
-    def resize_canvas(self):
-        w,h = self.fig.get_size_inches()
-        self.setFixedSize(int(w*100), int(h*100))
-    def draw(self, *a, **k):
-        self.resize_canvas()
-        super().draw(*a, **k)
-    def set_base(self):
-        self.base = tuple(self.fig.get_size_inches())
-        self.zoom = 1.0
-    def zoom_in(self): self.zoom *= 1.25; self.apply_zoom()
-    def zoom_out(self): self.zoom /= 1.25; self.apply_zoom()
-    def reset_zoom(self): self.zoom = 1.0; self.apply_zoom()
-    def apply_zoom(self):
-        self.zoom = max(0.2, min(8, self.zoom))
-        self.fig.set_size_inches(self.base[0]*self.zoom, self.base[1]*self.zoom, forward=True)
-        self.draw()
-    def clear(self): self.fig.clear(); self.draw()
-
-
-class PlotPanel(QWidget):
-    def __init__(self, canvas):
-        super().__init__()
-        self.canvas = canvas
-        self.scroll = QScrollArea()
-        self.scroll.setWidget(canvas)
-        self.scroll.setWidgetResizable(False)
-        tb = QHBoxLayout()
-        for txt, cb in [("Zoom +", canvas.zoom_in), ("Zoom -", canvas.zoom_out), ("Reset", canvas.reset_zoom)]:
-            b = QPushButton(txt); b.clicked.connect(cb); tb.addWidget(b)
-        tb.addStretch(1)
-        lay = QVBoxLayout(self)
-        lay.addLayout(tb)
-        lay.addWidget(self.scroll)
+    ax.text(0.012, 0.025,
+            "W-only provenance tree. Final merge/pass outputs are shown after the last recursive depth and do not add residual/r.",
+            fontsize=8, ha="left", va="bottom", transform=ax.transAxes)
+    fig.suptitle("Auto-Step merge provenance: depth results → merge/pass outputs → next-depth results", fontsize=13.2)
+    fig.subplots_adjust(left=0.012, right=0.988, top=0.935, bottom=0.045)
 
 
 def plot_raw(
