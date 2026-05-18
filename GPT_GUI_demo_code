@@ -2262,7 +2262,7 @@ def _plot_result_column(fig, gs, col0, title, images, spectra, axis, cmap, maxn=
         r = i + 1
         ax = fig.add_subplot(gs[r, col0])
         sp = fig.add_subplot(gs[r, col0 + 1])
-        im = ax.imshow(images[i], cmap=cmap, origin="upper", aspect="equal")
+        im = ax.imshow(images[i], cmap=cmap, origin="upper", aspect="equal", vmin=image_vmin, vmax=image_vmax)
         ax.set_title(f"#{i+1}", fontsize=8)
         ax.set_xticks([]); ax.set_yticks([])
         spec = np.asarray(spectra[i])
@@ -2287,9 +2287,11 @@ def plot_full_result_comparison(fig, conv, pca, rr, manual_depth_groups, axis, s
 
     pca_imgs, pca_specs = [], []
     if pca is not None:
-        pca_imgs = list(getattr(pca, "W_images", []) or [])
+        # PCA score images are signed by definition. For display-only comparison,
+        # this option clips negative score pixels to 0 without modifying the cached PCA result.
+        pca_imgs = [np.asarray(img, dtype=np.float64).copy() for img in (getattr(pca, "W_images", []) or [])]
         if pca_clip_negative:
-            pca_imgs = [np.clip(np.asarray(img), 0, None) for img in pca_imgs]
+            pca_imgs = [np.maximum(img, 0.0) for img in pca_imgs]
         pca_specs = list(getattr(pca, "H_spectra", []) or [])
 
     rr_imgs, rr_specs = [], []
@@ -2320,7 +2322,8 @@ def plot_full_result_comparison(fig, conv, pca, rr, manual_depth_groups, axis, s
     fig.set_size_inches(22, max(8, nrows * 2.25), forward=True)
     gs = fig.add_gridspec(nrows, 6, width_ratios=[1.0, 1.35, 1.0, 1.35, 1.0, 1.35])
     _plot_result_column(fig, gs, 0, "Conventional NMF", conv_imgs, conv_specs, axis, cmap, maxn=maxn)
-    _plot_result_column(fig, gs, 2, "PCA", pca_imgs, pca_specs, axis, cmap, maxn=maxn)
+    pca_title = "PCA\nnegative scores clipped to 0" if pca_clip_negative else "PCA"
+    _plot_result_column(fig, gs, 2, pca_title, pca_imgs, pca_specs, axis, cmap, maxn=maxn, image_vmin=0.0 if pca_clip_negative else None)
     _plot_result_column(fig, gs, 4, f"D{selected_depth} merge/pass\nwithout residual", rr_imgs, rr_specs, axis, cmap, maxn=maxn)
     fig.suptitle("Full Result Comparison: Conv NMF vs PCA vs selected-depth merge/pass outputs (rr sorted by energy)", fontsize=14)
     fig.subplots_adjust(left=0.025, right=0.99, top=0.92, bottom=0.05, hspace=0.82, wspace=0.42)
@@ -2339,6 +2342,36 @@ def plot_energy(fig, conv, rr):
     fig.tight_layout()
 
 
+
+
+def _draw_edge_analysis_windows(ax, edge_windows, ymin, span, fontsize=9):
+    """Draw EELS edge-analysis windows on a spectrum axis.
+
+    pre-edge windows are blue; integration windows are orange; selected edge
+    onsets are red.  These overlays are intentionally limited to user-selected
+    edges, not all database candidates.
+    """
+    if not edge_windows:
+        return
+    y_text = ymin + 0.96 * span
+    for win in edge_windows:
+        try:
+            edge = str(win.get("edge", "edge"))
+            edge_e = float(win.get("edge_eV", float("nan")))
+            pre0, pre1 = float(win.get("pre0")), float(win.get("pre1"))
+            int0, int1 = float(win.get("int0")), float(win.get("int1"))
+        except Exception:
+            continue
+        if pre1 > pre0:
+            ax.axvspan(pre0, pre1, color="#1f77b4", alpha=0.10, lw=0)
+            ax.text((pre0 + pre1) / 2.0, ymin + 0.10 * span, f"{edge} pre", ha="center", va="bottom", fontsize=max(6, fontsize-2), color="#1f77b4")
+        if int1 > int0:
+            ax.axvspan(int0, int1, color="#ff7f0e", alpha=0.13, lw=0)
+            ax.text((int0 + int1) / 2.0, ymin + 0.18 * span, f"{edge} int", ha="center", va="bottom", fontsize=max(6, fontsize-2), color="#b85c00")
+        if edge_e == edge_e:
+            ax.axvline(edge_e, lw=1.9, alpha=0.90, color="#d62728")
+            ax.text(edge_e, y_text, edge, rotation=90, fontsize=fontsize, color="#d62728", va="top", ha="center")
+
 def plot_interpretation(
     fig,
     energy,
@@ -2351,6 +2384,8 @@ def plot_interpretation(
     cmap="viridis",
     matched_markers=None,
     detected_features=None,
+    edge_windows=None,
+    show_detected=False,
 ):
     fig.clear()
     fig.set_size_inches(20.0, 7.8, forward=True)
@@ -2374,7 +2409,9 @@ def plot_interpretation(
     ymax = float(np.nanmax(y)) if y.size else 1.0
     span = max(1e-12, ymax - ymin)
 
-    # Candidate edges: light gray, thin.
+    _draw_edge_analysis_windows(ax, edge_windows, ymin, span, fontsize=12)
+
+    # Candidate edges: light gray, thin. Keep these sparse; selected analysis windows are drawn above.
     for x, label in (candidate_markers or [])[:200]:
         if energy.size and (x < float(np.nanmin(energy)) or x > float(np.nanmax(energy))):
             continue
@@ -2388,11 +2425,13 @@ def plot_interpretation(
         ax.axvline(x, lw=1.8, alpha=0.85, color="#d62728")
         ax.text(x, ymin + span * 0.98, label, rotation=90, fontsize=13, color="#d62728", va="top", ha="center")
 
-    # Detected features: dark dashed lines.
-    for x in (detected_features or [])[:100]:
-        if energy.size and (x < float(np.nanmin(energy)) or x > float(np.nanmax(energy))):
-            continue
-        ax.axvline(x, lw=1.0, alpha=0.45, color="0.15", linestyle="--")
+    # Detected peak features can be visually noisy, so they are optional.
+    if show_detected:
+        if show_detected:
+            for x in (detected_features or [])[:100]:
+                if energy.size and (x < float(np.nanmin(energy)) or x > float(np.nanmax(energy))):
+                    continue
+                ax.axvline(x, lw=1.0, alpha=0.45, color="0.15", linestyle="--")
 
     ax.set_title(title, fontsize=20)
     ax.set_xlabel(xlabel, fontsize=18)
@@ -2417,6 +2456,8 @@ def plot_stacked_basis_weighted(
     source_image=None,
     cmap="viridis",
     detected_features=None,
+    edge_windows=None,
+    show_detected=False,
 ):
     fig.clear()
     fig.set_size_inches(20.0, 8.8, forward=True)
@@ -2444,7 +2485,8 @@ def plot_stacked_basis_weighted(
         ymin = float(np.nanmin(y)) if y.size else 0.0
         ymax = float(np.nanmax(y)) if y.size else 1.0
         span = max(1e-12, ymax - ymin)
-        for x, label in (candidate_markers or [])[:200]:
+        _draw_edge_analysis_windows(ax, edge_windows, ymin, span, fontsize=10)
+        for x, label in (candidate_markers or [])[:80]:
             if energy.size and (x < float(np.nanmin(energy)) or x > float(np.nanmax(energy))):
                 continue
             ax.axvline(x, lw=0.8, alpha=0.30, color="0.65")
@@ -2524,7 +2566,7 @@ def _safe_var_name(name: str, maxlen: int = 96) -> str:
     return name[:maxlen]
 
 
-def plot_multi_source_interpretation(fig, sources, candidate_markers, matched_markers, title, xlabel, norm="none", cmap="viridis", detected_by_source=None):
+def plot_multi_source_interpretation(fig, sources, candidate_markers, matched_markers, title, xlabel, norm="none", cmap="viridis", detected_by_source=None, edge_windows=None, show_detected=False):
     """Stack multiple source W/images and spectra for EDS/EELS comparison."""
     fig.clear()
     sources = list(sources or [])
@@ -2553,16 +2595,18 @@ def plot_multi_source_interpretation(fig, sources, candidate_markers, matched_ma
         ymin = float(np.nanmin(y)) if y.size else 0.0
         ymax = float(np.nanmax(y)) if y.size else 1.0
         span = max(1e-12, ymax-ymin)
-        for xv, lab in (candidate_markers or [])[:120]:
+        _draw_edge_analysis_windows(ax_sp, edge_windows, ymin, span, fontsize=8)
+        for xv, lab in (candidate_markers or [])[:60]:
             if x.size and (xv < np.nanmin(x) or xv > np.nanmax(x)): continue
             ax_sp.axvline(xv, lw=0.8, color="0.65", alpha=0.30)
         for xv, lab in (matched_markers or [])[:80]:
             if x.size and (xv < np.nanmin(x) or xv > np.nanmax(x)): continue
             ax_sp.axvline(xv, lw=1.4, color="#d62728", alpha=0.80)
             ax_sp.text(xv, ymin+0.94*span, lab, rotation=90, fontsize=7, color="#d62728", va="top", ha="center")
-        for xv in (detected_by_source or {}).get(i, [])[:80]:
-            if x.size and (xv < np.nanmin(x) or xv > np.nanmax(x)): continue
-            ax_sp.axvline(xv, lw=0.9, color="0.15", linestyle="--", alpha=0.35)
+        if show_detected:
+            for xv in (detected_by_source or {}).get(i, [])[:80]:
+                if x.size and (xv < np.nanmin(x) or xv > np.nanmax(x)): continue
+                ax_sp.axvline(xv, lw=0.9, color="0.15", linestyle="--", alpha=0.35)
         ax_sp.grid(True, alpha=0.25)
         ax_sp.set_ylabel("I", fontsize=9)
         if i == n-1:
@@ -2835,11 +2879,14 @@ class RR2NMFGui(QMainWindow):
         full_ctrl.addWidget(QLabel("Depth N for merge/pass without residual"))
         self.combo_full_depth=QComboBox()
         self.combo_full_depth.addItem("D0", 0)
+        self.combo_full_depth.currentIndexChanged.connect(lambda *_: self.refresh_full_result_view())
         full_ctrl.addWidget(self.combo_full_depth)
         full_ctrl.addWidget(QLabel("Max displayed items"))
         self.spin_full_max=QSpinBox(); self.spin_full_max.setRange(1,9999); self.spin_full_max.setValue(30)
+        self.spin_full_max.valueChanged.connect(lambda *_: self.refresh_full_result_view())
         full_ctrl.addWidget(self.spin_full_max)
         self.chk_full_pca_clip=QCheckBox("Clip PCA maps < 0 to 0")
+        self.chk_full_pca_clip.stateChanged.connect(lambda *_: self.refresh_full_result_view())
         full_ctrl.addWidget(self.chk_full_pca_clip)
         self.btn_refresh_full=QPushButton("Refresh Full Result")
         self.btn_refresh_full.clicked.connect(self.refresh_full_result_view)
@@ -2992,6 +3039,8 @@ class RR2NMFGui(QMainWindow):
             "Selected elements/groups",
             "All candidate edges in current energy range",
         ])
+        self.chk_eels_show_detected = QCheckBox("Show detected peak dashed lines")
+        self.chk_eels_show_detected.setChecked(False)
 
         self.combo_eels_edge = QComboBox()
         self.combo_eels_edge.addItems(sorted(EELS_EDGE_DB.keys()))
@@ -4394,6 +4443,7 @@ This does not modify the current rr-NMF/manual tree results.
         matched_all = []
         detected_by_source = {}
         candidate_markers_global = []
+        edge_windows_global = []
 
         for si, src in enumerate(srcs):
             spec = np.asarray(src["spectrum"], dtype=np.float64)
@@ -4439,6 +4489,7 @@ This does not modify the current rr-NMF/manual tree results.
                 edge_area_by_source[source_label] = {}
                 for ed in selected_edges:
                     pre0, pre1, int0, int1 = self._edge_windows_for_analysis(ed)
+                    edge_windows_global.append({"edge": ed, "edge_eV": float(EELS_EDGE_DB[ed]["energy_eV"]), "pre0": pre0, "pre1": pre1, "int0": int0, "int1": int1})
                     analysis_row = eels_edge_analysis_for_spectrum(x, spec, ed, pre0, pre1, int0, int1)
                     analysis_row["source"] = source_label
                     analysis_row["row_type"] = "edge_analysis"
@@ -4464,6 +4515,7 @@ This does not modify the current rr-NMF/manual tree results.
                             })
             elif edge_mode and selected_edge:
                 pre0, pre1, int0, int1 = self._edge_windows_for_analysis(selected_edge)
+                edge_windows_global.append({"edge": selected_edge, "edge_eV": float(EELS_EDGE_DB[selected_edge]["energy_eV"]), "pre0": pre0, "pre1": pre1, "int0": int0, "int1": int1})
                 analysis_row = eels_edge_analysis_for_spectrum(x, spec, selected_edge, pre0, pre1, int0, int1)
                 analysis_row["source"] = source_label
                 analysis_row["row_type"] = "edge_analysis"
@@ -4482,12 +4534,22 @@ This does not modify the current rr-NMF/manual tree results.
             return out
         candidate_markers_global = dedup(candidate_markers_global)
         matched_all = dedup(matched_all)
+        # Deduplicate selected edge-analysis windows.
+        _wins = []
+        _seen_wins = set()
+        for win in edge_windows_global:
+            key = (win.get("edge"), round(float(win.get("pre0", 0)), 6), round(float(win.get("pre1", 0)), 6), round(float(win.get("int0", 0)), 6), round(float(win.get("int1", 0)), 6))
+            if key not in _seen_wins:
+                _seen_wins.add(key); _wins.append(win)
+        edge_windows_global = _wins
+        show_detected = bool(getattr(self, "chk_eels_show_detected", None) is not None and self.chk_eels_show_detected.isChecked())
 
         if len(plot_srcs) > 1 or compare_mode == "Selected sources stacked":
             plot_multi_source_interpretation(
                 self.canvas_eels.fig, plot_srcs, candidate_markers_global, matched_all,
                 f"EELS Interpretation: {len(plot_srcs)} selected sources", "Energy (eV)",
                 self.combo_eels_norm.currentText(), self.combo_cmap.currentText(), detected_by_source,
+                edge_windows=edge_windows_global, show_detected=show_detected,
             )
         elif compare_mode == "Basis vs weighted raw stacked" and srcs[0].get("pair_key") is not None:
             src = srcs[0]
@@ -4505,9 +4567,11 @@ This does not modify the current rr-NMF/manual tree results.
                     source_image=src.get("image", None),
                     cmap=self.combo_cmap.currentText(),
                     detected_features=detected_by_source.get(0, []),
+                    edge_windows=edge_windows_global,
+                    show_detected=show_detected,
                 )
             else:
-                plot_multi_source_interpretation(self.canvas_eels.fig, plot_srcs, candidate_markers_global, matched_all, "EELS Interpretation", "Energy (eV)", self.combo_eels_norm.currentText(), self.combo_cmap.currentText(), detected_by_source)
+                plot_multi_source_interpretation(self.canvas_eels.fig, plot_srcs, candidate_markers_global, matched_all, "EELS Interpretation", "Energy (eV)", self.combo_eels_norm.currentText(), self.combo_cmap.currentText(), detected_by_source, edge_windows=edge_windows_global, show_detected=show_detected)
         else:
             src = srcs[0]
             spec = np.asarray(src["spectrum"], dtype=np.float64)
@@ -4520,6 +4584,8 @@ This does not modify the current rr-NMF/manual tree results.
                 cmap=self.combo_cmap.currentText(),
                 matched_markers=matched_all,
                 detected_features=detected_by_source.get(0, []),
+                edge_windows=edge_windows_global,
+                show_detected=show_detected,
             )
 
         self.canvas_eels.set_base(); self.canvas_eels.draw()
