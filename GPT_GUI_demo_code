@@ -2246,7 +2246,7 @@ def plot_pca_result(fig, pca, axis, cmap="viridis", maxn=20):
     fig.subplots_adjust(left=0.04, right=0.985, top=0.94, bottom=0.06, hspace=0.85, wspace=0.28)
 
 
-def _plot_result_column(fig, gs, col0, title, images, spectra, axis, cmap, maxn=12):
+def _plot_result_column(fig, gs, col0, title, images, spectra, axis, cmap, maxn=12, image_vmin=None, image_vmax=None):
     images = list(images or [])
     spectra = list(spectra or [])
     n = min(maxn, len(images), len(spectra))
@@ -2327,6 +2327,163 @@ def plot_full_result_comparison(fig, conv, pca, rr, manual_depth_groups, axis, s
     _plot_result_column(fig, gs, 4, f"D{selected_depth} merge/pass\nwithout residual", rr_imgs, rr_specs, axis, cmap, maxn=maxn)
     fig.suptitle("Full Result Comparison: Conv NMF vs PCA vs selected-depth merge/pass outputs (rr sorted by energy)", fontsize=14)
     fig.subplots_adjust(left=0.025, right=0.99, top=0.92, bottom=0.05, hspace=0.82, wspace=0.42)
+
+
+
+def _normalize_maps_for_composite(images, mode="percentile 99", eps=1e-12):
+    arrs = [np.asarray(im, dtype=np.float64).copy() for im in (images or [])]
+    if not arrs:
+        return []
+    mode = str(mode or "percentile 99").lower()
+    if mode == "none":
+        # Shift each map only if negative values exist so RGB compositing remains displayable.
+        out=[]
+        for a in arrs:
+            b=a.copy()
+            mn=float(np.nanmin(b)) if b.size else 0.0
+            if mn < 0:
+                b=b-mn
+            mx=float(np.nanmax(b)) if b.size else 0.0
+            out.append(b/(mx+eps) if mx>0 else b)
+        return out
+    if mode == "global max":
+        g=max([float(np.nanmax(np.abs(a))) if a.size else 0.0 for a in arrs] + [0.0])
+        return [np.clip((a if np.nanmin(a)>=0 else a-np.nanmin(a))/(g+eps),0,1) if g>0 else np.zeros_like(a) for a in arrs]
+    out=[]
+    for a in arrs:
+        b=a.copy()
+        mn=float(np.nanmin(b)) if b.size else 0.0
+        if mn < 0:
+            b=b-mn
+        if mode == "each component max":
+            mx=float(np.nanmax(b)) if b.size else 0.0
+        else:
+            mx=float(np.nanpercentile(b,99)) if b.size else 0.0
+        out.append(np.clip(b/(mx+eps),0,1) if mx>0 else np.zeros_like(b))
+    return out
+
+
+def _component_colors(n):
+    import matplotlib.cm as cm
+    cmap = cm.get_cmap('tab20' if n <= 20 else 'hsv', max(n, 1))
+    return [np.asarray(cmap(i)[:3], dtype=np.float64) for i in range(n)]
+
+
+def make_component_composite(images, mode="sum weighted color", norm_mode="percentile 99"):
+    norm = _normalize_maps_for_composite(images, norm_mode)
+    if not norm:
+        return None, [], []
+    h,w = norm[0].shape
+    n=len(norm)
+    colors=_component_colors(n)
+    mode=str(mode or "sum weighted color").lower()
+    if mode == "max-color winner":
+        stack=np.stack(norm,axis=0)
+        idx=np.nanargmax(stack,axis=0)
+        amp=np.nanmax(stack,axis=0)
+        rgb=np.zeros((h,w,3),dtype=np.float64)
+        for i,c in enumerate(colors):
+            mask=(idx==i)
+            rgb[mask]=amp[mask,None]*c.reshape(1,3)
+        return np.clip(rgb,0,1), norm, colors
+    rgb=np.zeros((h,w,3),dtype=np.float64)
+    if mode == "rgb cycle":
+        base=[np.array([1,0,0.0]),np.array([0,1,0.0]),np.array([0,0,1.0])]
+        colors=[base[i%3] for i in range(n)]
+    for a,c in zip(norm,colors):
+        rgb += a[...,None]*c.reshape(1,1,3)
+    mx=float(np.nanmax(rgb)) if rgb.size else 0.0
+    if mx>1:
+        rgb=rgb/mx
+    return np.clip(rgb,0,1), norm, colors
+
+
+def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum_indices=None, clicked_pixel=None,
+                               norm_mode="percentile 99", composite_mode="sum weighted color", spectrum_mode="Selected components all", topn=6):
+    fig.clear()
+    items=list(items or [])
+    if not items:
+        fig.set_size_inches(12,6,forward=True)
+        ax=fig.add_subplot(111); ax.axis('off'); ax.text(0.5,0.5,'No components available for mapping analysis',ha='center',va='center',fontsize=13)
+        return
+    if selected_indices is None or len(selected_indices)==0:
+        selected_indices=list(range(len(items)))
+    selected_indices=[i for i in selected_indices if 0 <= int(i) < len(items)]
+    if not selected_indices:
+        selected_indices=list(range(len(items)))
+    sel=[items[i] for i in selected_indices]
+    images=[np.asarray(it['image'],dtype=np.float64) for it in sel]
+    spectra=[np.asarray(it['spectrum'],dtype=np.float64) for it in sel]
+    labels=[str(it.get('label',f'C{i}')) for i,it in zip(selected_indices,sel)]
+    rgb,norm_maps,colors=make_component_composite(images,composite_mode,norm_mode)
+    n_spec=len(sel)
+    fig.set_size_inches(18, max(8, 5+0.45*min(n_spec,20)), forward=True)
+    gs=fig.add_gridspec(2,3,width_ratios=[1.15,1.0,1.25],height_ratios=[1.0,1.0])
+    ax=fig.add_subplot(gs[:,0])
+    if rgb is not None:
+        ax.imshow(rgb,origin='upper',aspect='equal')
+    ax.set_title(f'Composite map ({len(sel)} selected)\n{composite_mode}, {norm_mode}',fontsize=11)
+    ax.set_xticks([]); ax.set_yticks([])
+    px_text='Click a pixel on this map'
+    contrib=None
+    if clicked_pixel is not None and rgb is not None:
+        x,y=clicked_pixel
+        h,w=rgb.shape[:2]
+        if 0 <= int(x) < w and 0 <= int(y) < h:
+            ax.plot([x],[y],marker='x',markersize=10,color='white',markeredgewidth=2)
+            vals=np.array([float(m[int(y),int(x)]) for m in norm_maps],dtype=np.float64)
+            contrib=vals
+            px_text=f'Pixel x={int(x)}, y={int(y)}'
+    axc=fig.add_subplot(gs[0,1])
+    if contrib is not None:
+        order=np.argsort(contrib)[::-1]
+        show=order[:min(len(order),max(1,int(topn)))]
+        axc.bar(range(len(show)),contrib[show])
+        axc.set_xticks(range(len(show)))
+        axc.set_xticklabels([labels[i] for i in show],rotation=75,ha='right',fontsize=7)
+        axc.set_ylim(0, max(1.0, float(np.nanmax(contrib))*1.05))
+        axc.set_title('Selected-pixel normalized component weights')
+    else:
+        axc.axis('off'); axc.text(0.5,0.5,px_text,ha='center',va='center',fontsize=11)
+    axleg=fig.add_subplot(gs[1,1]); axleg.axis('off')
+    y0=0.95
+    for k,(lab,c) in enumerate(zip(labels,colors)):
+        if k>=18:
+            axleg.text(0.02,y0-k*0.05,'...',fontsize=9,transform=axleg.transAxes); break
+        axleg.add_patch(matplotlib.patches.Rectangle((0.02,y0-k*0.05-0.025),0.04,0.025,color=c,transform=axleg.transAxes,clip_on=False))
+        axleg.text(0.08,y0-k*0.05,lab,fontsize=8,va='center',transform=axleg.transAxes)
+    axleg.set_title('Component colors',fontsize=10)
+    sp=fig.add_subplot(gs[:,2])
+    mode=str(spectrum_mode or 'Selected components all')
+    spec_ids=list(range(len(sel)))
+    if mode == 'User selected spectra' and spectrum_indices:
+        # spectrum_indices are original item indices; map to selected local ids
+        orig_to_local={orig:i for i,orig in enumerate(selected_indices)}
+        spec_ids=[orig_to_local[i] for i in spectrum_indices if i in orig_to_local]
+    elif mode == 'Top contributors at pixel' and contrib is not None:
+        spec_ids=list(np.argsort(contrib)[::-1][:max(1,int(topn))])
+    if not spec_ids:
+        spec_ids=list(range(len(sel)))
+    xaxis=None
+    for rank,li in enumerate(spec_ids):
+        y=spectra[li].astype(np.float64)
+        if contrib is not None:
+            # contribution spectrum at the clicked pixel.  This uses the original W-image value
+            # rather than the normalized map where possible.
+            xpix,ypix=clicked_pixel
+            try:
+                scale=float(images[li][int(ypix),int(xpix)])
+                y=y*scale
+            except Exception:
+                pass
+        xaxis = axis.energy_axis if axis is not None and len(axis.energy_axis)==len(y) else np.arange(len(y))
+        sp.plot(xaxis,y,linewidth=1.0,label=labels[li])
+    sp.set_title('Component spectra at selected pixel' if contrib is not None else 'Component spectra')
+    sp.set_xlabel(axis.energy_label if axis is not None else 'Channel')
+    sp.grid(True,alpha=0.25)
+    if len(spec_ids)<=12:
+        sp.legend(fontsize=7)
+    fig.subplots_adjust(left=0.03,right=0.985,top=0.92,bottom=0.08,wspace=0.32,hspace=0.28)
 
 def plot_energy(fig, conv, rr):
     fig.clear(); fig.set_size_inches(12,7, forward=True)
@@ -2747,7 +2904,7 @@ class AnalysisWorker(QThread):
 
 class RR2NMFGui(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v7.2 W-downCorr + H-corr"); self.resize(1850,1080)
+        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v8.6 Full Mapping Analysis"); self.resize(1850,1080)
         self.cube=None; self.original_cube=None; self.roi_cube=None; self.X=None; self.image_shape=None
         self.axis_info=make_default_axis_info((1,1,1)); self.roi_axis_info=make_default_axis_info((1,1,1))
         self.conv_result=None; self.rr_result=None; self.pca_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.bg_applied=False; self._raw_mouse_press=None; self.selected_raw_pixel=None
@@ -2892,7 +3049,65 @@ class RR2NMFGui(QMainWindow):
         self.btn_refresh_full.clicked.connect(self.refresh_full_result_view)
         full_ctrl.addWidget(self.btn_refresh_full); full_ctrl.addStretch(1)
         full_lay.addLayout(full_ctrl); full_lay.addWidget(PlotPanel(self.canvas_full))
-        self.tabs.addTab(full_page,"Full Result")
+        self.tabs.addTab(full_page,"Full Component Analysis")
+
+        self.canvas_full_mapping=Canvas(18,10)
+        mapping_page=QWidget(); mapping_lay=QVBoxLayout(mapping_page)
+        map_ctrl1=QHBoxLayout()
+        map_ctrl1.addWidget(QLabel("Method"))
+        self.combo_map_method=QComboBox(); self.combo_map_method.addItems(["Conventional NMF", "PCA", "rr-NMF merge/pass w/o residual"])
+        self.combo_map_method.currentIndexChanged.connect(lambda *_: self.refresh_mapping_component_list())
+        map_ctrl1.addWidget(self.combo_map_method)
+        map_ctrl1.addWidget(QLabel("rr depth"))
+        self.combo_map_depth=QComboBox(); self.combo_map_depth.addItem("D0",0)
+        self.combo_map_depth.currentIndexChanged.connect(lambda *_: self.refresh_mapping_component_list())
+        map_ctrl1.addWidget(self.combo_map_depth)
+        map_ctrl1.addWidget(QLabel("Component mode"))
+        self.combo_map_component_mode=QComboBox(); self.combo_map_component_mode.addItems(["All", "User select"])
+        self.combo_map_component_mode.currentIndexChanged.connect(lambda *_: self.refresh_full_mapping_view())
+        map_ctrl1.addWidget(self.combo_map_component_mode)
+        map_ctrl1.addWidget(QLabel("Spectrum display"))
+        self.combo_map_spectrum_mode=QComboBox(); self.combo_map_spectrum_mode.addItems(["Selected components all", "User selected spectra", "Top contributors at pixel"])
+        self.combo_map_spectrum_mode.currentIndexChanged.connect(lambda *_: self.refresh_full_mapping_view())
+        map_ctrl1.addWidget(self.combo_map_spectrum_mode)
+        map_ctrl1.addStretch(1)
+        mapping_lay.addLayout(map_ctrl1)
+
+        map_ctrl2=QHBoxLayout()
+        map_ctrl2.addWidget(QLabel("Normalize W maps"))
+        self.combo_map_norm=QComboBox(); self.combo_map_norm.addItems(["percentile 99", "each component max", "global max", "none"])
+        self.combo_map_norm.currentIndexChanged.connect(lambda *_: self.refresh_full_mapping_view())
+        map_ctrl2.addWidget(self.combo_map_norm)
+        map_ctrl2.addWidget(QLabel("Composite mode"))
+        self.combo_map_mode=QComboBox(); self.combo_map_mode.addItems(["sum weighted color", "max-color winner", "RGB cycle"])
+        self.combo_map_mode.currentIndexChanged.connect(lambda *_: self.refresh_full_mapping_view())
+        map_ctrl2.addWidget(self.combo_map_mode)
+        self.chk_map_pca_clip=QCheckBox("Clip PCA maps < 0 to 0")
+        self.chk_map_pca_clip.stateChanged.connect(lambda *_: self.refresh_mapping_component_list())
+        map_ctrl2.addWidget(self.chk_map_pca_clip)
+        map_ctrl2.addWidget(QLabel("Top N spectra"))
+        self.spin_map_topn=QSpinBox(); self.spin_map_topn.setRange(1,50); self.spin_map_topn.setValue(6)
+        self.spin_map_topn.valueChanged.connect(lambda *_: self.refresh_full_mapping_view())
+        map_ctrl2.addWidget(self.spin_map_topn)
+        self.btn_refresh_mapping=QPushButton("Refresh Full Mapping")
+        self.btn_refresh_mapping.clicked.connect(self.refresh_full_mapping_view)
+        map_ctrl2.addWidget(self.btn_refresh_mapping); map_ctrl2.addStretch(1)
+        mapping_lay.addLayout(map_ctrl2)
+
+        map_lists=QHBoxLayout()
+        self.list_map_components=QListWidget(); self.list_map_components.setSelectionMode(QListWidget.MultiSelection); self.list_map_components.itemSelectionChanged.connect(lambda: self.refresh_full_mapping_view())
+        self.list_map_spectra=QListWidget(); self.list_map_spectra.setSelectionMode(QListWidget.MultiSelection); self.list_map_spectra.itemSelectionChanged.connect(lambda: self.refresh_full_mapping_view())
+        map_lists.addWidget(QLabel("Components")); map_lists.addWidget(self.list_map_components, 2)
+        map_lists.addWidget(QLabel("Spectra")); map_lists.addWidget(self.list_map_spectra, 2)
+        mapping_lay.addLayout(map_lists)
+        mapping_lay.addWidget(PlotPanel(self.canvas_full_mapping), 1)
+        self.tabs.addTab(mapping_page,"Full Mapping Analysis")
+        self._full_mapping_pixel=None
+        try:
+            self.canvas_full_mapping.mpl_connect('button_press_event', self.on_full_mapping_click)
+        except Exception:
+            pass
+
         self.canvas_energy=Canvas(12,8); self.tabs.addTab(PlotPanel(self.canvas_energy),"Energy Summary")
         self.canvas_diag=Canvas(16,8); self.tabs.addTab(PlotPanel(self.canvas_diag),"rr Interpretation Summary")
         self.canvas_auto_prov=Canvas(18,8); self.tabs.addTab(PlotPanel(self.canvas_auto_prov),"Auto Merge W Tree")
@@ -3703,6 +3918,161 @@ This does not modify the current rr-NMF/manual tree results.
         self._auto_score_active=False
         self._set_run_buttons_enabled(True); QMessageBox.critical(self,"Analysis failed",err); self.append_log(err)
 
+
+    def update_mapping_depth_options(self):
+        if not hasattr(self, "combo_map_depth"):
+            return
+        current = self.combo_map_depth.currentData()
+        try:
+            current = int(current) if current is not None else 0
+        except Exception:
+            current = 0
+        depths = set([0])
+        rr = getattr(self, "rr_result", None)
+        if rr is not None:
+            for d in range(len(getattr(rr, "node_summaries_by_depth", []) or [])):
+                depths.add(int(d))
+        for tk in (getattr(self, "manual_depth_groups", {}) or {}).keys():
+            try:
+                depths.add(max(0, int(tk)-1))
+            except Exception:
+                pass
+        self.combo_map_depth.blockSignals(True)
+        self.combo_map_depth.clear()
+        for d in sorted(depths):
+            label=f"D{d}"
+            if (getattr(self,"manual_depth_groups",{}) or {}).get(d+1):
+                label += " merge/pass available"
+            self.combo_map_depth.addItem(label,int(d))
+        idx=self.combo_map_depth.findData(current)
+        self.combo_map_depth.setCurrentIndex(idx if idx>=0 else max(0,self.combo_map_depth.count()-1))
+        self.combo_map_depth.blockSignals(False)
+
+    def _full_mapping_items(self):
+        method = self.combo_map_method.currentText() if hasattr(self,"combo_map_method") else "Conventional NMF"
+        items=[]
+        if method == "Conventional NMF":
+            conv=getattr(self,"conv_result",None)
+            if conv is not None:
+                for i,(im,sp) in enumerate(zip(getattr(conv,"W_images",[]) or [], getattr(conv,"H_spectra",[]) or [])):
+                    items.append({"label":f"Conv C{i}","image":np.asarray(im),"spectrum":np.asarray(sp)})
+        elif method == "PCA":
+            pca=getattr(self,"pca_result",None)
+            if pca is not None:
+                clip=bool(self.chk_map_pca_clip.isChecked()) if hasattr(self,"chk_map_pca_clip") else False
+                for i,(im,sp) in enumerate(zip(getattr(pca,"W_images",[]) or [], getattr(pca,"H_spectra",[]) or [])):
+                    arr=np.asarray(im,dtype=np.float64).copy()
+                    if clip:
+                        arr=np.maximum(arr,0.0)
+                    items.append({"label":f"PCA PC{i+1}","image":arr,"spectrum":np.asarray(sp)})
+        else:
+            rr=getattr(self,"rr_result",None)
+            if rr is not None:
+                depth=int(self.combo_map_depth.currentData()) if hasattr(self,"combo_map_depth") and self.combo_map_depth.currentData() is not None else 0
+                target_key=depth+1
+                groups=(getattr(self,"manual_depth_groups",{}) or {}).get(target_key,[]) or []
+                lookup=_entry_lookup_by_label(rr)
+                tmp=[]
+                for idx,c in enumerate(groups):
+                    members=list(c.get("member_labels", c.get("members", [])) or [])
+                    entries=[lookup[m] for m in members if m in lookup]
+                    if not entries:
+                        continue
+                    try:
+                        ds=build_combined_dataset(entries,_short_set_label(c,idx),use_child_matrix=False)
+                        mat=np.asarray(ds.get("matrix"),dtype=np.float32)
+                        energy=float(np.nansum(mat*mat,dtype=np.float64)) if mat.size else 0.0
+                        tmp.append((energy,{"label":_short_set_label(c,idx),"image":np.asarray(ds["image"]),"spectrum":np.asarray(ds["spectrum"])}))
+                    except Exception:
+                        continue
+                tmp.sort(key=lambda t:t[0], reverse=True)
+                items=[t[1] for t in tmp]
+                if not items and depth < len(getattr(rr,"node_summaries_by_depth",[]) or []):
+                    # Fallback: show direct depth results if merge/pass outputs are not available.
+                    for n,ns in enumerate(rr.node_summaries_by_depth[depth]):
+                        for c,(im,sp) in enumerate(zip(ns.component_maps, ns.component_spectra)):
+                            items.append({"label":f"D{depth} N{n} C{c}","image":np.asarray(im),"spectrum":np.asarray(sp)})
+        return items
+
+    def refresh_mapping_component_list(self):
+        if not hasattr(self,"list_map_components"):
+            return
+        self.update_mapping_depth_options()
+        items=self._full_mapping_items()
+        old_comp={it.text().split(": ",1)[-1] for it in self.list_map_components.selectedItems()}
+        old_spec={it.text().split(": ",1)[-1] for it in self.list_map_spectra.selectedItems()} if hasattr(self,"list_map_spectra") else set()
+        self.list_map_components.blockSignals(True)
+        self.list_map_spectra.blockSignals(True)
+        self.list_map_components.clear(); self.list_map_spectra.clear()
+        for i,it in enumerate(items):
+            txt=f"{i}: {it.get('label',f'C{i}')}"
+            a=QListWidgetItem(txt); a.setData(Qt.UserRole,int(i)); self.list_map_components.addItem(a)
+            b=QListWidgetItem(txt); b.setData(Qt.UserRole,int(i)); self.list_map_spectra.addItem(b)
+            lab=str(it.get('label',f'C{i}'))
+            if lab in old_comp:
+                a.setSelected(True)
+            if lab in old_spec:
+                b.setSelected(True)
+        self.list_map_components.blockSignals(False)
+        self.list_map_spectra.blockSignals(False)
+        self.refresh_full_mapping_view()
+
+    def _selected_mapping_indices(self, list_widget, all_if_empty=True):
+        if list_widget is None:
+            return []
+        vals=[]
+        for it in list_widget.selectedItems():
+            try:
+                vals.append(int(it.data(Qt.UserRole)))
+            except Exception:
+                pass
+        if not vals and all_if_empty:
+            vals=list(range(list_widget.count()))
+        return vals
+
+    def refresh_full_mapping_view(self):
+        if not hasattr(self,"canvas_full_mapping"):
+            return
+        try:
+            items=self._full_mapping_items()
+            comp_mode=self.combo_map_component_mode.currentText() if hasattr(self,"combo_map_component_mode") else "All"
+            if comp_mode == "User select":
+                selected=self._selected_mapping_indices(self.list_map_components, all_if_empty=False)
+            else:
+                selected=list(range(len(items)))
+            spec_mode=self.combo_map_spectrum_mode.currentText() if hasattr(self,"combo_map_spectrum_mode") else "Selected components all"
+            spec_sel=self._selected_mapping_indices(self.list_map_spectra, all_if_empty=False)
+            plot_full_mapping_analysis(
+                self.canvas_full_mapping.fig, items, self.roi_axis_info,
+                selected_indices=selected,
+                spectrum_indices=spec_sel,
+                clicked_pixel=getattr(self,"_full_mapping_pixel",None),
+                norm_mode=self.combo_map_norm.currentText() if hasattr(self,"combo_map_norm") else "percentile 99",
+                composite_mode=self.combo_map_mode.currentText() if hasattr(self,"combo_map_mode") else "sum weighted color",
+                spectrum_mode=spec_mode,
+                topn=int(self.spin_map_topn.value()) if hasattr(self,"spin_map_topn") else 6,
+            )
+            self.canvas_full_mapping.set_base(); self.canvas_full_mapping.draw()
+        except Exception as e:
+            self.canvas_full_mapping.clear()
+            try:
+                self.append_log("Full Mapping redraw failed: "+str(e))
+            except Exception:
+                pass
+
+    def on_full_mapping_click(self, event):
+        if event.inaxes is None or event.xdata is None or event.ydata is None:
+            return
+        # Only accept clicks on the composite image axis.  It is the left-most axis in the figure.
+        try:
+            axes=list(self.canvas_full_mapping.fig.axes)
+            if event.inaxes is not axes[0]:
+                return
+        except Exception:
+            pass
+        self._full_mapping_pixel=(int(round(event.xdata)), int(round(event.ydata)))
+        self.refresh_full_mapping_view()
+
     def update_full_depth_options(self):
         """Refresh selectable depths for Full Result without triggering expensive redraw."""
         if not hasattr(self, "combo_full_depth"):
@@ -3807,6 +4177,8 @@ This does not modify the current rr-NMF/manual tree results.
                 self.canvas_pca.clear()
         if hasattr(self, "canvas_full"):
             self.refresh_full_result_view()
+        if hasattr(self, "canvas_full_mapping"):
+            self.refresh_mapping_component_list()
         plot_energy(self.canvas_energy.fig,self.conv_result,self.rr_result); self.canvas_energy.set_base(); self.canvas_energy.draw()
         self.refresh_tables(); self.refresh_rr_component_list()
 
