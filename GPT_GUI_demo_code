@@ -2274,7 +2274,7 @@ def _plot_result_column(fig, gs, col0, title, images, spectra, axis, cmap, maxn=
             sp.set_xlabel(axis.energy_label if axis is not None else "Channel", fontsize=7)
 
 
-def plot_full_result_comparison(fig, conv, pca, rr, manual_depth_groups, axis, selected_depth=0, cmap="viridis", maxn=30, w_downsample_factor=4):
+def plot_full_result_comparison(fig, conv, pca, rr, manual_depth_groups, axis, selected_depth=0, cmap="viridis", maxn=30, w_downsample_factor=4, pca_clip_negative=False):
     """Compare Conv NMF, PCA, and residual-free merge/pass outputs from selected depth."""
     fig.clear()
     selected_depth = int(max(0, selected_depth))
@@ -2288,6 +2288,8 @@ def plot_full_result_comparison(fig, conv, pca, rr, manual_depth_groups, axis, s
     pca_imgs, pca_specs = [], []
     if pca is not None:
         pca_imgs = list(getattr(pca, "W_images", []) or [])
+        if pca_clip_negative:
+            pca_imgs = [np.clip(np.asarray(img), 0, None) for img in pca_imgs]
         pca_specs = list(getattr(pca, "H_spectra", []) or [])
 
     rr_imgs, rr_specs = [], []
@@ -2506,6 +2508,67 @@ def plot_combined(fig, combined, axis, cmap="viridis"):
     x=axis.energy_axis if len(axis.energy_axis)==len(combined["spectrum"]) else np.arange(len(combined["spectrum"]))
     sp.plot(x,combined["spectrum"]); sp.set_title("Combined spectrum"); sp.set_xlabel(axis.energy_label); sp.grid(True,alpha=.3)
     fig.tight_layout()
+
+
+
+def _safe_var_name(name: str, maxlen: int = 96) -> str:
+    """Return a compact variable-safe key for NPZ export."""
+    import re
+    name = str(name).strip()
+    name = re.sub(r"[^0-9A-Za-z_]+", "_", name)
+    name = re.sub(r"_+", "_", name).strip("_")
+    if not name:
+        name = "item"
+    if name[0].isdigit():
+        name = "v_" + name
+    return name[:maxlen]
+
+
+def plot_multi_source_interpretation(fig, sources, candidate_markers, matched_markers, title, xlabel, norm="none", cmap="viridis", detected_by_source=None):
+    """Stack multiple source W/images and spectra for EDS/EELS comparison."""
+    fig.clear()
+    sources = list(sources or [])
+    n = max(1, len(sources))
+    fig.set_size_inches(18, max(6.5, 2.45 * n), forward=True)
+    gs = fig.add_gridspec(n, 2, width_ratios=[1.0, 3.2], hspace=0.62, wspace=0.22)
+    for i, src in enumerate(sources):
+        ax_img = fig.add_subplot(gs[i, 0])
+        ax_sp = fig.add_subplot(gs[i, 1])
+        img = src.get("image", None)
+        if img is not None:
+            try:
+                im = ax_img.imshow(img, cmap=cmap, origin="upper", aspect="equal")
+                add_colorbar(fig, ax_img, im)
+            except Exception:
+                ax_img.text(0.5, 0.5, "image unavailable", ha="center", va="center")
+        else:
+            ax_img.text(0.5, 0.5, "no image", ha="center", va="center")
+        ax_img.set_title(str(src.get("label", f"source {i+1}"))[:70], fontsize=10)
+        ax_img.set_xticks([]); ax_img.set_yticks([])
+        y = normalize_1d(np.asarray(src.get("spectrum", []), dtype=np.float64), norm)
+        x = np.asarray(src.get("energy", []), dtype=np.float64)
+        if x.size != y.size:
+            x = np.arange(y.size, dtype=np.float64)
+        ax_sp.plot(x, y, lw=1.6)
+        ymin = float(np.nanmin(y)) if y.size else 0.0
+        ymax = float(np.nanmax(y)) if y.size else 1.0
+        span = max(1e-12, ymax-ymin)
+        for xv, lab in (candidate_markers or [])[:120]:
+            if x.size and (xv < np.nanmin(x) or xv > np.nanmax(x)): continue
+            ax_sp.axvline(xv, lw=0.8, color="0.65", alpha=0.30)
+        for xv, lab in (matched_markers or [])[:80]:
+            if x.size and (xv < np.nanmin(x) or xv > np.nanmax(x)): continue
+            ax_sp.axvline(xv, lw=1.4, color="#d62728", alpha=0.80)
+            ax_sp.text(xv, ymin+0.94*span, lab, rotation=90, fontsize=7, color="#d62728", va="top", ha="center")
+        for xv in (detected_by_source or {}).get(i, [])[:80]:
+            if x.size and (xv < np.nanmin(x) or xv > np.nanmax(x)): continue
+            ax_sp.axvline(xv, lw=0.9, color="0.15", linestyle="--", alpha=0.35)
+        ax_sp.grid(True, alpha=0.25)
+        ax_sp.set_ylabel("I", fontsize=9)
+        if i == n-1:
+            ax_sp.set_xlabel(xlabel, fontsize=11)
+    fig.suptitle(title, fontsize=14)
+    fig.subplots_adjust(left=0.045, right=0.985, top=0.93, bottom=0.07)
 
 
 
@@ -2754,7 +2817,9 @@ class RR2NMFGui(QMainWindow):
         self.btn_load_settings=QPushButton("Load ROI/BG/NMF Settings")
         self.btn_load_settings.clicked.connect(self.load_processing_settings)
         self.btn_export=QPushButton("Export CSV"); self.btn_export.clicked.connect(self.export_csv)
-        vf.addRow(self.btn_run); vf.addRow(self.btn_run_conv_only); vf.addRow(self.btn_run_pca_only); vf.addRow(self.btn_run_auto_stage); vf.addRow(self.btn_continue_manual); vf.addRow(self.btn_auto_score_step); vf.addRow(self.btn_reset_analysis); vf.addRow(self.btn_save_settings); vf.addRow(self.btn_load_settings); vf.addRow(self.btn_export); cl.addWidget(vg)
+        self.btn_export_all_decomp=QPushButton("Save All Decomposition Results (NPZ)")
+        self.btn_export_all_decomp.clicked.connect(self.export_all_decomposition_results)
+        vf.addRow(self.btn_run); vf.addRow(self.btn_run_conv_only); vf.addRow(self.btn_run_pca_only); vf.addRow(self.btn_run_auto_stage); vf.addRow(self.btn_continue_manual); vf.addRow(self.btn_auto_score_step); vf.addRow(self.btn_reset_analysis); vf.addRow(self.btn_save_settings); vf.addRow(self.btn_load_settings); vf.addRow(self.btn_export); vf.addRow(self.btn_export_all_decomp); cl.addWidget(vg)
         self.log=QTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(180); cl.addWidget(QLabel("Log")); cl.addWidget(self.log); cl.addStretch(1)
 
         self.tabs=QTabWidget(); split.addWidget(self.tabs)
@@ -2766,11 +2831,14 @@ class RR2NMFGui(QMainWindow):
         full_page=QWidget(); full_lay=QVBoxLayout(full_page)
         full_ctrl=QHBoxLayout()
         full_ctrl.addWidget(QLabel("Depth N for merge/pass without residual"))
-        self.spin_full_depth=QSpinBox(); self.spin_full_depth.setRange(0,9999); self.spin_full_depth.setValue(0)
-        full_ctrl.addWidget(self.spin_full_depth)
+        self.combo_full_depth=QComboBox()
+        self.combo_full_depth.addItem("D0", 0)
+        full_ctrl.addWidget(self.combo_full_depth)
         full_ctrl.addWidget(QLabel("Max displayed items"))
         self.spin_full_max=QSpinBox(); self.spin_full_max.setRange(1,9999); self.spin_full_max.setValue(30)
         full_ctrl.addWidget(self.spin_full_max)
+        self.chk_full_pca_clip=QCheckBox("Clip PCA maps < 0 to 0")
+        full_ctrl.addWidget(self.chk_full_pca_clip)
         self.btn_refresh_full=QPushButton("Refresh Full Result")
         self.btn_refresh_full.clicked.connect(self.refresh_full_result_view)
         full_ctrl.addWidget(self.btn_refresh_full); full_ctrl.addStretch(1)
@@ -2836,7 +2904,7 @@ class RR2NMFGui(QMainWindow):
 
     def _build_eds_tab(self):
         page=QWidget(); outer=QVBoxLayout(page); top=QHBoxLayout(); outer.addLayout(top)
-        g1=QGroupBox("Spectrum source"); l1=QVBoxLayout(g1); self.list_eds_src=QListWidget(); l1.addWidget(self.list_eds_src); b=QPushButton("Refresh spectra"); b.clicked.connect(self.refresh_spectrum_sources); l1.addWidget(b); top.addWidget(g1,2)
+        g1=QGroupBox("Spectrum source"); l1=QVBoxLayout(g1); self.list_eds_src=QListWidget(); self.list_eds_src.setSelectionMode(QListWidget.MultiSelection); l1.addWidget(self.list_eds_src); b=QPushButton("Refresh spectra"); b.clicked.connect(self.refresh_spectrum_sources); l1.addWidget(b); top.addWidget(g1,2)
 
         g2=QGroupBox("Elements"); l2=QVBoxLayout(g2)
         row=QHBoxLayout()
@@ -2851,7 +2919,7 @@ class RR2NMFGui(QMainWindow):
         bc=QPushButton("Clear selected elements"); bc.clicked.connect(self.clear_eds_elements); l2.addWidget(bc)
         top.addWidget(g2,3)
 
-        g3=QGroupBox("Settings"); f=QFormLayout(g3); self.combo_eds_norm=QComboBox(); self.combo_eds_norm.addItems(["none","max","area"]); self.combo_eds_line=QComboBox(); self.combo_eds_line.addItems(["Major + minor","Major only"]); self.spin_eds_tol=QDoubleSpinBox(); self.spin_eds_tol.setRange(.001,1); self.spin_eds_tol.setDecimals(4); self.spin_eds_tol.setValue(.05); self.spin_eds_prom=QDoubleSpinBox(); self.spin_eds_prom.setRange(.001,1); self.spin_eds_prom.setDecimals(4); self.spin_eds_prom.setValue(.03); self.spin_eds_dist=QSpinBox(); self.spin_eds_dist.setRange(1,200); self.spin_eds_dist.setValue(3); br=QPushButton("Detect peaks + match"); br.clicked.connect(self.run_eds_analysis)
+        g3=QGroupBox("Settings"); f=QFormLayout(g3); self.combo_eds_norm=QComboBox(); self.combo_eds_norm.addItems(["none","max","area"]); self.combo_eds_line=QComboBox(); self.combo_eds_line.addItems(["Major + minor","Major only"]); self.spin_eds_tol=QDoubleSpinBox(); self.spin_eds_tol.setRange(.001,1); self.spin_eds_tol.setDecimals(4); self.spin_eds_tol.setValue(.05); self.spin_eds_prom=QDoubleSpinBox(); self.spin_eds_prom.setRange(.001,1); self.spin_eds_prom.setDecimals(4); self.spin_eds_prom.setValue(.03); self.spin_eds_dist=QSpinBox(); self.spin_eds_dist.setRange(1,200); self.spin_eds_dist.setValue(3); br=QPushButton("Analyze selected spectrum/source(s)"); br.clicked.connect(self.run_eds_analysis)
         for lab,w in [("Normalize",self.combo_eds_norm),("Line filter",self.combo_eds_line),("Tolerance keV",self.spin_eds_tol),("Min prominence",self.spin_eds_prom),("Min distance ch",self.spin_eds_dist),(None,br)]: f.addRow(w) if lab is None else f.addRow(lab,w)
         top.addWidget(g3,2); outer.addWidget(PlotPanel(self.canvas_eds),4); self.table_eds=QTableWidget(); outer.addWidget(self.table_eds,2); return page
 
@@ -2864,6 +2932,7 @@ class RR2NMFGui(QMainWindow):
         g1 = QGroupBox("Spectrum source")
         l1 = QVBoxLayout(g1)
         self.list_eels_src = QListWidget()
+        self.list_eels_src.setSelectionMode(QListWidget.MultiSelection)
         l1.addWidget(self.list_eels_src)
         b = QPushButton("Refresh spectra")
         b.clicked.connect(self.refresh_spectrum_sources)
@@ -2911,18 +2980,20 @@ class RR2NMFGui(QMainWindow):
         self.combo_eels_mode.addItems(["Candidate screening", "Edge analysis"])
 
         self.combo_eels_compare = QComboBox()
-        self.combo_eels_compare.addItems(["Single spectrum", "Basis vs weighted raw stacked"])
+        self.combo_eels_compare.addItems(["Single spectrum", "Basis vs weighted raw stacked", "Selected sources stacked"])
 
         self.combo_eels_line_display = QComboBox()
         self.combo_eels_line_display.addItems([
+            "Selected edge only",
+            "Nearby selected edge ± range",
+            "Matched edges only",
             "Selected elements/groups",
             "All candidate edges in current energy range",
-            "Matched edges only",
-            "Selected edge only",
         ])
 
         self.combo_eels_edge = QComboBox()
         self.combo_eels_edge.addItems(sorted(EELS_EDGE_DB.keys()))
+        self.spin_eels_nearby = QDoubleSpinBox(); self.spin_eels_nearby.setRange(1.0, 1000.0); self.spin_eels_nearby.setDecimals(1); self.spin_eels_nearby.setValue(50.0); self.spin_eels_nearby.setSuffix(" eV")
 
         self.spin_eels_tol = QDoubleSpinBox()
         self.spin_eels_tol.setRange(.1, 100)
@@ -2945,7 +3016,7 @@ class RR2NMFGui(QMainWindow):
             sp.setDecimals(4)
             sp.setValue(0.0)
 
-        br = QPushButton("Run EELS interpretation")
+        br = QPushButton("Run EELS interpretation on selected source(s)")
         br.clicked.connect(self.run_eels_analysis)
         for lab, w in [
             ("Normalize", self.combo_eels_norm),
@@ -2953,6 +3024,7 @@ class RR2NMFGui(QMainWindow):
             ("Compare view", self.combo_eels_compare),
             ("Edge line display", self.combo_eels_line_display),
             ("Selected edge", self.combo_eels_edge),
+            ("Nearby edge range", self.spin_eels_nearby),
             ("Tolerance eV", self.spin_eels_tol),
             ("Min prominence", self.spin_eels_prom),
             ("Min distance ch", self.spin_eels_dist),
@@ -3566,13 +3638,45 @@ This does not modify the current rr-NMF/manual tree results.
             self.conv_result=conv
         if rr is not None:
             self.rr_result=rr
-        self._set_run_buttons_enabled(True); self.append_log(logs); self.refresh_views(); self.refresh_spectrum_sources()
+        self._set_run_buttons_enabled(True); self.append_log(logs); self.update_full_depth_options(); self.refresh_views(); self.refresh_spectrum_sources()
         if getattr(self, "_auto_score_active", False):
             self._continue_auto_score_after_worker()
 
     def on_analysis_failed(self,err):
         self._auto_score_active=False
         self._set_run_buttons_enabled(True); QMessageBox.critical(self,"Analysis failed",err); self.append_log(err)
+
+    def update_full_depth_options(self):
+        """Refresh selectable depths for Full Result without triggering expensive redraw."""
+        if not hasattr(self, "combo_full_depth"):
+            return
+        current = self.combo_full_depth.currentData()
+        if current is None:
+            current = 0
+        try:
+            current = int(current)
+        except Exception:
+            current = 0
+        depths = set([0])
+        rr = getattr(self, "rr_result", None)
+        if rr is not None:
+            for d in range(len(getattr(rr, "node_summaries_by_depth", []) or [])):
+                depths.add(int(d))
+        for tk in (getattr(self, "manual_depth_groups", {}) or {}).keys():
+            try:
+                depths.add(max(0, int(tk)-1))
+            except Exception:
+                pass
+        self.combo_full_depth.blockSignals(True)
+        self.combo_full_depth.clear()
+        for d in sorted(depths):
+            label = f"D{d}"
+            if (getattr(self, "manual_depth_groups", {}) or {}).get(d+1):
+                label += " merge/pass available"
+            self.combo_full_depth.addItem(label, int(d))
+        idx = self.combo_full_depth.findData(current)
+        self.combo_full_depth.setCurrentIndex(idx if idx >= 0 else max(0, self.combo_full_depth.count()-1))
+        self.combo_full_depth.blockSignals(False)
 
     def refresh_full_result_view(self):
         """Redraw only the Full Result tab from cached Conv/PCA/rr results.
@@ -3584,14 +3688,16 @@ This does not modify the current rr-NMF/manual tree results.
         """
         if not hasattr(self, "canvas_full"):
             return
+        self.update_full_depth_options()
         try:
             plot_full_result_comparison(
                 self.canvas_full.fig, self.conv_result, self.pca_result, self.rr_result,
                 getattr(self, "manual_depth_groups", {}), self.roi_axis_info,
-                selected_depth=int(self.spin_full_depth.value()) if hasattr(self, "spin_full_depth") else 0,
+                selected_depth=int(self.combo_full_depth.currentData()) if hasattr(self, "combo_full_depth") and self.combo_full_depth.currentData() is not None else 0,
                 cmap=self.combo_cmap.currentText() if hasattr(self, "combo_cmap") else "viridis",
                 maxn=int(self.spin_full_max.value()) if hasattr(self, "spin_full_max") else 30,
                 w_downsample_factor=self.spin_auto_w_downsample.value() if hasattr(self, "spin_auto_w_downsample") else 4,
+                pca_clip_negative=bool(self.chk_full_pca_clip.isChecked()) if hasattr(self, "chk_full_pca_clip") else False,
             )
             self.canvas_full.set_base(); self.canvas_full.draw()
         except Exception as e:
@@ -4065,6 +4171,25 @@ This does not modify the current rr-NMF/manual tree results.
             return None
         return self.sources[idx]
 
+    def _selected_spectrum_sources(self, list_widget):
+        """Return all selected, non-header spectrum sources; fallback to current item."""
+        out = []
+        for item in list_widget.selectedItems():
+            idx = item.data(Qt.UserRole)
+            if idx is None:
+                continue
+            try:
+                idx = int(idx)
+            except Exception:
+                continue
+            if 0 <= idx < len(getattr(self, "sources", [])):
+                out.append(self.sources[idx])
+        if not out:
+            one = self._selected_spectrum_source(list_widget)
+            if one is not None:
+                out = [one]
+        return out
+
     def refresh_spectrum_sources(self):
         self.sources = self.collect_spectrum_sources()
         if hasattr(self, "list_eds_src"):
@@ -4152,141 +4277,181 @@ This does not modify the current rr-NMF/manual tree results.
         return None
 
     def run_eds_analysis(self):
-        src = self._selected_spectrum_source(self.list_eds_src)
-        if src is None:
-            QMessageBox.warning(self, "No spectrum", "Select a spectrum source.")
+        srcs = self._selected_spectrum_sources(self.list_eds_src)
+        if not srcs:
+            QMessageBox.warning(self, "No spectrum", "Select one or more spectrum sources.")
             return
         if not self.eds_elements:
             QMessageBox.warning(self, "No elements", "Select elements first.")
             return
 
-        spec = np.asarray(src["spectrum"], dtype=np.float64)
-        x = energy_axis_as_keV(src["axis"], len(spec))
-        peaks = detect_simple_peaks(x, spec, self.spin_eds_prom.value(), self.spin_eds_dist.value())
-        hits = match_eds_lines_to_peaks(peaks, self.eds_elements, self.spin_eds_tol.value(), self.combo_eds_line.currentText())
-
+        all_rows = []
+        plot_srcs = []
         candidate_markers = [
             (float(r["energy_keV"]), f"{el} {r['line']}")
             for el in self.eds_elements
             for r in EDS_XRAY_LINE_DB.get(el, [])
         ]
-        matched_markers = [(float(r["line_keV"]), f"{r['element']} {r['line']}") for r in hits]
-        detected = [float(pk["energy"]) for pk in peaks]
+        matched_for_plot = []
+        detected_by_source = {}
+        for si, src in enumerate(srcs):
+            spec = np.asarray(src["spectrum"], dtype=np.float64)
+            x = energy_axis_as_keV(src["axis"], len(spec))
+            peaks = detect_simple_peaks(x, spec, self.spin_eds_prom.value(), self.spin_eds_dist.value())
+            hits = match_eds_lines_to_peaks(peaks, self.eds_elements, self.spin_eds_tol.value(), self.combo_eds_line.currentText())
+            for row in hits:
+                rr = dict(row)
+                rr["source"] = src.get("label", f"source {si+1}")
+                all_rows.append(rr)
+            matched_for_plot.extend([(float(r["line_keV"]), f"{r['element']} {r['line']}") for r in hits])
+            detected_by_source[si] = [float(pk["energy"]) for pk in peaks]
+            ss = dict(src); ss["energy"] = x; plot_srcs.append(ss)
 
-        plot_interpretation(
-            self.canvas_eds.fig, x, spec, candidate_markers,
-            "EDS Analysis: " + src["label"], "Energy (keV)",
-            self.combo_eds_norm.currentText(),
-            source_image=src.get("image", None),
-            cmap=self.combo_cmap.currentText(),
-            matched_markers=matched_markers,
-            detected_features=detected,
-        )
-        self.canvas_eds.set_base()
-        self.canvas_eds.draw()
-        self.eds_hits = hits
-        self.dataframe_to_table(pd.DataFrame(hits), self.table_eds)
+        # Deduplicate marker labels for plotting.
+        seen = set(); matched_markers = []
+        for xv, lab in matched_for_plot:
+            key = (round(float(xv), 6), lab)
+            if key not in seen:
+                seen.add(key); matched_markers.append((xv, lab))
+
+        if len(plot_srcs) > 1:
+            plot_multi_source_interpretation(
+                self.canvas_eds.fig, plot_srcs, candidate_markers, matched_markers,
+                f"EDS Analysis: {len(plot_srcs)} selected sources", "Energy (keV)",
+                self.combo_eds_norm.currentText(), self.combo_cmap.currentText(), detected_by_source,
+            )
+        else:
+            src = srcs[0]
+            spec = np.asarray(src["spectrum"], dtype=np.float64)
+            x = energy_axis_as_keV(src["axis"], len(spec))
+            plot_interpretation(
+                self.canvas_eds.fig, x, spec, candidate_markers,
+                "EDS Analysis: " + src["label"], "Energy (keV)",
+                self.combo_eds_norm.currentText(),
+                source_image=src.get("image", None),
+                cmap=self.combo_cmap.currentText(),
+                matched_markers=matched_markers,
+                detected_features=detected_by_source.get(0, []),
+            )
+        self.canvas_eds.set_base(); self.canvas_eds.draw()
+        self.eds_hits = all_rows
+        self.dataframe_to_table(pd.DataFrame(all_rows), self.table_eds)
 
     def run_eels_analysis(self):
-        src = self._selected_spectrum_source(self.list_eels_src)
-        if src is None:
-            QMessageBox.warning(self, "No spectrum", "Select a spectrum source.")
+        srcs = self._selected_spectrum_sources(self.list_eels_src)
+        if not srcs:
+            QMessageBox.warning(self, "No spectrum", "Select one or more spectrum sources.")
             return
 
         groups = [i.text() for i in self.list_eels_groups.selectedItems()] or ["All"]
         elements = list(getattr(self, "eels_elements", []))
-
-        spec = np.asarray(src["spectrum"], dtype=np.float64)
-        x = energy_axis_as_eV(src["axis"], len(spec))
-        features = detect_simple_peaks(x, spec, self.spin_eels_prom.value(), self.spin_eels_dist.value())
-        hits = match_eels_edges_to_features(features, self.spin_eels_tol.value(), groups, elements)
-
         selected_edge = self.combo_eels_edge.currentText() if hasattr(self, "combo_eels_edge") else None
-        display_mode = self.combo_eels_line_display.currentText() if hasattr(self, "combo_eels_line_display") else "Selected elements/groups"
-        xmin = float(np.nanmin(x)) if x.size else 0.0
-        xmax = float(np.nanmax(x)) if x.size else 0.0
-
-        candidate_markers = build_eels_candidate_markers(
-            groups, elements, xmin, xmax,
-            selected_edge=selected_edge,
-            display_mode=display_mode,
-        )
-        matched_markers = []
-        if display_mode in ["Matched edges only", "Selected elements/groups", "All candidate edges in current energy range"]:
-            matched_markers = [(float(r["edge_eV"]), str(r["edge"])) for r in hits]
-        detected = [float(ft["energy"]) for ft in features]
-
-        rows = list(hits)
-
-        if getattr(self, "combo_eels_mode", None) is not None and self.combo_eels_mode.currentText() == "Edge analysis" and selected_edge:
-            edge_e = float(EELS_EDGE_DB[selected_edge]["energy_eV"])
-            # If the user has not filled ranges, make a conservative default around the selected edge.
-            pre0 = self.spin_eels_pre0.value()
-            pre1 = self.spin_eels_pre1.value()
-            int0 = self.spin_eels_int0.value()
-            int1 = self.spin_eels_int1.value()
-            if pre1 <= pre0:
-                pre0 = edge_e - 40.0
-                pre1 = edge_e - 5.0
-            if int1 <= int0:
-                int0 = edge_e
-                int1 = edge_e + 50.0
-
-            analysis_row = eels_edge_analysis_for_spectrum(x, spec, selected_edge, pre0, pre1, int0, int1)
-            rows = [analysis_row] + rows
-
-            if display_mode == "Selected edge only":
-                candidate_markers = [(edge_e, selected_edge)]
-
+        display_mode = self.combo_eels_line_display.currentText() if hasattr(self, "combo_eels_line_display") else "Selected edge only"
         compare_mode = self.combo_eels_compare.currentText() if hasattr(self, "combo_eels_compare") else "Single spectrum"
-        if compare_mode == "Basis vs weighted raw stacked" and src.get("pair_key") is not None:
+
+        all_rows = []
+        plot_srcs = []
+        matched_all = []
+        detected_by_source = {}
+        candidate_markers_global = []
+
+        for si, src in enumerate(srcs):
+            spec = np.asarray(src["spectrum"], dtype=np.float64)
+            x = energy_axis_as_eV(src["axis"], len(spec))
+            features = detect_simple_peaks(x, spec, self.spin_eels_prom.value(), self.spin_eels_dist.value())
+            hits = match_eels_edges_to_features(features, self.spin_eels_tol.value(), groups, elements)
+            for row in hits:
+                rr = dict(row); rr["source"] = src.get("label", f"source {si+1}"); all_rows.append(rr)
+
+            xmin = float(np.nanmin(x)) if x.size else 0.0
+            xmax = float(np.nanmax(x)) if x.size else 0.0
+            candidate_markers = build_eels_candidate_markers(
+                groups, elements, xmin, xmax,
+                selected_edge=selected_edge,
+                display_mode=("Selected edge only" if display_mode == "Nearby selected edge ± range" else display_mode),
+            )
+            if display_mode == "Nearby selected edge ± range" and selected_edge in EELS_EDGE_DB:
+                center = float(EELS_EDGE_DB[selected_edge]["energy_eV"])
+                rng = float(self.spin_eels_nearby.value()) if hasattr(self, "spin_eels_nearby") else 50.0
+                candidate_markers = build_eels_candidate_markers(groups, elements, center-rng, center+rng, selected_edge=None, display_mode="Selected elements/groups")
+                candidate_markers = [(e, lab) for e, lab in candidate_markers if abs(float(e)-center) <= rng]
+                candidate_markers.insert(0, (center, selected_edge))
+            candidate_markers_global.extend(candidate_markers)
+
+            matched_markers = []
+            if display_mode in ["Matched edges only", "Selected elements/groups", "All candidate edges in current energy range", "Nearby selected edge ± range"]:
+                matched_markers = [(float(r["edge_eV"]), str(r["edge"])) for r in hits]
+            matched_all.extend(matched_markers)
+            detected_by_source[si] = [float(ft["energy"]) for ft in features]
+
+            if getattr(self, "combo_eels_mode", None) is not None and self.combo_eels_mode.currentText() == "Edge analysis" and selected_edge:
+                edge_e = float(EELS_EDGE_DB[selected_edge]["energy_eV"])
+                pre0, pre1 = self.spin_eels_pre0.value(), self.spin_eels_pre1.value()
+                int0, int1 = self.spin_eels_int0.value(), self.spin_eels_int1.value()
+                if pre1 <= pre0: pre0, pre1 = edge_e - 40.0, edge_e - 5.0
+                if int1 <= int0: int0, int1 = edge_e, edge_e + 50.0
+                analysis_row = eels_edge_analysis_for_spectrum(x, spec, selected_edge, pre0, pre1, int0, int1)
+                analysis_row["source"] = src.get("label", f"source {si+1}")
+                all_rows.insert(0, analysis_row)
+                if display_mode == "Selected edge only":
+                    candidate_markers = [(edge_e, selected_edge)]
+
+            ss = dict(src); ss["energy"] = x; plot_srcs.append(ss)
+
+        # Deduplicate markers.
+        def dedup(seq):
+            out=[]; seen=set()
+            for xv, lab in seq:
+                key=(round(float(xv), 6), str(lab))
+                if key not in seen:
+                    seen.add(key); out.append((float(xv), str(lab)))
+            return out
+        candidate_markers_global = dedup(candidate_markers_global)
+        matched_all = dedup(matched_all)
+
+        # Multi-source stacked mode, or whenever multiple sources are selected.
+        if len(plot_srcs) > 1 or compare_mode == "Selected sources stacked":
+            plot_multi_source_interpretation(
+                self.canvas_eels.fig, plot_srcs, candidate_markers_global, matched_all,
+                f"EELS Interpretation: {len(plot_srcs)} selected sources", "Energy (eV)",
+                self.combo_eels_norm.currentText(), self.combo_cmap.currentText(), detected_by_source,
+            )
+        elif compare_mode == "Basis vs weighted raw stacked" and srcs[0].get("pair_key") is not None:
+            src = srcs[0]
             basis = self.find_paired_source(src, "basis")
             weighted = self.find_paired_source(src, "weighted")
             if basis is not None and weighted is not None:
-                bspec = np.asarray(basis["spectrum"], dtype=np.float64)
-                wspec = np.asarray(weighted["spectrum"], dtype=np.float64)
+                x = energy_axis_as_eV(basis["axis"], len(basis["spectrum"]))
                 plot_stacked_basis_weighted(
-                    self.canvas_eels.fig,
-                    x,
-                    bspec,
-                    wspec,
-                    basis["label"],
-                    weighted["label"],
-                    candidate_markers,
-                    matched_markers,
-                    "Energy (eV)",
+                    self.canvas_eels.fig, x,
+                    np.asarray(basis["spectrum"], dtype=np.float64),
+                    np.asarray(weighted["spectrum"], dtype=np.float64),
+                    basis["label"], weighted["label"],
+                    candidate_markers_global, matched_all, "Energy (eV)",
                     norm=self.combo_eels_norm.currentText(),
                     source_image=src.get("image", None),
                     cmap=self.combo_cmap.currentText(),
-                    detected_features=detected,
+                    detected_features=detected_by_source.get(0, []),
                 )
             else:
-                plot_interpretation(
-                    self.canvas_eels.fig, x, spec, candidate_markers,
-                    "EELS Interpretation: " + src["label"], "Energy (eV)",
-                    self.combo_eels_norm.currentText(),
-                    source_image=src.get("image", None),
-                    cmap=self.combo_cmap.currentText(),
-                    matched_markers=matched_markers,
-                    detected_features=detected,
-                )
+                plot_multi_source_interpretation(self.canvas_eels.fig, plot_srcs, candidate_markers_global, matched_all, "EELS Interpretation", "Energy (eV)", self.combo_eels_norm.currentText(), self.combo_cmap.currentText(), detected_by_source)
         else:
+            src = srcs[0]
+            spec = np.asarray(src["spectrum"], dtype=np.float64)
+            x = energy_axis_as_eV(src["axis"], len(spec))
             plot_interpretation(
-                self.canvas_eels.fig, x, spec, candidate_markers,
+                self.canvas_eels.fig, x, spec, candidate_markers_global,
                 "EELS Interpretation: " + src["label"], "Energy (eV)",
                 self.combo_eels_norm.currentText(),
                 source_image=src.get("image", None),
                 cmap=self.combo_cmap.currentText(),
-                matched_markers=matched_markers,
-                detected_features=detected,
+                matched_markers=matched_all,
+                detected_features=detected_by_source.get(0, []),
             )
 
-        self.canvas_eels.set_base()
-        self.canvas_eels.draw()
-        self.eels_hits = rows
-        self.dataframe_to_table(pd.DataFrame(rows), self.table_eels)
-
-
+        self.canvas_eels.set_base(); self.canvas_eels.draw()
+        self.eels_hits = all_rows
+        self.dataframe_to_table(pd.DataFrame(all_rows), self.table_eels)
 
     def _combo_text_safe(self, combo):
         return combo.currentText() if combo is not None else ""
@@ -4456,6 +4621,61 @@ This does not modify the current rr-NMF/manual tree results.
                 node_df["depth_total_global_ratio"] = depth_sum
                 node_df["node_fraction_within_depth"] = node_df["global_ratio"] / depth_sum.replace(0, np.nan)
         self.dataframe_to_table(node_df,self.table_nodes)
+
+    def export_all_decomposition_results(self):
+        """Save Conventional NMF, PCA, rr-NMF, and merge/pass no-R outputs to NPZ.
+
+        Keys are variable-style names so they can be loaded directly with np.load(...).files.
+        """
+        if self.conv_result is None and self.pca_result is None and self.rr_result is None:
+            QMessageBox.warning(self, "No results", "Run NMF/PCA/rr-NMF before exporting decomposition results.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save all decomposition results", "decomposition_results.npz", "NPZ Files (*.npz)")
+        if not path:
+            return
+        if not path.lower().endswith(".npz"):
+            path += ".npz"
+        arrays = {}
+        meta_rows = []
+        def put(name, value, kind="", label=""):
+            key = _safe_var_name(name)
+            base = key
+            n = 2
+            while key in arrays:
+                key = f"{base}_{n}"; n += 1
+            arrays[key] = np.asarray(value)
+            meta_rows.append({"key": key, "kind": kind, "label": label})
+        try:
+            put("energy_axis", self.roi_axis_info.energy_axis, "axis", "energy axis")
+            if self.conv_result is not None:
+                for i, (w, h) in enumerate(zip(self.conv_result.W_images, self.conv_result.H_spectra)):
+                    put(f"conv_nmf_W_image_C{i}", w, "conv_W", f"Conventional NMF W image C{i}")
+                    put(f"conv_nmf_H_spectrum_C{i}", h, "conv_H", f"Conventional NMF H spectrum C{i}")
+            if self.pca_result is not None:
+                for i, (w, h) in enumerate(zip(getattr(self.pca_result, "W_images", []) or [], getattr(self.pca_result, "H_spectra", []) or [])):
+                    put(f"pca_score_image_PC{i+1}", w, "pca_score", f"PCA score image PC{i+1}")
+                    put(f"pca_loading_spectrum_PC{i+1}", h, "pca_loading", f"PCA loading spectrum PC{i+1}")
+                evr = getattr(self.pca_result, "explained_variance_ratio", None)
+                if evr is not None:
+                    put("pca_explained_variance_ratio", evr, "pca", "PCA explained variance ratio")
+            if self.rr_result is not None:
+                for d, nodes in enumerate(self.rr_result.node_summaries_by_depth):
+                    for n, ns in enumerate(nodes):
+                        for c, (w, h) in enumerate(zip(ns.component_maps, ns.component_spectra)):
+                            put(f"rr_depth{d}_node{n}_W_image_C{c}", w, "rr_W", f"rr D{d} N{n} W C{c}")
+                            put(f"rr_depth{d}_node{n}_H_spectrum_C{c}", h, "rr_H", f"rr D{d} N{n} H C{c}")
+                # residual-free merge/pass outputs for interpretation/final comparison.
+                for src in self.collect_residual_free_mergepass_sources():
+                    label = src.get("label", "rr_mergepass_noR")
+                    if src.get("image", None) is not None:
+                        put(label + "_W_image_noR", src["image"], "rr_mergepass_W_noR", label)
+                    put(label + "_spectrum_noR", src["spectrum"], "rr_mergepass_H_noR", label)
+            arrays["metadata_json"] = np.array(json.dumps(meta_rows, ensure_ascii=False, indent=2), dtype=object)
+            np.savez_compressed(path, **arrays)
+            self.append_log(f"Saved all decomposition results: {path} | arrays={len(arrays)}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export failed", str(e))
+            self.append_log(traceback.format_exc())
 
     def export_csv(self):
         out=QFileDialog.getExistingDirectory(self,"Select output directory")
