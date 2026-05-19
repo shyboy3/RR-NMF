@@ -2369,7 +2369,7 @@ def _component_colors(n):
     return [np.asarray(cmap(i)[:3], dtype=np.float64) for i in range(n)]
 
 
-def make_component_composite(images, mode="sum weighted color", norm_mode="percentile 99"):
+def make_component_composite(images, mode="sum weighted color", norm_mode="percentile 99", gain=1.0, gamma=1.0):
     norm = _normalize_maps_for_composite(images, norm_mode)
     if not norm:
         return None, [], []
@@ -2377,6 +2377,18 @@ def make_component_composite(images, mode="sum weighted color", norm_mode="perce
     n=len(norm)
     colors=_component_colors(n)
     mode=str(mode or "sum weighted color").lower()
+    if mode == "normalized hue blend":
+        rgb_num=np.zeros((h,w,3),dtype=np.float64)
+        denom=np.zeros((h,w),dtype=np.float64)
+        for a,c in zip(norm,colors):
+            rgb_num += a[...,None]*c.reshape(1,1,3)
+            denom += a
+        hue = rgb_num / (denom[...,None] + 1e-12)
+        brightness = np.clip(denom / (np.nanpercentile(denom,99) + 1e-12), 0, 1) if denom.size else denom
+        rgb = hue * brightness[...,None] * float(gain)
+        if float(gamma) != 1.0:
+            rgb = np.power(np.clip(rgb,0,1), 1.0/max(1e-6,float(gamma)))
+        return np.clip(rgb,0,1), norm, colors
     if mode == "max-color winner":
         stack=np.stack(norm,axis=0)
         idx=np.nanargmax(stack,axis=0)
@@ -2395,11 +2407,16 @@ def make_component_composite(images, mode="sum weighted color", norm_mode="perce
     mx=float(np.nanmax(rgb)) if rgb.size else 0.0
     if mx>1:
         rgb=rgb/mx
+    rgb = rgb * float(gain)
+    if float(gamma) != 1.0:
+        rgb = np.power(np.clip(rgb,0,1), 1.0/max(1e-6,float(gamma)))
     return np.clip(rgb,0,1), norm, colors
 
 
 def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum_indices=None, clicked_pixel=None,
-                               norm_mode="percentile 99", composite_mode="sum weighted color", spectrum_mode="Selected components all", topn=6):
+                               norm_mode="percentile 99", composite_mode="sum weighted color", spectrum_mode="Selected components all", topn=6,
+                               y_mode="auto", y_min=None, y_max=None, gain=1.0, gamma=1.0,
+                               inline_analysis=None):
     fig.clear()
     items=list(items or [])
     if not items:
@@ -2415,10 +2432,10 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
     images=[np.asarray(it['image'],dtype=np.float64) for it in sel]
     spectra=[np.asarray(it['spectrum'],dtype=np.float64) for it in sel]
     labels=[str(it.get('label',f'C{i}')) for i,it in zip(selected_indices,sel)]
-    rgb,norm_maps,colors=make_component_composite(images,composite_mode,norm_mode)
+    rgb,norm_maps,colors=make_component_composite(images,composite_mode,norm_mode,gain=gain,gamma=gamma)
     n_spec=len(sel)
-    fig.set_size_inches(18, max(8, 5+0.45*min(n_spec,20)), forward=True)
-    gs=fig.add_gridspec(2,3,width_ratios=[1.15,1.0,1.25],height_ratios=[1.0,1.0])
+    fig.set_size_inches(22, max(8, 5+0.40*min(n_spec,20)), forward=True)
+    gs=fig.add_gridspec(2,3,width_ratios=[1.05,0.70,2.65],height_ratios=[1.0,1.0])
     ax=fig.add_subplot(gs[:,0])
     if rgb is not None:
         ax.imshow(rgb,origin='upper',aspect='equal')
@@ -2465,8 +2482,10 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
     if not spec_ids:
         spec_ids=list(range(len(sel)))
     xaxis=None
+    y_mode_l=str(y_mode or 'auto').lower()
+    plotted=[]
     for rank,li in enumerate(spec_ids):
-        y=spectra[li].astype(np.float64)
+        y=spectra[li].astype(np.float64).copy()
         if contrib is not None:
             # contribution spectrum at the clicked pixel.  This uses the original W-image value
             # rather than the normalized map where possible.
@@ -2476,11 +2495,53 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
                 y=y*scale
             except Exception:
                 pass
+        if y_mode_l == 'normalize each':
+            m=float(np.nanmax(np.abs(y))) if y.size else 0.0
+            if m>0: y=y/m
+        elif y_mode_l == 'log1p':
+            y=np.sign(y)*np.log1p(np.abs(y))
         xaxis = axis.energy_axis if axis is not None and len(axis.energy_axis)==len(y) else np.arange(len(y))
         sp.plot(xaxis,y,linewidth=1.0,label=labels[li])
-    sp.set_title('Component spectra at selected pixel' if contrib is not None else 'Component spectra')
+        plotted.append(y)
+    if y_mode_l == 'manual':
+        try:
+            if y_min is not None and y_max is not None and float(y_max)>float(y_min):
+                sp.set_ylim(float(y_min), float(y_max))
+        except Exception:
+            pass
+    elif y_mode_l == 'auto p1-p99' and plotted:
+        yy=np.concatenate([np.asarray(v).reshape(-1) for v in plotted if np.asarray(v).size])
+        if yy.size:
+            lo,hi=np.nanpercentile(yy,[1,99])
+            if np.isfinite(lo) and np.isfinite(hi) and hi>lo:
+                sp.set_ylim(float(lo),float(hi))
+    sp.set_title(('Component spectra at selected pixel' if contrib is not None else 'Component spectra') + f' | Y: {y_mode}')
     sp.set_xlabel(axis.energy_label if axis is not None else 'Channel')
     sp.grid(True,alpha=0.25)
+    # Optional inline EDS/EELS analysis overlays directly on the Full Mapping spectrum axis.
+    if inline_analysis:
+        try:
+            kind = str(inline_analysis.get("kind", "")).upper()
+            ylo, yhi = sp.get_ylim()
+            span = max(1e-12, float(yhi - ylo))
+            if kind == "EELS":
+                edge_windows = inline_analysis.get("edge_windows", []) or []
+                _draw_edge_analysis_windows(sp, edge_windows, ylo, span, fontsize=8)
+                markers = inline_analysis.get("markers", []) or []
+                for xv, lab in markers:
+                    sp.axvline(float(xv), color="red", linestyle="-", linewidth=1.0, alpha=0.75)
+                    sp.text(float(xv), ylo + 0.90*span, str(lab), rotation=90, fontsize=7, color="red", va="top", ha="right")
+            elif kind == "EDS":
+                markers = inline_analysis.get("markers", []) or []
+                for xv, lab in markers:
+                    sp.axvline(float(xv), color="red", linestyle="-", linewidth=0.9, alpha=0.70)
+                    sp.text(float(xv), ylo + 0.90*span, str(lab), rotation=90, fontsize=7, color="red", va="top", ha="right")
+            label = inline_analysis.get("title", "")
+            if label:
+                sp.text(0.01, 0.98, str(label), transform=sp.transAxes, fontsize=8, va="top", ha="left",
+                        bbox=dict(facecolor="white", alpha=0.65, edgecolor="none"))
+        except Exception:
+            pass
     if len(spec_ids)<=12:
         sp.legend(fontsize=7)
     fig.subplots_adjust(left=0.03,right=0.985,top=0.92,bottom=0.08,wspace=0.32,hspace=0.28)
@@ -2904,7 +2965,7 @@ class AnalysisWorker(QThread):
 
 class RR2NMFGui(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v8.6 Full Mapping Analysis"); self.resize(1850,1080)
+        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v8.8 Full Mapping Inline Analysis"); self.resize(1850,1080)
         self.cube=None; self.original_cube=None; self.roi_cube=None; self.X=None; self.image_shape=None
         self.axis_info=make_default_axis_info((1,1,1)); self.roi_axis_info=make_default_axis_info((1,1,1))
         self.conv_result=None; self.rr_result=None; self.pca_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.bg_applied=False; self._raw_mouse_press=None; self.selected_raw_pixel=None
@@ -3064,11 +3125,11 @@ class RR2NMFGui(QMainWindow):
         map_ctrl1.addWidget(self.combo_map_depth)
         map_ctrl1.addWidget(QLabel("Component mode"))
         self.combo_map_component_mode=QComboBox(); self.combo_map_component_mode.addItems(["All", "User select"])
-        self.combo_map_component_mode.currentIndexChanged.connect(lambda *_: self.refresh_full_mapping_view())
+        self.combo_map_component_mode.currentIndexChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
         map_ctrl1.addWidget(self.combo_map_component_mode)
         map_ctrl1.addWidget(QLabel("Spectrum display"))
         self.combo_map_spectrum_mode=QComboBox(); self.combo_map_spectrum_mode.addItems(["Selected components all", "User selected spectra", "Top contributors at pixel"])
-        self.combo_map_spectrum_mode.currentIndexChanged.connect(lambda *_: self.refresh_full_mapping_view())
+        self.combo_map_spectrum_mode.currentIndexChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
         map_ctrl1.addWidget(self.combo_map_spectrum_mode)
         map_ctrl1.addStretch(1)
         mapping_lay.addLayout(map_ctrl1)
@@ -3076,35 +3137,65 @@ class RR2NMFGui(QMainWindow):
         map_ctrl2=QHBoxLayout()
         map_ctrl2.addWidget(QLabel("Normalize W maps"))
         self.combo_map_norm=QComboBox(); self.combo_map_norm.addItems(["percentile 99", "each component max", "global max", "none"])
-        self.combo_map_norm.currentIndexChanged.connect(lambda *_: self.refresh_full_mapping_view())
+        self.combo_map_norm.currentIndexChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
         map_ctrl2.addWidget(self.combo_map_norm)
         map_ctrl2.addWidget(QLabel("Composite mode"))
-        self.combo_map_mode=QComboBox(); self.combo_map_mode.addItems(["sum weighted color", "max-color winner", "RGB cycle"])
-        self.combo_map_mode.currentIndexChanged.connect(lambda *_: self.refresh_full_mapping_view())
+        self.combo_map_mode=QComboBox(); self.combo_map_mode.addItems(["normalized hue blend", "sum weighted color", "max-color winner", "RGB cycle"])
+        self.combo_map_mode.currentIndexChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
         map_ctrl2.addWidget(self.combo_map_mode)
         self.chk_map_pca_clip=QCheckBox("Clip PCA maps < 0 to 0")
         self.chk_map_pca_clip.stateChanged.connect(lambda *_: self.refresh_mapping_component_list())
         map_ctrl2.addWidget(self.chk_map_pca_clip)
         map_ctrl2.addWidget(QLabel("Top N spectra"))
         self.spin_map_topn=QSpinBox(); self.spin_map_topn.setRange(1,50); self.spin_map_topn.setValue(6)
-        self.spin_map_topn.valueChanged.connect(lambda *_: self.refresh_full_mapping_view())
+        self.spin_map_topn.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
         map_ctrl2.addWidget(self.spin_map_topn)
+        self.chk_map_auto_refresh=QCheckBox("Auto redraw on selection")
+        self.chk_map_auto_refresh.setChecked(False)
+        map_ctrl2.addWidget(self.chk_map_auto_refresh)
+        map_ctrl2.addWidget(QLabel("Y mode"))
+        self.combo_map_y_mode=QComboBox(); self.combo_map_y_mode.addItems(["auto", "auto p1-p99", "normalize each", "log1p", "manual"])
+        self.combo_map_y_mode.currentIndexChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
+        map_ctrl2.addWidget(self.combo_map_y_mode)
+        self.spin_map_ymin=QDoubleSpinBox(); self.spin_map_ymin.setRange(-1e12,1e12); self.spin_map_ymin.setDecimals(4); self.spin_map_ymin.setValue(0.0); self.spin_map_ymin.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
+        self.spin_map_ymax=QDoubleSpinBox(); self.spin_map_ymax.setRange(-1e12,1e12); self.spin_map_ymax.setDecimals(4); self.spin_map_ymax.setValue(1.0); self.spin_map_ymax.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
+        map_ctrl2.addWidget(QLabel("Y min/max")); map_ctrl2.addWidget(self.spin_map_ymin); map_ctrl2.addWidget(self.spin_map_ymax)
+        map_ctrl2.addWidget(QLabel("Gain/Gamma"))
+        self.spin_map_gain=QDoubleSpinBox(); self.spin_map_gain.setRange(0.05,10.0); self.spin_map_gain.setDecimals(2); self.spin_map_gain.setSingleStep(0.1); self.spin_map_gain.setValue(1.0); self.spin_map_gain.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
+        self.spin_map_gamma=QDoubleSpinBox(); self.spin_map_gamma.setRange(0.1,5.0); self.spin_map_gamma.setDecimals(2); self.spin_map_gamma.setSingleStep(0.1); self.spin_map_gamma.setValue(1.0); self.spin_map_gamma.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
+        map_ctrl2.addWidget(self.spin_map_gain); map_ctrl2.addWidget(self.spin_map_gamma)
         self.btn_refresh_mapping=QPushButton("Refresh Full Mapping")
         self.btn_refresh_mapping.clicked.connect(self.refresh_full_mapping_view)
-        map_ctrl2.addWidget(self.btn_refresh_mapping); map_ctrl2.addStretch(1)
+        map_ctrl2.addWidget(self.btn_refresh_mapping)
+        map_ctrl2.addWidget(QLabel("Inline analysis"))
+        self.combo_map_inline_analysis=QComboBox(); self.combo_map_inline_analysis.addItems(["None", "EDS", "EELS"])
+        map_ctrl2.addWidget(self.combo_map_inline_analysis)
+        self.btn_run_mapping_inline=QPushButton("Analyze shown spectra here")
+        self.btn_run_mapping_inline.clicked.connect(self.run_full_mapping_inline_analysis)
+        map_ctrl2.addWidget(self.btn_run_mapping_inline)
+        self.btn_clear_mapping_inline=QPushButton("Clear inline analysis")
+        self.btn_clear_mapping_inline.clicked.connect(self.clear_full_mapping_inline_analysis)
+        map_ctrl2.addWidget(self.btn_clear_mapping_inline); map_ctrl2.addStretch(1)
         mapping_lay.addLayout(map_ctrl2)
 
         map_lists=QHBoxLayout()
-        self.list_map_components=QListWidget(); self.list_map_components.setSelectionMode(QListWidget.MultiSelection); self.list_map_components.itemSelectionChanged.connect(lambda: self.refresh_full_mapping_view())
-        self.list_map_spectra=QListWidget(); self.list_map_spectra.setSelectionMode(QListWidget.MultiSelection); self.list_map_spectra.itemSelectionChanged.connect(lambda: self.refresh_full_mapping_view())
+        self.list_map_components=QListWidget(); self.list_map_components.setSelectionMode(QListWidget.MultiSelection); self.list_map_components.itemSelectionChanged.connect(lambda: self._on_mapping_selection_changed())
+        self.list_map_spectra=QListWidget(); self.list_map_spectra.setSelectionMode(QListWidget.MultiSelection); self.list_map_spectra.itemSelectionChanged.connect(lambda: self._on_mapping_selection_changed())
         map_lists.addWidget(QLabel("Components")); map_lists.addWidget(self.list_map_components, 2)
         map_lists.addWidget(QLabel("Spectra")); map_lists.addWidget(self.list_map_spectra, 2)
         mapping_lay.addLayout(map_lists)
         mapping_lay.addWidget(PlotPanel(self.canvas_full_mapping), 1)
+        self.table_mapping_inline=QTableWidget(); self.table_mapping_inline.setMinimumHeight(140)
+        mapping_lay.addWidget(QLabel("Inline EDS/EELS analysis results for the currently shown Full Mapping spectra"))
+        mapping_lay.addWidget(self.table_mapping_inline, 0)
         self.tabs.addTab(mapping_page,"Full Mapping Analysis")
         self._full_mapping_pixel=None
+        self.mapping_analysis_sources=[]
+        self._mapping_inline_analysis=None
         try:
             self.canvas_full_mapping.mpl_connect('button_press_event', self.on_full_mapping_click)
+            self.canvas_full_mapping.mpl_connect('key_press_event', self.on_full_mapping_key)
+            self.canvas_full_mapping.setFocusPolicy(Qt.ClickFocus)
         except Exception:
             pass
 
@@ -3919,6 +4010,204 @@ This does not modify the current rr-NMF/manual tree results.
         self._set_run_buttons_enabled(True); QMessageBox.critical(self,"Analysis failed",err); self.append_log(err)
 
 
+
+    def _on_mapping_control_changed(self, rebuild=False):
+        if bool(getattr(self, "chk_map_auto_refresh", None).isChecked()) if hasattr(self, "chk_map_auto_refresh") else True:
+            if rebuild:
+                self.refresh_mapping_component_list()
+            else:
+                self.refresh_full_mapping_view()
+
+    def _on_mapping_selection_changed(self):
+        # rr-NMF mapping lists can contain many items; avoid expensive redraw on every click by default.
+        if hasattr(self, "chk_map_auto_refresh") and self.chk_map_auto_refresh.isChecked():
+            self.refresh_full_mapping_view()
+
+    def _current_mapping_sources_for_analysis(self):
+        items=self._full_mapping_items() if hasattr(self, "_full_mapping_items") else []
+        if not items:
+            return []
+        comp_mode=self.combo_map_component_mode.currentText() if hasattr(self,"combo_map_component_mode") else "All"
+        selected=self._selected_mapping_indices(self.list_map_components, all_if_empty=(comp_mode != "User select"))
+        if not selected:
+            selected=list(range(len(items)))
+        spec_mode=self.combo_map_spectrum_mode.currentText() if hasattr(self,"combo_map_spectrum_mode") else "Selected components all"
+        spec_sel=self._selected_mapping_indices(self.list_map_spectra, all_if_empty=False)
+        if spec_mode == "User selected spectra" and spec_sel:
+            chosen=[i for i in spec_sel if i in selected]
+        else:
+            chosen=list(selected)
+        # If requested, keep only top contributors at current pixel.
+        if spec_mode == "Top contributors at pixel" and getattr(self,"_full_mapping_pixel",None) is not None:
+            x,y=self._full_mapping_pixel
+            vals=[]
+            for i in selected:
+                try:
+                    vals.append((float(np.asarray(items[i]["image"])[int(y),int(x)]), i))
+                except Exception:
+                    vals.append((0.0, i))
+            vals.sort(reverse=True)
+            topn=int(self.spin_map_topn.value()) if hasattr(self,"spin_map_topn") else 6
+            chosen=[i for _,i in vals[:max(1,topn)]]
+        out=[]
+        xpixypix=getattr(self,"_full_mapping_pixel",None)
+        for i in chosen:
+            if not (0 <= int(i) < len(items)):
+                continue
+            it=items[int(i)]
+            sp=np.asarray(it.get("spectrum"),dtype=np.float64).copy()
+            label=str(it.get("label",f"map {i}"))
+            if xpixypix is not None:
+                x,y=xpixypix
+                try:
+                    scale=float(np.asarray(it.get("image"))[int(y),int(x)])
+                    sp=sp*scale
+                    label += f" @x{x}y{y}"
+                except Exception:
+                    pass
+            out.append({
+                "label":"Mapping "+label,
+                "spectrum":sp,
+                "axis":self.roi_axis_info,
+                "image":it.get("image",None),
+                "kind":"mapping_selected",
+                "source_group":"Full Mapping selected spectra",
+                "pair_key":None,
+            })
+        return out
+
+
+    def clear_full_mapping_inline_analysis(self):
+        self._mapping_inline_analysis = None
+        try:
+            self.table_mapping_inline.clear()
+            self.table_mapping_inline.setRowCount(0)
+            self.table_mapping_inline.setColumnCount(0)
+        except Exception:
+            pass
+        self.refresh_full_mapping_view()
+
+    def run_full_mapping_inline_analysis(self):
+        """Run EDS/EELS analysis on the spectra currently shown in Full Mapping Analysis.
+
+        This does not push spectra into the EDS/EELS tabs.  It computes the same
+        interpretation-style diagnostics and draws the selected edge/line overlays
+        directly on the Full Mapping spectrum axis, with the numeric results in
+        the table below the plot.
+        """
+        mode = self.combo_map_inline_analysis.currentText() if hasattr(self, "combo_map_inline_analysis") else "None"
+        mode = str(mode or "None")
+        if mode == "None":
+            self.clear_full_mapping_inline_analysis()
+            return
+        srcs = self._current_mapping_sources_for_analysis()
+        if not srcs:
+            QMessageBox.warning(self, "No mapping spectra", "Select Full Mapping components/spectra first.")
+            return
+        rows = []
+        overlay = {"kind": mode.upper(), "title": f"Inline {mode} analysis: {len(srcs)} spectrum(s)"}
+        if mode.upper() == "EDS":
+            if not getattr(self, "eds_elements", []):
+                QMessageBox.warning(self, "No EDS elements", "Select EDS elements in the EDS Analysis panel first.")
+                return
+            matched_markers = []
+            for si, src in enumerate(srcs):
+                spec = np.asarray(src["spectrum"], dtype=np.float64)
+                x = energy_axis_as_keV(src["axis"], len(spec))
+                peaks = detect_simple_peaks(x, spec, self.spin_eds_prom.value(), self.spin_eds_dist.value())
+                hits = match_eds_lines_to_peaks(peaks, self.eds_elements, self.spin_eds_tol.value(), self.combo_eds_line.currentText())
+                for row in hits:
+                    rr = dict(row)
+                    rr["source"] = src.get("label", f"mapping {si+1}")
+                    rows.append(rr)
+                    matched_markers.append((float(rr["line_keV"]), f"{rr['element']} {rr['line']}"))
+            # Deduplicate markers.
+            seen = set(); markers=[]
+            for xv, lab in matched_markers:
+                key=(round(float(xv),6), str(lab))
+                if key not in seen:
+                    seen.add(key); markers.append((float(xv), str(lab)))
+            overlay["markers"] = markers
+        elif mode.upper() == "EELS":
+            selected_edges = self._selected_eels_edges()
+            selected_edge = self.combo_eels_edge.currentText() if hasattr(self, "combo_eels_edge") else None
+            if not selected_edges and selected_edge in EELS_EDGE_DB:
+                selected_edges = [selected_edge]
+            if not selected_edges:
+                QMessageBox.warning(self, "No EELS edge", "Select one or more EELS edges in the EELS Interpretation panel first.")
+                return
+            edge_windows=[]; markers=[]
+            for ed in selected_edges:
+                pre0, pre1, int0, int1 = self._edge_windows_for_analysis(ed)
+                ev = float(EELS_EDGE_DB[ed]["energy_eV"])
+                edge_windows.append({"edge": ed, "edge_eV": ev, "pre0": pre0, "pre1": pre1, "int0": int0, "int1": int1})
+                markers.append((ev, ed))
+            for si, src in enumerate(srcs):
+                spec = np.asarray(src["spectrum"], dtype=np.float64)
+                x = energy_axis_as_eV(src["axis"], len(spec))
+                label = src.get("label", f"mapping {si+1}")
+                area_by_edge = {}
+                for ed in selected_edges:
+                    pre0, pre1, int0, int1 = self._edge_windows_for_analysis(ed)
+                    ar = eels_edge_analysis_for_spectrum(x, spec, ed, pre0, pre1, int0, int1)
+                    ar["source"] = label
+                    ar["row_type"] = "edge_analysis"
+                    rows.append(ar)
+                    area_by_edge[ed] = float(ar.get("area_bg_subtracted", np.nan))
+                if len(selected_edges) >= 2:
+                    for i in range(len(selected_edges)):
+                        for j in range(i+1, len(selected_edges)):
+                            a, b = selected_edges[i], selected_edges[j]
+                            av, bv = area_by_edge.get(a, np.nan), area_by_edge.get(b, np.nan)
+                            ratio = av / bv if np.isfinite(av) and np.isfinite(bv) and abs(bv) > 1e-30 else np.nan
+                            rows.append({
+                                "row_type": "edge_ratio", "source": label, "ratio": f"{a}/{b}",
+                                "numerator_edge": a, "denominator_edge": b,
+                                "numerator_area": av, "denominator_area": bv,
+                                "edge_area_ratio": ratio,
+                            })
+            overlay["edge_windows"] = edge_windows
+            overlay["markers"] = markers
+        self._mapping_inline_analysis = overlay
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            front=[c for c in ["row_type","source","element","line","edge","ratio","line_keV","peak_keV","edge_eV","area_bg_subtracted","edge_area_ratio","onset_5pct_eV","fit_r","status"] if c in df.columns]
+            df=df[front+[c for c in df.columns if c not in front]]
+        try:
+            self.dataframe_to_table(df, self.table_mapping_inline)
+        except Exception:
+            pass
+        self.refresh_full_mapping_view()
+        self.append_log(f"Full Mapping inline {mode} analysis updated for {len(srcs)} spectrum(s).")
+
+    def send_mapping_spectra_to_analysis(self, target="EELS"):
+        srcs=self._current_mapping_sources_for_analysis()
+        if not srcs:
+            QMessageBox.warning(self,"No mapping spectra","Select mapping components/spectra first.")
+            return
+        self.mapping_analysis_sources=srcs
+        self.refresh_spectrum_sources()
+        # Select the newly added mapping spectra in the requested analysis list.
+        lw=self.list_eels_src if str(target).upper().startswith("EELS") else self.list_eds_src
+        lw.clearSelection()
+        for row in range(lw.count()):
+            it=lw.item(row)
+            idx=it.data(Qt.UserRole)
+            if idx is None:
+                continue
+            try:
+                src=self.sources[int(idx)]
+                if src.get("source_group")=="Full Mapping selected spectra":
+                    it.setSelected(True)
+                    lw.setCurrentRow(row)
+            except Exception:
+                pass
+        try:
+            self.tabs.setCurrentWidget(self.canvas_eels.parent().parent() if str(target).upper().startswith("EELS") else self.canvas_eds.parent().parent())
+        except Exception:
+            pass
+        self.append_log(f"Sent {len(srcs)} Full Mapping spectra to {target} analysis source list.")
+
     def update_mapping_depth_options(self):
         if not hasattr(self, "combo_map_depth"):
             return
@@ -4051,6 +4340,12 @@ This does not modify the current rr-NMF/manual tree results.
                 composite_mode=self.combo_map_mode.currentText() if hasattr(self,"combo_map_mode") else "sum weighted color",
                 spectrum_mode=spec_mode,
                 topn=int(self.spin_map_topn.value()) if hasattr(self,"spin_map_topn") else 6,
+                y_mode=self.combo_map_y_mode.currentText() if hasattr(self,"combo_map_y_mode") else "auto",
+                y_min=float(self.spin_map_ymin.value()) if hasattr(self,"spin_map_ymin") else None,
+                y_max=float(self.spin_map_ymax.value()) if hasattr(self,"spin_map_ymax") else None,
+                gain=float(self.spin_map_gain.value()) if hasattr(self,"spin_map_gain") else 1.0,
+                gamma=float(self.spin_map_gamma.value()) if hasattr(self,"spin_map_gamma") else 1.0,
+                inline_analysis=getattr(self, "_mapping_inline_analysis", None),
             )
             self.canvas_full_mapping.set_base(); self.canvas_full_mapping.draw()
         except Exception as e:
@@ -4071,6 +4366,32 @@ This does not modify the current rr-NMF/manual tree results.
         except Exception:
             pass
         self._full_mapping_pixel=(int(round(event.xdata)), int(round(event.ydata)))
+        try:
+            self.canvas_full_mapping.setFocus()
+        except Exception:
+            pass
+        self.refresh_full_mapping_view()
+
+    def on_full_mapping_key(self, event):
+        if getattr(self,"_full_mapping_pixel",None) is None:
+            return
+        x,y=self._full_mapping_pixel
+        dx=dy=0
+        if event.key in ("left",): dx=-1
+        elif event.key in ("right",): dx=1
+        elif event.key in ("up",): dy=-1
+        elif event.key in ("down",): dy=1
+        else: return
+        items=self._full_mapping_items()
+        if not items:
+            return
+        try:
+            arr=np.asarray(items[0].get("image"))
+            h,w=arr.shape[:2]
+            x=max(0,min(w-1,int(x)+dx)); y=max(0,min(h-1,int(y)+dy))
+        except Exception:
+            x=int(x)+dx; y=int(y)+dy
+        self._full_mapping_pixel=(x,y)
         self.refresh_full_mapping_view()
 
     def update_full_depth_options(self):
@@ -4546,6 +4867,8 @@ This does not modify the current rr-NMF/manual tree results.
         # Residual-free merge/pass spectra are listed separately from ordinary rr-NMF depth results.
         # They are rebuilt as sum(W_i H_i), without residual/r, for cleaner EDS/EELS interpretation.
         sources.extend(self.collect_residual_free_mergepass_sources())
+        # Full Mapping selected-pixel/component spectra can be sent here for EDS/EELS analysis.
+        sources.extend(list(getattr(self, "mapping_analysis_sources", []) or []))
         # Saved decomposition results loaded from NPZ can be analyzed without rerunning NMF/PCA/rr-NMF.
         sources.extend(list(getattr(self, "loaded_decomp_sources", []) or []))
         return sources
@@ -4563,6 +4886,7 @@ This does not modify the current rr-NMF/manual tree results.
             "Loaded PCA",
             "Loaded rr-NMF Depth Results",
             "Loaded rr-NMF Merge/Pass no-R",
+            "Full Mapping selected spectra",
             "Loaded Saved Results",
         ]
         used = set()
