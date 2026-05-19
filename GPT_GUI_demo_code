@@ -2574,12 +2574,20 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
             ylo, yhi = sp.get_ylim()
             span = max(1e-12, float(yhi - ylo))
             if kind == "EELS":
-                edge_windows = inline_analysis.get("edge_windows", []) or []
-                _draw_edge_analysis_windows(sp, edge_windows, ylo, span, fontsize=8)
+                # Full Mapping inline EELS mode intentionally shows selected edge
+                # lines only.  Pre-edge / integration windows are kept in the
+                # main EELS Interpretation tab where quantitative edge analysis
+                # is performed.
                 markers = inline_analysis.get("markers", []) or []
                 for xv, lab in markers:
-                    sp.axvline(float(xv), color="red", linestyle="-", linewidth=1.0, alpha=0.75)
-                    sp.text(float(xv), ylo + 0.90*span, str(lab), rotation=90, fontsize=7, color="red", va="top", ha="right")
+                    xv = float(xv)
+                    sp.axvline(xv, color="red", linestyle="-", linewidth=1.15, alpha=0.82)
+                    sp.text(xv, ylo + 0.90*span, str(lab), rotation=90, fontsize=7, color="red", va="top", ha="right")
+                    if sp_norm is not None:
+                        ylo2, yhi2 = sp_norm.get_ylim()
+                        span2 = max(1e-12, float(yhi2 - ylo2))
+                        sp_norm.axvline(xv, color="red", linestyle="-", linewidth=1.0, alpha=0.75)
+                        sp_norm.text(xv, ylo2 + 0.90*span2, str(lab), rotation=90, fontsize=7, color="red", va="top", ha="right")
             elif kind == "EDS":
                 markers = inline_analysis.get("markers", []) or []
                 for xv, lab in markers:
@@ -3213,13 +3221,6 @@ class RR2NMFGui(QMainWindow):
         self.chk_map_auto_refresh=QCheckBox("Auto redraw on selection")
         self.chk_map_auto_refresh.setChecked(False)
         map_ctrl2.addWidget(self.chk_map_auto_refresh)
-        map_ctrl2.addWidget(QLabel("Y mode"))
-        self.combo_map_y_mode=QComboBox(); self.combo_map_y_mode.addItems(["auto", "auto p1-p99", "normalize each", "log1p", "stacked normalized offset", "two panels raw+normalized", "manual"])
-        self.combo_map_y_mode.currentIndexChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
-        map_ctrl2.addWidget(self.combo_map_y_mode)
-        self.spin_map_ymin=QDoubleSpinBox(); self.spin_map_ymin.setRange(-1e12,1e12); self.spin_map_ymin.setDecimals(4); self.spin_map_ymin.setValue(0.0); self.spin_map_ymin.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
-        self.spin_map_ymax=QDoubleSpinBox(); self.spin_map_ymax.setRange(-1e12,1e12); self.spin_map_ymax.setDecimals(4); self.spin_map_ymax.setValue(1.0); self.spin_map_ymax.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
-        map_ctrl2.addWidget(QLabel("Y min/max")); map_ctrl2.addWidget(self.spin_map_ymin); map_ctrl2.addWidget(self.spin_map_ymax)
         map_ctrl2.addWidget(QLabel("Gain/Gamma"))
         self.spin_map_gain=QDoubleSpinBox(); self.spin_map_gain.setRange(0.05,10.0); self.spin_map_gain.setDecimals(2); self.spin_map_gain.setSingleStep(0.1); self.spin_map_gain.setValue(1.0); self.spin_map_gain.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
         self.spin_map_gamma=QDoubleSpinBox(); self.spin_map_gamma.setRange(0.1,5.0); self.spin_map_gamma.setDecimals(2); self.spin_map_gamma.setSingleStep(0.1); self.spin_map_gamma.setValue(1.0); self.spin_map_gamma.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
@@ -3227,21 +3228,39 @@ class RR2NMFGui(QMainWindow):
         self.btn_refresh_mapping=QPushButton("Refresh Full Mapping")
         self.btn_refresh_mapping.clicked.connect(self.refresh_full_mapping_view)
         map_ctrl2.addWidget(self.btn_refresh_mapping)
-        map_ctrl2.addWidget(QLabel("Inline analysis"))
+        map_ctrl2.addStretch(1)
+        mapping_lay.addLayout(map_ctrl2)
+
+        # Keep the Y-scale controls and inline EDS/EELS controls on a separate
+        # row.  The previous single-row layout became too wide on smaller
+        # screens and made the mapping panel difficult to use.
+        map_ctrl3=QHBoxLayout()
+        map_ctrl3.addWidget(QLabel("Y mode"))
+        self.combo_map_y_mode=QComboBox(); self.combo_map_y_mode.addItems(["auto", "auto p1-p99", "normalize each", "log1p", "stacked normalized offset", "two panels raw+normalized", "manual"])
+        self.combo_map_y_mode.currentIndexChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
+        map_ctrl3.addWidget(self.combo_map_y_mode)
+        self.spin_map_ymin=QDoubleSpinBox(); self.spin_map_ymin.setRange(-1e12,1e12); self.spin_map_ymin.setDecimals(4); self.spin_map_ymin.setValue(0.0); self.spin_map_ymin.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
+        self.spin_map_ymax=QDoubleSpinBox(); self.spin_map_ymax.setRange(-1e12,1e12); self.spin_map_ymax.setDecimals(4); self.spin_map_ymax.setValue(1.0); self.spin_map_ymax.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
+        map_ctrl3.addWidget(QLabel("Y min/max")); map_ctrl3.addWidget(self.spin_map_ymin); map_ctrl3.addWidget(self.spin_map_ymax)
+        map_ctrl3.addWidget(QLabel("Inline analysis"))
         self.combo_map_inline_analysis=QComboBox(); self.combo_map_inline_analysis.addItems(["None", "EDS", "EELS"])
-        map_ctrl2.addWidget(self.combo_map_inline_analysis)
+        map_ctrl3.addWidget(self.combo_map_inline_analysis)
         self.lbl_map_eels_elements=QLabel("EELS elems: use EELS tab")
         self.btn_map_eels_elements=QPushButton("Select EELS elements...")
         self.btn_map_eels_elements.clicked.connect(self.open_mapping_eels_periodic_selector)
-        map_ctrl2.addWidget(self.btn_map_eels_elements)
-        map_ctrl2.addWidget(self.lbl_map_eels_elements)
+        map_ctrl3.addWidget(self.btn_map_eels_elements)
+        map_ctrl3.addWidget(self.lbl_map_eels_elements)
+        map_ctrl3.addWidget(QLabel("EELS tol (eV)"))
+        self.spin_map_eels_tol=QDoubleSpinBox(); self.spin_map_eels_tol.setRange(0.0,10000.0); self.spin_map_eels_tol.setDecimals(2); self.spin_map_eels_tol.setSingleStep(1.0); self.spin_map_eels_tol.setValue(0.0)
+        map_ctrl3.addWidget(self.spin_map_eels_tol)
         self.btn_run_mapping_inline=QPushButton("Analyze visible spectra")
         self.btn_run_mapping_inline.clicked.connect(self.run_full_mapping_inline_analysis)
-        map_ctrl2.addWidget(self.btn_run_mapping_inline)
+        map_ctrl3.addWidget(self.btn_run_mapping_inline)
         self.btn_clear_mapping_inline=QPushButton("Clear inline analysis")
         self.btn_clear_mapping_inline.clicked.connect(self.clear_full_mapping_inline_analysis)
-        map_ctrl2.addWidget(self.btn_clear_mapping_inline); map_ctrl2.addStretch(1)
-        mapping_lay.addLayout(map_ctrl2)
+        map_ctrl3.addWidget(self.btn_clear_mapping_inline)
+        map_ctrl3.addStretch(1)
+        mapping_lay.addLayout(map_ctrl3)
 
         map_lists=QHBoxLayout()
         self.list_map_components=QListWidget(); self.list_map_components.setSelectionMode(QListWidget.MultiSelection); self.list_map_components.itemSelectionChanged.connect(lambda: self._on_mapping_selection_changed())
@@ -3249,10 +3268,18 @@ class RR2NMFGui(QMainWindow):
         map_lists.addWidget(QLabel("Components")); map_lists.addWidget(self.list_map_components, 2)
         map_lists.addWidget(QLabel("Spectra")); map_lists.addWidget(self.list_map_spectra, 2)
         mapping_lay.addLayout(map_lists)
-        mapping_lay.addWidget(PlotPanel(self.canvas_full_mapping), 1)
-        self.table_mapping_inline=QTableWidget(); self.table_mapping_inline.setMinimumHeight(140)
-        mapping_lay.addWidget(QLabel("Inline EDS/EELS analysis results for visible Full Mapping spectra"))
-        mapping_lay.addWidget(self.table_mapping_inline, 0)
+        mapping_split=QSplitter(Qt.Vertical)
+        mapping_split.setChildrenCollapsible(False)
+        mapping_split.setHandleWidth(8)
+        mapping_split.addWidget(PlotPanel(self.canvas_full_mapping))
+        inline_panel=QWidget(); inline_lay=QVBoxLayout(inline_panel); inline_lay.setContentsMargins(0,0,0,0)
+        inline_lay.addWidget(QLabel("Inline EDS/EELS analysis results for visible Full Mapping spectra"))
+        self.table_mapping_inline=QTableWidget(); self.table_mapping_inline.setMinimumHeight(90)
+        inline_lay.addWidget(self.table_mapping_inline)
+        mapping_split.addWidget(inline_panel)
+        mapping_split.setStretchFactor(0, 5)
+        mapping_split.setStretchFactor(1, 1)
+        mapping_lay.addWidget(mapping_split, 1)
         self.tabs.addTab(mapping_page,"Full Mapping Analysis")
         self._full_mapping_pixel=None
         self.mapping_analysis_sources=[]
@@ -4195,8 +4222,10 @@ This does not modify the current rr-NMF/manual tree results.
                     seen.add(key); markers.append((float(xv), str(lab)))
             overlay["markers"] = markers
         elif mode.upper() == "EELS":
-            # Prefer Full Mapping-specific periodic-table element selection.
-            # If it is empty, fall back to the EELS Interpretation tab selections.
+            # Full Mapping inline EELS mode is intentionally lightweight:
+            # select elements/edges, draw only edge lines, and list the markers.
+            # Quantitative pre-edge fitting / integration remains in the main
+            # EELS Interpretation tab.
             elems = list(getattr(self, "mapping_eels_elements", []) or [])
             if not elems:
                 elems = list(getattr(self, "eels_elements", []) or [])
@@ -4209,54 +4238,68 @@ This does not modify the current rr-NMF/manual tree results.
                 selected_edge = self.combo_eels_edge.currentText() if hasattr(self, "combo_eels_edge") else None
                 if not selected_edges and selected_edge in EELS_EDGE_DB:
                     selected_edges = [selected_edge]
-            # Filter edges to the actual spectrum energy range.  This prevents e.g. Al-K
-            # at 1560 eV being drawn/analyzed when the loaded EELS spectrum ends at 600 eV.
             try:
                 x0 = energy_axis_as_eV(srcs[0]["axis"], len(srcs[0]["spectrum"]))
                 xmin, xmax = float(np.nanmin(x0)), float(np.nanmax(x0))
-                selected_edges = [ed for ed in selected_edges if ed in EELS_EDGE_DB and xmin <= float(EELS_EDGE_DB[ed]["energy_eV"]) <= xmax]
             except Exception:
-                selected_edges = [ed for ed in selected_edges if ed in EELS_EDGE_DB]
-            if not selected_edges:
-                QMessageBox.warning(self, "No EELS edge", "No selected EELS edge falls inside the displayed spectrum energy range. Select suitable elements/edges.")
-                return
-            selected_edges = sorted(set(selected_edges), key=lambda ed: float(EELS_EDGE_DB[ed]["energy_eV"]))
-            edge_windows=[]; markers=[]
+                xmin, xmax = -np.inf, np.inf
+            tol = 0.0
+            try:
+                tol = float(self.spin_map_eels_tol.value())
+            except Exception:
+                tol = 0.0
+            # Keep only selected edges that are inside the actual displayed range.
+            # The tolerance is recorded and used for near-range reporting, but
+            # markers outside the plotted spectrum are not drawn.
+            selected_edges = sorted(set([ed for ed in selected_edges if ed in EELS_EDGE_DB]), key=lambda ed: float(EELS_EDGE_DB[ed]["energy_eV"]))
+            in_range_edges = []
+            near_edges = []
             for ed in selected_edges:
-                pre0, pre1, int0, int1 = self._edge_windows_for_analysis(ed)
                 ev = float(EELS_EDGE_DB[ed]["energy_eV"])
-                edge_windows.append({"edge": ed, "edge_eV": ev, "pre0": pre0, "pre1": pre1, "int0": int0, "int1": int1})
+                if xmin <= ev <= xmax:
+                    in_range_edges.append(ed)
+                elif (xmin - tol) <= ev <= (xmax + tol):
+                    near_edges.append(ed)
+            if not in_range_edges:
+                QMessageBox.warning(self, "No EELS edge", "No selected EELS edge falls inside the displayed spectrum energy range.")
+                return
+            markers=[]
+            for ed in in_range_edges:
+                row = EELS_EDGE_DB[ed]
+                ev = float(row["energy_eV"])
                 markers.append((ev, ed))
-            for si, src in enumerate(srcs):
-                spec = np.asarray(src["spectrum"], dtype=np.float64)
-                x = energy_axis_as_eV(src["axis"], len(spec))
-                label = src.get("label", f"mapping {si+1}")
-                area_by_edge = {}
-                for ed in selected_edges:
-                    pre0, pre1, int0, int1 = self._edge_windows_for_analysis(ed)
-                    ar = eels_edge_analysis_for_spectrum(x, spec, ed, pre0, pre1, int0, int1)
-                    ar["source"] = label
-                    ar["row_type"] = "edge_analysis"
-                    rows.append(ar)
-                    area_by_edge[ed] = float(ar.get("area_bg_subtracted", np.nan))
-                if len(selected_edges) >= 2:
-                    for i in range(len(selected_edges)):
-                        for j in range(i+1, len(selected_edges)):
-                            a, b = selected_edges[i], selected_edges[j]
-                            av, bv = area_by_edge.get(a, np.nan), area_by_edge.get(b, np.nan)
-                            ratio = av / bv if np.isfinite(av) and np.isfinite(bv) and abs(bv) > 1e-30 else np.nan
-                            rows.append({
-                                "row_type": "edge_ratio", "source": label, "ratio": f"{a}/{b}",
-                                "numerator_edge": a, "denominator_edge": b,
-                                "numerator_area": av, "denominator_area": bv,
-                                "edge_area_ratio": ratio,
-                            })
-            overlay["edge_windows"] = edge_windows
+                for si, src in enumerate(srcs):
+                    rows.append({
+                        "row_type": "edge_marker",
+                        "source": src.get("label", f"mapping {si+1}"),
+                        "edge": ed,
+                        "element": row.get("element", ""),
+                        "edge_type": row.get("edge", ""),
+                        "edge_eV": ev,
+                        "energy_min_eV": xmin,
+                        "energy_max_eV": xmax,
+                        "tolerance_eV": tol,
+                        "status": "line_shown",
+                    })
+            for ed in near_edges:
+                row = EELS_EDGE_DB[ed]
+                rows.append({
+                    "row_type": "near_edge_not_drawn",
+                    "source": "all visible spectra",
+                    "edge": ed,
+                    "element": row.get("element", ""),
+                    "edge_type": row.get("edge", ""),
+                    "edge_eV": float(row["energy_eV"]),
+                    "energy_min_eV": xmin,
+                    "energy_max_eV": xmax,
+                    "tolerance_eV": tol,
+                    "status": "within_tolerance_but_outside_plot_range",
+                })
             overlay["markers"] = markers
         self._mapping_inline_analysis = overlay
         df = pd.DataFrame(rows)
         if not df.empty:
-            front=[c for c in ["row_type","source","element","line","edge","ratio","line_keV","peak_keV","edge_eV","area_bg_subtracted","edge_area_ratio","onset_5pct_eV","fit_r","status"] if c in df.columns]
+            front=[c for c in ["row_type","source","element","line","edge","ratio","line_keV","peak_keV","edge_eV","energy_min_eV","energy_max_eV","tolerance_eV","area_bg_subtracted","edge_area_ratio","onset_5pct_eV","fit_r","status"] if c in df.columns]
             df=df[front+[c for c in df.columns if c not in front]]
         try:
             self.dataframe_to_table(df, self.table_mapping_inline)
