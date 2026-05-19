@@ -2434,8 +2434,8 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
     labels=[str(it.get('label',f'C{i}')) for i,it in zip(selected_indices,sel)]
     rgb,norm_maps,colors=make_component_composite(images,composite_mode,norm_mode,gain=gain,gamma=gamma)
     n_spec=len(sel)
-    fig.set_size_inches(22, max(8, 5+0.40*min(n_spec,20)), forward=True)
-    gs=fig.add_gridspec(2,3,width_ratios=[1.05,0.70,2.65],height_ratios=[1.0,1.0])
+    fig.set_size_inches(28, max(8, 5+0.40*min(n_spec,20)), forward=True)
+    gs=fig.add_gridspec(2,3,width_ratios=[1.00,0.60,4.20],height_ratios=[1.0,1.0])
     ax=fig.add_subplot(gs[:,0])
     if rgb is not None:
         ax.imshow(rgb,origin='upper',aspect='equal')
@@ -2470,7 +2470,13 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
         axleg.add_patch(matplotlib.patches.Rectangle((0.02,y0-k*0.05-0.025),0.04,0.025,color=c,transform=axleg.transAxes,clip_on=False))
         axleg.text(0.08,y0-k*0.05,lab,fontsize=8,va='center',transform=axleg.transAxes)
     axleg.set_title('Component colors',fontsize=10)
-    sp=fig.add_subplot(gs[:,2])
+    if str(y_mode or '').lower() == 'two panels raw+normalized':
+        sub = gs[:,2].subgridspec(2,1, height_ratios=[1.0,1.0], hspace=0.28)
+        sp = fig.add_subplot(sub[0,0])
+        sp_norm = fig.add_subplot(sub[1,0], sharex=sp)
+    else:
+        sp=fig.add_subplot(gs[:,2])
+        sp_norm = None
     mode=str(spectrum_mode or 'Selected components all')
     spec_ids=list(range(len(sel)))
     if mode == 'User selected spectra' and spectrum_indices:
@@ -2495,13 +2501,22 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
                 y=y*scale
             except Exception:
                 pass
+        y_raw = y.copy()
         if y_mode_l == 'normalize each':
             m=float(np.nanmax(np.abs(y))) if y.size else 0.0
             if m>0: y=y/m
         elif y_mode_l == 'log1p':
             y=np.sign(y)*np.log1p(np.abs(y))
+        elif y_mode_l == 'stacked normalized offset':
+            m=float(np.nanmax(np.abs(y))) if y.size else 0.0
+            y=(y/m if m>0 else y) + float(rank)*1.15
         xaxis = axis.energy_axis if axis is not None and len(axis.energy_axis)==len(y) else np.arange(len(y))
-        sp.plot(xaxis,y,linewidth=1.0,label=labels[li])
+        sp.plot(xaxis,y,linewidth=1.05,label=labels[li])
+        if sp_norm is not None:
+            yn = y_raw.copy()
+            m=float(np.nanmax(np.abs(yn))) if yn.size else 0.0
+            if m>0: yn=yn/m
+            sp_norm.plot(xaxis, yn, linewidth=1.0, label=labels[li])
         plotted.append(y)
     if y_mode_l == 'manual':
         try:
@@ -2518,6 +2533,10 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
     sp.set_title(('Component spectra at selected pixel' if contrib is not None else 'Component spectra') + f' | Y: {y_mode}')
     sp.set_xlabel(axis.energy_label if axis is not None else 'Channel')
     sp.grid(True,alpha=0.25)
+    if sp_norm is not None:
+        sp_norm.set_title('Same spectra normalized individually')
+        sp_norm.set_xlabel(axis.energy_label if axis is not None else 'Channel')
+        sp_norm.grid(True, alpha=0.25)
     # Optional inline EDS/EELS analysis overlays directly on the Full Mapping spectrum axis.
     if inline_analysis:
         try:
@@ -2965,7 +2984,7 @@ class AnalysisWorker(QThread):
 
 class RR2NMFGui(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v8.8 Full Mapping Inline Analysis"); self.resize(1850,1080)
+        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v8.9 Mapping EELS UI/Perf"); self.resize(1850,1080)
         self.cube=None; self.original_cube=None; self.roi_cube=None; self.X=None; self.image_shape=None
         self.axis_info=make_default_axis_info((1,1,1)); self.roi_axis_info=make_default_axis_info((1,1,1))
         self.conv_result=None; self.rr_result=None; self.pca_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.bg_applied=False; self._raw_mouse_press=None; self.selected_raw_pixel=None
@@ -2976,8 +2995,10 @@ class RR2NMFGui(QMainWindow):
         central=QWidget(); self.setCentralWidget(central); layout=QHBoxLayout(central); split=QSplitter(Qt.Horizontal); layout.addWidget(split)
         ctrl=QWidget(); cl=QVBoxLayout(ctrl)
         ctrl_scroll=QScrollArea(); ctrl_scroll.setWidget(ctrl); ctrl_scroll.setWidgetResizable(True)
-        ctrl_scroll.setMinimumWidth(360)
-        split.addWidget(ctrl_scroll); split.setStretchFactor(1,1)
+        ctrl_scroll.setMinimumWidth(420)
+        ctrl_scroll.setMaximumWidth(1400)
+        split.addWidget(ctrl_scroll)
+        split.setChildrenCollapsible(False)
 
         g=QGroupBox("Data / ROI"); f=QFormLayout(g)
         self.btn_load=QPushButton("Load EELS/EDS Data"); self.btn_load.clicked.connect(self.load_file)
@@ -3087,6 +3108,7 @@ class RR2NMFGui(QMainWindow):
         self.log=QTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(180); cl.addWidget(QLabel("Log")); cl.addWidget(self.log); cl.addStretch(1)
 
         self.tabs=QTabWidget(); split.addWidget(self.tabs)
+        split.setStretchFactor(0,0); split.setStretchFactor(1,1); split.setSizes([560,1290])
         self.canvas_raw=Canvas(14,5.5); self._connect_raw_roi_mouse(); self.tabs.addTab(PlotPanel(self.canvas_raw),"Raw Data")
         self.canvas_tree=Canvas(14,10); tree_page=QWidget(); tl=QVBoxLayout(tree_page); tl.addWidget(PlotPanel(self.canvas_tree),5); tl.addWidget(self._build_combine_panel(),2); self.tabs.addTab(tree_page,"rr-NMF Tree")
         self.canvas_conv=Canvas(16,10); self.tabs.addTab(PlotPanel(self.canvas_conv),"Conventional NMF")
@@ -3154,7 +3176,7 @@ class RR2NMFGui(QMainWindow):
         self.chk_map_auto_refresh.setChecked(False)
         map_ctrl2.addWidget(self.chk_map_auto_refresh)
         map_ctrl2.addWidget(QLabel("Y mode"))
-        self.combo_map_y_mode=QComboBox(); self.combo_map_y_mode.addItems(["auto", "auto p1-p99", "normalize each", "log1p", "manual"])
+        self.combo_map_y_mode=QComboBox(); self.combo_map_y_mode.addItems(["auto", "auto p1-p99", "normalize each", "log1p", "stacked normalized offset", "two panels raw+normalized", "manual"])
         self.combo_map_y_mode.currentIndexChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
         map_ctrl2.addWidget(self.combo_map_y_mode)
         self.spin_map_ymin=QDoubleSpinBox(); self.spin_map_ymin.setRange(-1e12,1e12); self.spin_map_ymin.setDecimals(4); self.spin_map_ymin.setValue(0.0); self.spin_map_ymin.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
@@ -3170,7 +3192,12 @@ class RR2NMFGui(QMainWindow):
         map_ctrl2.addWidget(QLabel("Inline analysis"))
         self.combo_map_inline_analysis=QComboBox(); self.combo_map_inline_analysis.addItems(["None", "EDS", "EELS"])
         map_ctrl2.addWidget(self.combo_map_inline_analysis)
-        self.btn_run_mapping_inline=QPushButton("Analyze shown spectra here")
+        self.lbl_map_eels_elements=QLabel("EELS elems: use EELS tab")
+        self.btn_map_eels_elements=QPushButton("Select EELS elements...")
+        self.btn_map_eels_elements.clicked.connect(self.open_mapping_eels_periodic_selector)
+        map_ctrl2.addWidget(self.btn_map_eels_elements)
+        map_ctrl2.addWidget(self.lbl_map_eels_elements)
+        self.btn_run_mapping_inline=QPushButton("Analyze visible spectra")
         self.btn_run_mapping_inline.clicked.connect(self.run_full_mapping_inline_analysis)
         map_ctrl2.addWidget(self.btn_run_mapping_inline)
         self.btn_clear_mapping_inline=QPushButton("Clear inline analysis")
@@ -3186,12 +3213,13 @@ class RR2NMFGui(QMainWindow):
         mapping_lay.addLayout(map_lists)
         mapping_lay.addWidget(PlotPanel(self.canvas_full_mapping), 1)
         self.table_mapping_inline=QTableWidget(); self.table_mapping_inline.setMinimumHeight(140)
-        mapping_lay.addWidget(QLabel("Inline EDS/EELS analysis results for the currently shown Full Mapping spectra"))
+        mapping_lay.addWidget(QLabel("Inline EDS/EELS analysis results for visible Full Mapping spectra"))
         mapping_lay.addWidget(self.table_mapping_inline, 0)
         self.tabs.addTab(mapping_page,"Full Mapping Analysis")
         self._full_mapping_pixel=None
         self.mapping_analysis_sources=[]
         self._mapping_inline_analysis=None
+        self.mapping_eels_elements=[]
         try:
             self.canvas_full_mapping.mpl_connect('button_press_event', self.on_full_mapping_click)
             self.canvas_full_mapping.mpl_connect('key_press_event', self.on_full_mapping_key)
@@ -4129,13 +4157,32 @@ This does not modify the current rr-NMF/manual tree results.
                     seen.add(key); markers.append((float(xv), str(lab)))
             overlay["markers"] = markers
         elif mode.upper() == "EELS":
-            selected_edges = self._selected_eels_edges()
-            selected_edge = self.combo_eels_edge.currentText() if hasattr(self, "combo_eels_edge") else None
-            if not selected_edges and selected_edge in EELS_EDGE_DB:
-                selected_edges = [selected_edge]
+            # Prefer Full Mapping-specific periodic-table element selection.
+            # If it is empty, fall back to the EELS Interpretation tab selections.
+            elems = list(getattr(self, "mapping_eels_elements", []) or [])
+            if not elems:
+                elems = list(getattr(self, "eels_elements", []) or [])
+            selected_edges = []
+            if elems:
+                eset = set(elems)
+                selected_edges = [name for name, row in EELS_EDGE_DB.items() if row.get("element") in eset]
+            else:
+                selected_edges = self._selected_eels_edges()
+                selected_edge = self.combo_eels_edge.currentText() if hasattr(self, "combo_eels_edge") else None
+                if not selected_edges and selected_edge in EELS_EDGE_DB:
+                    selected_edges = [selected_edge]
+            # Filter edges to the actual spectrum energy range.  This prevents e.g. Al-K
+            # at 1560 eV being drawn/analyzed when the loaded EELS spectrum ends at 600 eV.
+            try:
+                x0 = energy_axis_as_eV(srcs[0]["axis"], len(srcs[0]["spectrum"]))
+                xmin, xmax = float(np.nanmin(x0)), float(np.nanmax(x0))
+                selected_edges = [ed for ed in selected_edges if ed in EELS_EDGE_DB and xmin <= float(EELS_EDGE_DB[ed]["energy_eV"]) <= xmax]
+            except Exception:
+                selected_edges = [ed for ed in selected_edges if ed in EELS_EDGE_DB]
             if not selected_edges:
-                QMessageBox.warning(self, "No EELS edge", "Select one or more EELS edges in the EELS Interpretation panel first.")
+                QMessageBox.warning(self, "No EELS edge", "No selected EELS edge falls inside the displayed spectrum energy range. Select suitable elements/edges.")
                 return
+            selected_edges = sorted(set(selected_edges), key=lambda ed: float(EELS_EDGE_DB[ed]["energy_eV"]))
             edge_windows=[]; markers=[]
             for ed in selected_edges:
                 pre0, pre1, int0, int1 = self._edge_windows_for_analysis(ed)
@@ -4239,6 +4286,16 @@ This does not modify the current rr-NMF/manual tree results.
 
     def _full_mapping_items(self):
         method = self.combo_map_method.currentText() if hasattr(self,"combo_map_method") else "Conventional NMF"
+        depth_key = None
+        if hasattr(self, "combo_map_depth") and self.combo_map_depth.currentData() is not None:
+            try:
+                depth_key = int(self.combo_map_depth.currentData())
+            except Exception:
+                depth_key = None
+        group_sig = tuple((int(k), tuple(str((g or {}).get("name", "")) + ":" + ",".join(map(str, (g or {}).get("member_labels", (g or {}).get("members", [])) or [])) for g in (v or []))) for k, v in sorted((getattr(self, "manual_depth_groups", {}) or {}).items()))
+        cache_key = (method, depth_key, bool(self.chk_map_pca_clip.isChecked()) if hasattr(self,"chk_map_pca_clip") else False, id(getattr(self,"conv_result",None)), id(getattr(self,"pca_result",None)), id(getattr(self,"rr_result",None)), group_sig)
+        if getattr(self, "_full_mapping_items_cache_key", None) == cache_key and getattr(self, "_full_mapping_items_cache", None) is not None:
+            return self._full_mapping_items_cache
         items=[]
         if method == "Conventional NMF":
             conv=getattr(self,"conv_result",None)
@@ -4281,6 +4338,8 @@ This does not modify the current rr-NMF/manual tree results.
                     for n,ns in enumerate(rr.node_summaries_by_depth[depth]):
                         for c,(im,sp) in enumerate(zip(ns.component_maps, ns.component_spectra)):
                             items.append({"label":f"D{depth} N{n} C{c}","image":np.asarray(im),"spectrum":np.asarray(sp)})
+        self._full_mapping_items_cache_key = cache_key
+        self._full_mapping_items_cache = items
         return items
 
     def refresh_mapping_component_list(self):
@@ -4962,6 +5021,22 @@ This does not modify the current rr-NMF/manual tree results.
                         lw.setCurrentRow(row)
                         break
 
+
+    def open_mapping_eels_periodic_selector(self):
+        dlg = FullPeriodicTableDialog(
+            "Full Mapping EELS element selector",
+            getattr(self, "mapping_eels_elements", []),
+            EELS_ELEMENT_PRESETS,
+            available_elements=set(EELS_ELEMENTS),
+            parent=self,
+        )
+        if dlg.exec_() == QDialog.Accepted:
+            self.mapping_eels_elements = dlg.selected_elements()
+            if hasattr(self, "lbl_map_eels_elements"):
+                txt = ", ".join(self.mapping_eels_elements[:8])
+                if len(self.mapping_eels_elements) > 8:
+                    txt += f" ... ({len(self.mapping_eels_elements)})"
+                self.lbl_map_eels_elements.setText("EELS elems: " + (txt if txt else "use EELS tab"))
 
     def open_eds_periodic_selector(self):
         dlg = PeriodicTableSelectorDialog(
