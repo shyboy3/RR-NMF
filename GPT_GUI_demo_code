@@ -2371,8 +2371,15 @@ def _normalize_maps_for_composite(images, mode="percentile 99", eps=1e-12):
 
 
 def _component_colors(n):
-    import matplotlib.cm as cm
-    cmap = cm.get_cmap('tab20' if n <= 20 else 'hsv', max(n, 1))
+    # Matplotlib >=3.7 deprecates matplotlib.cm.get_cmap(...).
+    # Use the colormaps registry and resample so this stays compatible with
+    # newer Matplotlib versions while preserving the old behavior.
+    name = 'tab20' if n <= 20 else 'hsv'
+    try:
+        cmap = matplotlib.colormaps.get_cmap(name).resampled(max(n, 1))
+    except Exception:
+        import matplotlib.cm as cm
+        cmap = cm.get_cmap(name, max(n, 1))
     return [np.asarray(cmap(i)[:3], dtype=np.float64) for i in range(n)]
 
 
@@ -2497,11 +2504,13 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
     xaxis=None
     y_mode_l=str(y_mode or 'auto').lower()
     plotted=[]
+    raw_for_lower=[]
+    lower_meta=[]
     for rank,li in enumerate(spec_ids):
         y=spectra[li].astype(np.float64).copy()
         if contrib is not None:
-            # contribution spectrum at the clicked pixel.  This uses the original W-image value
-            # rather than the normalized map where possible.
+            # Contribution spectrum at the clicked pixel. This uses the original W-image
+            # value rather than the normalized map where possible.
             xpix,ypix=clicked_pixel
             try:
                 scale=float(images[li][int(ypix),int(xpix)])
@@ -2520,11 +2529,25 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
         xaxis = axis.energy_axis if axis is not None and len(axis.energy_axis)==len(y) else np.arange(len(y))
         sp.plot(xaxis,y,linewidth=1.05,label=labels[li])
         if sp_norm is not None:
-            yn = y_raw.copy()
-            m=float(np.nanmax(np.abs(yn))) if yn.size else 0.0
-            if m>0: yn=yn/m
-            sp_norm.plot(xaxis, yn, linewidth=1.0, label=labels[li])
+            raw_for_lower.append(y_raw.copy())
+            lower_meta.append((xaxis, labels[li]))
         plotted.append(y)
+
+    # For the two-panel mode, the lower panel should still respond when the
+    # clicked pixel changes. Per-spectrum normalization removes the scalar
+    # W(x,y) contribution entirely, so use a common normalization over the
+    # displayed pixel-weighted spectra instead. This keeps shape comparison
+    # possible while preserving relative clicked-pixel contribution changes.
+    if sp_norm is not None and raw_for_lower:
+        common = 0.0
+        try:
+            common = float(np.nanmax(np.abs(np.concatenate([np.asarray(v).reshape(-1) for v in raw_for_lower if np.asarray(v).size]))))
+        except Exception:
+            common = 0.0
+        if common <= 0 or not np.isfinite(common):
+            common = 1.0
+        for yn, (xaxis_l, lab_l) in zip(raw_for_lower, lower_meta):
+            sp_norm.plot(xaxis_l, np.asarray(yn, dtype=np.float64)/common, linewidth=1.0, label=lab_l)
     if y_mode_l == 'manual':
         try:
             if y_min is not None and y_max is not None and float(y_max)>float(y_min):
@@ -2541,7 +2564,7 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
     sp.set_xlabel(axis.energy_label if axis is not None else 'Channel')
     sp.grid(True,alpha=0.25)
     if sp_norm is not None:
-        sp_norm.set_title('Same spectra normalized individually')
+        sp_norm.set_title('Same spectra, common-normalized after pixel weighting')
         sp_norm.set_xlabel(axis.energy_label if axis is not None else 'Channel')
         sp_norm.grid(True, alpha=0.25)
     # Optional inline EDS/EELS analysis overlays directly on the Full Mapping spectrum axis.
@@ -5038,7 +5061,7 @@ This does not modify the current rr-NMF/manual tree results.
 
 
     def open_mapping_eels_periodic_selector(self):
-        dlg = FullPeriodicTableDialog(
+        dlg = PeriodicTableSelectorDialog(
             "Full Mapping EELS element selector",
             getattr(self, "mapping_eels_elements", []),
             EELS_ELEMENT_PRESETS,
