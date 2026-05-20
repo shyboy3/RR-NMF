@@ -2483,7 +2483,7 @@ def make_component_composite(images, mode="sum weighted color", norm_mode="perce
 
 def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum_indices=None, clicked_pixel=None,
                                norm_mode="percentile 99", composite_mode="sum weighted color", spectrum_mode="Selected components all", topn=6,
-                               y_mode="auto", y_min=None, y_max=None, y_max_lower=None, gain=1.0, gamma=1.0,
+                               y_mode="auto", y_min=None, y_max=None, y_min_lower=None, y_max_lower=None, gain=1.0, gamma=1.0,
                                inline_analysis=None):
     fig.clear()
     items=list(items or [])
@@ -3336,11 +3336,13 @@ class RR2NMFGui(QMainWindow):
         self.combo_map_y_mode=QComboBox(); self.combo_map_y_mode.addItems(["auto", "auto p1-p99", "normalize each", "log1p", "stacked normalized offset", "two panels raw split", "manual"])
         self.combo_map_y_mode.currentIndexChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
         map_ctrl3.addWidget(self.combo_map_y_mode)
-        self.spin_map_ymin=QDoubleSpinBox(); self.spin_map_ymin.setRange(-1e12,1e12); self.spin_map_ymin.setDecimals(4); self.spin_map_ymin.setValue(0.0); self.spin_map_ymin.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
-        self.spin_map_ymax=QDoubleSpinBox(); self.spin_map_ymax.setRange(-1e12,1e12); self.spin_map_ymax.setDecimals(4); self.spin_map_ymax.setValue(0.0); self.spin_map_ymax.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
+        # Mapping spectrum Y-axis limits use text inputs so very large scientific values
+        # such as 1e15 can be entered without QDoubleSpinBox range/length limits.
+        self.spin_map_ymin=QLineEdit("0"); self.spin_map_ymin.setPlaceholderText("auto/0 or e.g. -1e15"); self.spin_map_ymin.setMaximumWidth(105); self.spin_map_ymin.editingFinished.connect(lambda: self._on_mapping_control_changed(rebuild=False))
+        self.spin_map_ymax=QLineEdit("0"); self.spin_map_ymax.setPlaceholderText("auto/0 or e.g. 1e15"); self.spin_map_ymax.setMaximumWidth(105); self.spin_map_ymax.editingFinished.connect(lambda: self._on_mapping_control_changed(rebuild=False))
         map_ctrl3.addWidget(QLabel("High Panel Ymin/Ymax")); map_ctrl3.addWidget(self.spin_map_ymin); map_ctrl3.addWidget(self.spin_map_ymax)
-        self.spin_map_ymin_lower=QDoubleSpinBox(); self.spin_map_ymin_lower.setRange(-1e12,1e12); self.spin_map_ymin_lower.setDecimals(4); self.spin_map_ymin_lower.setValue(0.0); self.spin_map_ymin_lower.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
-        self.spin_map_ymax_lower=QDoubleSpinBox(); self.spin_map_ymax_lower.setRange(-1e12,1e12); self.spin_map_ymax_lower.setDecimals(4); self.spin_map_ymax_lower.setValue(0.0); self.spin_map_ymax_lower.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
+        self.spin_map_ymin_lower=QLineEdit("0"); self.spin_map_ymin_lower.setPlaceholderText("auto/0 or e.g. -1e15"); self.spin_map_ymin_lower.setMaximumWidth(105); self.spin_map_ymin_lower.editingFinished.connect(lambda: self._on_mapping_control_changed(rebuild=False))
+        self.spin_map_ymax_lower=QLineEdit("0"); self.spin_map_ymax_lower.setPlaceholderText("auto/0 or e.g. 1e15"); self.spin_map_ymax_lower.setMaximumWidth(105); self.spin_map_ymax_lower.editingFinished.connect(lambda: self._on_mapping_control_changed(rebuild=False))
         map_ctrl3.addWidget(QLabel("Low Panel Ymin/Ymax")); map_ctrl3.addWidget(self.spin_map_ymin_lower); map_ctrl3.addWidget(self.spin_map_ymax_lower)
         map_ctrl3.addWidget(QLabel("Inline analysis"))
         self.combo_map_inline_analysis=QComboBox(); self.combo_map_inline_analysis.addItems(["None", "EDS", "EELS"])
@@ -4559,6 +4561,22 @@ This does not modify the current rr-NMF/manual tree results.
             vals=list(range(list_widget.count()))
         return vals
 
+    def _parse_float_edit(self, widget, default=0.0):
+        """Parse mapping numeric QLineEdit/QDoubleSpinBox values, including scientific notation."""
+        try:
+            if widget is None:
+                return float(default)
+            if hasattr(widget, "text"):
+                txt = str(widget.text()).strip()
+                if txt == "":
+                    return float(default)
+                return float(txt)
+            if hasattr(widget, "value"):
+                return float(widget.value())
+        except Exception:
+            return float(default)
+        return float(default)
+
     def refresh_full_mapping_view(self):
         if not hasattr(self,"canvas_full_mapping"):
             return
@@ -4581,9 +4599,10 @@ This does not modify the current rr-NMF/manual tree results.
                 spectrum_mode=spec_mode,
                 topn=int(self.spin_map_topn.value()) if hasattr(self,"spin_map_topn") else 6,
                 y_mode=self.combo_map_y_mode.currentText() if hasattr(self,"combo_map_y_mode") else "auto",
-                y_min=float(self.spin_map_ymin.value()) if hasattr(self,"spin_map_ymin") else None,
-                y_max=float(self.spin_map_ymax.value()) if hasattr(self,"spin_map_ymax") else None,
-                y_max_lower=float(self.spin_map_ymax_lower.value()) if hasattr(self,"spin_map_ymax_lower") else None,
+                y_min=self._parse_float_edit(self.spin_map_ymin, 0.0) if hasattr(self,"spin_map_ymin") else None,
+                y_max=self._parse_float_edit(self.spin_map_ymax, 0.0) if hasattr(self,"spin_map_ymax") else None,
+                y_min_lower=self._parse_float_edit(self.spin_map_ymin_lower, 0.0) if hasattr(self,"spin_map_ymin_lower") else None,
+                y_max_lower=self._parse_float_edit(self.spin_map_ymax_lower, 0.0) if hasattr(self,"spin_map_ymax_lower") else None,
                 gain=float(self.spin_map_gain.value()) if hasattr(self,"spin_map_gain") else 1.0,
                 gamma=float(self.spin_map_gamma.value()) if hasattr(self,"spin_map_gamma") else 1.0,
                 inline_analysis=getattr(self, "_mapping_inline_analysis", None),
