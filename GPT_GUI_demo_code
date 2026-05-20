@@ -2370,6 +2370,20 @@ def _normalize_maps_for_composite(images, mode="percentile 99", eps=1e-12):
     return out
 
 
+
+def _get_discrete_cmap(name, n):
+    """Return a resampled matplotlib colormap, compatible with Matplotlib >=3.7 and older versions."""
+    n = max(1, int(n))
+    try:
+        return matplotlib.colormaps.get_cmap(str(name)).resampled(n)
+    except Exception:
+        import matplotlib.cm as cm
+        try:
+            return cm.get_cmap(str(name), n)
+        except Exception:
+            return cm.get_cmap("hsv", n)
+
+
 def _component_colors(n):
     # Matplotlib >=3.7 deprecates matplotlib.cm.get_cmap(...).
     # Use the colormaps registry and resample so this stays compatible with
@@ -2384,62 +2398,87 @@ def _component_colors(n):
 
 
 
+
 def make_component_composite(images, mode="sum weighted color", norm_mode="percentile 99", gain=1.0, gamma=1.0):
+    """Build an RGB composite from component W maps.
+
+    Robust version: every composite mode, including rainbow/turbo modes,
+    must return a finite HxWx3 RGB array.  The previous rainbow/turbo branch
+    could silently produce an empty-looking canvas in some Matplotlib/backend
+    combinations or when maps contained NaN/zero dynamic range.
+    """
     norm = _normalize_maps_for_composite(images, norm_mode)
     if not norm:
         return None, [], []
-    h,w = norm[0].shape
-    n=len(norm)
-    mode=str(mode or "sum weighted color").lower()
 
-    def _palette(kind):
-        kind=str(kind or "tab20").lower()
-        if "turbo" in kind:
-            cmap = _get_discrete_cmap("turbo", max(n, 1))
-            return [np.asarray(cmap(i)[:3], dtype=np.float64) for i in range(n)]
-        if "rainbow" in kind or "hsv" in kind:
-            cmap = _get_discrete_cmap("hsv", max(n, 1))
-            return [np.asarray(cmap(i)[:3], dtype=np.float64) for i in range(n)]
-        return _component_colors(n)
+    # Make every normalized map finite and displayable.
+    norm = [np.nan_to_num(np.asarray(a, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0) for a in norm]
+    norm = [np.clip(a, 0.0, 1.0) for a in norm]
+    h, w = norm[0].shape
+    n = len(norm)
+    mode = str(mode or "sum weighted color").lower().strip()
 
-    colors=_palette(mode)
-    if mode == "normalized hue blend":
-        rgb_num=np.zeros((h,w,3),dtype=np.float64)
-        denom=np.zeros((h,w),dtype=np.float64)
-        for a,c in zip(norm,colors):
-            rgb_num += a[...,None]*c.reshape(1,1,3)
-            denom += a
-        hue = rgb_num / (denom[...,None] + 1e-12)
-        brightness = np.clip(denom / (np.nanpercentile(denom,99) + 1e-12), 0, 1) if denom.size else denom
-        rgb = hue * brightness[...,None] * float(gain)
-        if float(gamma) != 1.0:
-            rgb = np.power(np.clip(rgb,0,1), 1.0/max(1e-6,float(gamma)))
-        return np.clip(rgb,0,1), norm, colors
-    if mode in ("max-color winner", "rainbow max-color winner", "turbo max-color winner"):
-        stack=np.stack(norm,axis=0)
-        idx=np.nanargmax(stack,axis=0)
-        amp=np.nanmax(stack,axis=0)
-        rgb=np.zeros((h,w,3),dtype=np.float64)
-        for i,c in enumerate(colors):
-            mask=(idx==i)
-            rgb[mask]=amp[mask,None]*c.reshape(1,3)
-        rgb = rgb * float(gain)
-        if float(gamma) != 1.0:
-            rgb = np.power(np.clip(rgb,0,1), 1.0/max(1e-6,float(gamma)))
-        return np.clip(rgb,0,1), norm, colors
-    rgb=np.zeros((h,w,3),dtype=np.float64)
-    if mode == "rgb cycle":
-        base=[np.array([1,0,0.0]),np.array([0,1,0.0]),np.array([0,0,1.0])]
-        colors=[base[i%3] for i in range(n)]
-    for a,c in zip(norm,colors):
-        rgb += a[...,None]*c.reshape(1,1,3)
-    mx=float(np.nanmax(rgb)) if rgb.size else 0.0
-    if mx>1:
-        rgb=rgb/mx
-    rgb = rgb * float(gain)
+    def _palette_for_mode(mode_name):
+        mode_name = str(mode_name or "").lower()
+        if "turbo" in mode_name:
+            cmap_name = "turbo"
+        elif "rainbow" in mode_name:
+            cmap_name = "rainbow"
+        elif "rgb cycle" in mode_name:
+            base = [np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]), np.array([0.0, 0.0, 1.0])]
+            return [base[i % 3] for i in range(n)]
+        else:
+            return _component_colors(n)
+        try:
+            cmap = matplotlib.colormaps.get_cmap(cmap_name)
+        except Exception:
+            import matplotlib.cm as cm
+            cmap = cm.get_cmap(cmap_name if cmap_name in ("rainbow", "turbo") else "hsv")
+        # Use linspace instead of resampled integer calls to avoid edge cases
+        # where discrete cmap sampling produces repeated/near-white colors.
+        xs = np.linspace(0.05, 0.95, max(n, 1))
+        return [np.asarray(cmap(float(x))[:3], dtype=np.float64) for x in xs]
+
+    colors = _palette_for_mode(mode)
+    stack = np.stack(norm, axis=0) if n > 0 else np.zeros((0, h, w), dtype=np.float64)
+    total = np.nansum(stack, axis=0) if n > 0 else np.zeros((h, w), dtype=np.float64)
+    total = np.nan_to_num(total, nan=0.0, posinf=0.0, neginf=0.0)
+
+    if "max-color winner" in mode:
+        if n == 0 or float(np.nanmax(total)) <= 0:
+            rgb = np.zeros((h, w, 3), dtype=np.float64)
+        else:
+            idx = np.nanargmax(stack, axis=0)
+            amp = np.nanmax(stack, axis=0)
+            rgb = np.zeros((h, w, 3), dtype=np.float64)
+            for i, c in enumerate(colors):
+                mask = (idx == i)
+                rgb[mask] = amp[mask, None] * c.reshape(1, 3)
+    else:
+        rgb_num = np.zeros((h, w, 3), dtype=np.float64)
+        for a, c in zip(norm, colors):
+            rgb_num += a[..., None] * c.reshape(1, 1, 3)
+
+        if mode in ("normalized hue blend", "rainbow weighted color", "turbo weighted color"):
+            # Hue is the weighted average color, brightness is total component intensity.
+            hue = rgb_num / (total[..., None] + 1e-12)
+            denom = float(np.nanpercentile(total, 99)) if total.size else 0.0
+            if not np.isfinite(denom) or denom <= 1e-12:
+                denom = float(np.nanmax(total)) if total.size else 0.0
+            brightness = np.clip(total / (denom + 1e-12), 0.0, 1.0) if denom > 0 else np.zeros_like(total)
+            rgb = hue * brightness[..., None]
+        else:
+            # Sum weighted color / RGB cycle / fallback. Normalize only if needed.
+            rgb = rgb_num
+            mx = float(np.nanmax(rgb)) if rgb.size else 0.0
+            if np.isfinite(mx) and mx > 1.0:
+                rgb = rgb / (mx + 1e-12)
+
+    rgb = np.nan_to_num(rgb, nan=0.0, posinf=1.0, neginf=0.0)
+    rgb = np.clip(rgb * float(gain), 0.0, 1.0)
     if float(gamma) != 1.0:
-        rgb = np.power(np.clip(rgb,0,1), 1.0/max(1e-6,float(gamma)))
-    return np.clip(rgb,0,1), norm, colors
+        rgb = np.power(np.clip(rgb, 0.0, 1.0), 1.0 / max(1e-6, float(gamma)))
+    return np.clip(rgb, 0.0, 1.0), norm, colors
 
 
 def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum_indices=None, clicked_pixel=None,
@@ -2571,13 +2610,25 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
         sp.set_title('High-amplitude spectra at selected pixel (raw scale)')
         sp_low.set_title('Low-amplitude spectra at selected pixel (raw scale; independent y-axis)')
         try:
-            if y_max is not None and float(y_max) > 0:
-                sp.set_ylim(top=float(y_max))
+            hi_lo = float(y_min) if y_min is not None else 0.0
+            hi_hi = float(y_max) if y_max is not None else 0.0
+            # A max value of 0 means auto-scale; otherwise use explicit min/max when valid.
+            if hi_hi != 0.0:
+                if hi_hi > hi_lo:
+                    sp.set_ylim(hi_lo, hi_hi)
+                else:
+                    sp.set_ylim(top=hi_hi)
         except Exception:
             pass
         try:
-            if y_max_lower is not None and float(y_max_lower) > 0:
-                sp_low.set_ylim(top=float(y_max_lower))
+            lo_lo = float(y_min_lower) if y_min_lower is not None else 0.0
+            lo_hi = float(y_max_lower) if y_max_lower is not None else 0.0
+            # A max value of 0 means auto-scale; otherwise use explicit min/max when valid.
+            if lo_hi != 0.0:
+                if lo_hi > lo_lo:
+                    sp_low.set_ylim(lo_lo, lo_hi)
+                else:
+                    sp_low.set_ylim(top=lo_hi)
         except Exception:
             pass
     if y_mode_l == 'manual' and sp_low is None:
@@ -3286,10 +3337,11 @@ class RR2NMFGui(QMainWindow):
         self.combo_map_y_mode.currentIndexChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
         map_ctrl3.addWidget(self.combo_map_y_mode)
         self.spin_map_ymin=QDoubleSpinBox(); self.spin_map_ymin.setRange(-1e12,1e12); self.spin_map_ymin.setDecimals(4); self.spin_map_ymin.setValue(0.0); self.spin_map_ymin.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
-        self.spin_map_ymax=QDoubleSpinBox(); self.spin_map_ymax.setRange(-1e12,1e12); self.spin_map_ymax.setDecimals(4); self.spin_map_ymax.setValue(1.0); self.spin_map_ymax.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
-        map_ctrl3.addWidget(QLabel("Y min/max")); map_ctrl3.addWidget(self.spin_map_ymin); map_ctrl3.addWidget(self.spin_map_ymax)
-        self.spin_map_ymax_lower=QDoubleSpinBox(); self.spin_map_ymax_lower.setRange(0.0,1e12); self.spin_map_ymax_lower.setDecimals(4); self.spin_map_ymax_lower.setValue(0.0); self.spin_map_ymax_lower.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
-        map_ctrl3.addWidget(QLabel("Lower Y max")); map_ctrl3.addWidget(self.spin_map_ymax_lower)
+        self.spin_map_ymax=QDoubleSpinBox(); self.spin_map_ymax.setRange(-1e12,1e12); self.spin_map_ymax.setDecimals(4); self.spin_map_ymax.setValue(0.0); self.spin_map_ymax.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
+        map_ctrl3.addWidget(QLabel("High Panel Ymin/Ymax")); map_ctrl3.addWidget(self.spin_map_ymin); map_ctrl3.addWidget(self.spin_map_ymax)
+        self.spin_map_ymin_lower=QDoubleSpinBox(); self.spin_map_ymin_lower.setRange(-1e12,1e12); self.spin_map_ymin_lower.setDecimals(4); self.spin_map_ymin_lower.setValue(0.0); self.spin_map_ymin_lower.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
+        self.spin_map_ymax_lower=QDoubleSpinBox(); self.spin_map_ymax_lower.setRange(-1e12,1e12); self.spin_map_ymax_lower.setDecimals(4); self.spin_map_ymax_lower.setValue(0.0); self.spin_map_ymax_lower.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
+        map_ctrl3.addWidget(QLabel("Low Panel Ymin/Ymax")); map_ctrl3.addWidget(self.spin_map_ymin_lower); map_ctrl3.addWidget(self.spin_map_ymax_lower)
         map_ctrl3.addWidget(QLabel("Inline analysis"))
         self.combo_map_inline_analysis=QComboBox(); self.combo_map_inline_analysis.addItems(["None", "EDS", "EELS"])
         map_ctrl3.addWidget(self.combo_map_inline_analysis)
