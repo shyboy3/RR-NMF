@@ -2533,21 +2533,18 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
             lower_meta.append((xaxis, labels[li]))
         plotted.append(y)
 
-    # For the two-panel mode, the lower panel should still respond when the
-    # clicked pixel changes. Per-spectrum normalization removes the scalar
-    # W(x,y) contribution entirely, so use a common normalization over the
-    # displayed pixel-weighted spectra instead. This keeps shape comparison
-    # possible while preserving relative clicked-pixel contribution changes.
+    # Two-panel mode:
+    #   upper panel = raw pixel-weighted spectra, preserving absolute scale
+    #   lower panel = each displayed spectrum normalized independently, so weak
+    #                 spectra remain visible when one component is much larger.
+    # This intentionally separates absolute-intensity inspection from shape comparison.
     if sp_norm is not None and raw_for_lower:
-        common = 0.0
-        try:
-            common = float(np.nanmax(np.abs(np.concatenate([np.asarray(v).reshape(-1) for v in raw_for_lower if np.asarray(v).size]))))
-        except Exception:
-            common = 0.0
-        if common <= 0 or not np.isfinite(common):
-            common = 1.0
         for yn, (xaxis_l, lab_l) in zip(raw_for_lower, lower_meta):
-            sp_norm.plot(xaxis_l, np.asarray(yn, dtype=np.float64)/common, linewidth=1.0, label=lab_l)
+            yy = np.asarray(yn, dtype=np.float64).copy()
+            m = float(np.nanmax(np.abs(yy))) if yy.size else 0.0
+            if m > 0 and np.isfinite(m):
+                yy = yy / m
+            sp_norm.plot(xaxis_l, yy, linewidth=1.0, label=lab_l)
     if y_mode_l == 'manual':
         try:
             if y_min is not None and y_max is not None and float(y_max)>float(y_min):
@@ -2564,7 +2561,7 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
     sp.set_xlabel(axis.energy_label if axis is not None else 'Channel')
     sp.grid(True,alpha=0.25)
     if sp_norm is not None:
-        sp_norm.set_title('Same spectra, common-normalized after pixel weighting')
+        sp_norm.set_title('Same spectra, individually normalized (shape comparison)')
         sp_norm.set_xlabel(axis.energy_label if axis is not None else 'Channel')
         sp_norm.grid(True, alpha=0.25)
     # Optional inline EDS/EELS analysis overlays directly on the Full Mapping spectrum axis.
