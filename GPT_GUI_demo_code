@@ -2383,14 +2383,26 @@ def _component_colors(n):
     return [np.asarray(cmap(i)[:3], dtype=np.float64) for i in range(n)]
 
 
+
 def make_component_composite(images, mode="sum weighted color", norm_mode="percentile 99", gain=1.0, gamma=1.0):
     norm = _normalize_maps_for_composite(images, norm_mode)
     if not norm:
         return None, [], []
     h,w = norm[0].shape
     n=len(norm)
-    colors=_component_colors(n)
     mode=str(mode or "sum weighted color").lower()
+
+    def _palette(kind):
+        kind=str(kind or "tab20").lower()
+        if "turbo" in kind:
+            cmap = _get_discrete_cmap("turbo", max(n, 1))
+            return [np.asarray(cmap(i)[:3], dtype=np.float64) for i in range(n)]
+        if "rainbow" in kind or "hsv" in kind:
+            cmap = _get_discrete_cmap("hsv", max(n, 1))
+            return [np.asarray(cmap(i)[:3], dtype=np.float64) for i in range(n)]
+        return _component_colors(n)
+
+    colors=_palette(mode)
     if mode == "normalized hue blend":
         rgb_num=np.zeros((h,w,3),dtype=np.float64)
         denom=np.zeros((h,w),dtype=np.float64)
@@ -2403,7 +2415,7 @@ def make_component_composite(images, mode="sum weighted color", norm_mode="perce
         if float(gamma) != 1.0:
             rgb = np.power(np.clip(rgb,0,1), 1.0/max(1e-6,float(gamma)))
         return np.clip(rgb,0,1), norm, colors
-    if mode == "max-color winner":
+    if mode in ("max-color winner", "rainbow max-color winner", "turbo max-color winner"):
         stack=np.stack(norm,axis=0)
         idx=np.nanargmax(stack,axis=0)
         amp=np.nanmax(stack,axis=0)
@@ -2411,6 +2423,9 @@ def make_component_composite(images, mode="sum weighted color", norm_mode="perce
         for i,c in enumerate(colors):
             mask=(idx==i)
             rgb[mask]=amp[mask,None]*c.reshape(1,3)
+        rgb = rgb * float(gain)
+        if float(gamma) != 1.0:
+            rgb = np.power(np.clip(rgb,0,1), 1.0/max(1e-6,float(gamma)))
         return np.clip(rgb,0,1), norm, colors
     rgb=np.zeros((h,w,3),dtype=np.float64)
     if mode == "rgb cycle":
@@ -2429,7 +2444,7 @@ def make_component_composite(images, mode="sum weighted color", norm_mode="perce
 
 def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum_indices=None, clicked_pixel=None,
                                norm_mode="percentile 99", composite_mode="sum weighted color", spectrum_mode="Selected components all", topn=6,
-                               y_mode="auto", y_min=None, y_max=None, gain=1.0, gamma=1.0,
+                               y_mode="auto", y_min=None, y_max=None, y_max_lower=None, gain=1.0, gamma=1.0,
                                inline_analysis=None):
     fig.clear()
     items=list(items or [])
@@ -2448,9 +2463,9 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
     labels=[str(it.get('label',f'C{i}')) for i,it in zip(selected_indices,sel)]
     rgb,norm_maps,colors=make_component_composite(images,composite_mode,norm_mode,gain=gain,gamma=gamma)
     n_spec=len(sel)
-    fig.set_size_inches(28, max(8, 5+0.40*min(n_spec,20)), forward=True)
-    gs=fig.add_gridspec(2,3,width_ratios=[1.00,0.60,4.20],height_ratios=[1.0,1.0])
-    ax=fig.add_subplot(gs[:,0])
+    fig.set_size_inches(30, max(10, 6.2+0.32*min(n_spec,24)), forward=True)
+    gs=fig.add_gridspec(3,3,width_ratios=[1.00,0.58,4.90],height_ratios=[1.0,1.0,0.72])
+    ax=fig.add_subplot(gs[0:2,0])
     if rgb is not None:
         ax.imshow(rgb,origin='upper',aspect='equal')
     ax.set_title(f'Composite map ({len(sel)} selected)\n{composite_mode}, {norm_mode}',fontsize=11)
@@ -2484,17 +2499,22 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
         axleg.add_patch(matplotlib.patches.Rectangle((0.02,y0-k*0.05-0.025),0.04,0.025,color=c,transform=axleg.transAxes,clip_on=False))
         axleg.text(0.08,y0-k*0.05,lab,fontsize=8,va='center',transform=axleg.transAxes)
     axleg.set_title('Component colors',fontsize=10)
-    if str(y_mode or '').lower() == 'two panels raw+normalized':
-        sub = gs[:,2].subgridspec(2,1, height_ratios=[1.0,1.0], hspace=0.28)
+
+    if str(y_mode or '').lower() == 'two panels raw split':
+        sub = gs[0:2,2].subgridspec(2,1, height_ratios=[1.0,1.0], hspace=0.24)
         sp = fig.add_subplot(sub[0,0])
-        sp_norm = fig.add_subplot(sub[1,0], sharex=sp)
+        sp_low = fig.add_subplot(sub[1,0], sharex=sp)
+    elif str(y_mode or '').lower() == 'two panels raw+normalized':
+        # Backward-compatible alias: now means raw split, not normalization.
+        sub = gs[0:2,2].subgridspec(2,1, height_ratios=[1.0,1.0], hspace=0.24)
+        sp = fig.add_subplot(sub[0,0])
+        sp_low = fig.add_subplot(sub[1,0], sharex=sp)
     else:
-        sp=fig.add_subplot(gs[:,2])
-        sp_norm = None
+        sp=fig.add_subplot(gs[0:2,2])
+        sp_low = None
     mode=str(spectrum_mode or 'Selected components all')
     spec_ids=list(range(len(sel)))
     if mode == 'User selected spectra' and spectrum_indices:
-        # spectrum_indices are original item indices; map to selected local ids
         orig_to_local={orig:i for i,orig in enumerate(selected_indices)}
         spec_ids=[orig_to_local[i] for i in spectrum_indices if i in orig_to_local]
     elif mode == 'Top contributors at pixel' and contrib is not None:
@@ -2504,13 +2524,10 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
     xaxis=None
     y_mode_l=str(y_mode or 'auto').lower()
     plotted=[]
-    raw_for_lower=[]
-    lower_meta=[]
+    raw_records=[]
     for rank,li in enumerate(spec_ids):
         y=spectra[li].astype(np.float64).copy()
         if contrib is not None:
-            # Contribution spectrum at the clicked pixel. This uses the original W-image
-            # value rather than the normalized map where possible.
             xpix,ypix=clicked_pixel
             try:
                 scale=float(images[li][int(ypix),int(xpix)])
@@ -2527,69 +2544,82 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
             m=float(np.nanmax(np.abs(y))) if y.size else 0.0
             y=(y/m if m>0 else y) + float(rank)*1.15
         xaxis = axis.energy_axis if axis is not None and len(axis.energy_axis)==len(y) else np.arange(len(y))
-        sp.plot(xaxis,y,linewidth=1.05,label=labels[li])
-        if sp_norm is not None:
-            raw_for_lower.append(y_raw.copy())
-            lower_meta.append((xaxis, labels[li]))
-        plotted.append(y)
+        if sp_low is None:
+            sp.plot(xaxis,y,linewidth=1.05,label=labels[li])
+            plotted.append(y)
+        else:
+            amp=float(np.nanmax(np.abs(y_raw))) if y_raw.size else 0.0
+            raw_records.append((amp, xaxis, y_raw, labels[li], colors[li] if li < len(colors) else None))
 
-    # Two-panel mode:
-    #   upper panel = raw pixel-weighted spectra, preserving absolute scale
-    #   lower panel = each displayed spectrum normalized independently, so weak
-    #                 spectra remain visible when one component is much larger.
-    # This intentionally separates absolute-intensity inspection from shape comparison.
-    if sp_norm is not None and raw_for_lower:
-        for yn, (xaxis_l, lab_l) in zip(raw_for_lower, lower_meta):
-            yy = np.asarray(yn, dtype=np.float64).copy()
-            m = float(np.nanmax(np.abs(yy))) if yy.size else 0.0
-            if m > 0 and np.isfinite(m):
-                yy = yy / m
-            sp_norm.plot(xaxis_l, yy, linewidth=1.0, label=lab_l)
-    if y_mode_l == 'manual':
+    if sp_low is not None and raw_records:
+        amps=np.array([r[0] for r in raw_records], dtype=np.float64)
+        finite=amps[np.isfinite(amps)]
+        split=float(np.nanmedian(finite)) if finite.size else 0.0
+        high=[r for r in raw_records if r[0] >= split]
+        low=[r for r in raw_records if r[0] < split]
+        if not high and low:
+            high=[low.pop(0)]
+        if not low and len(high)>1:
+            high_sorted=sorted(high, key=lambda r:r[0])
+            low=high_sorted[:len(high_sorted)//2]
+            high=high_sorted[len(high_sorted)//2:]
+        for amp,xv,yv,lab,c in high:
+            sp.plot(xv,yv,linewidth=1.05,label=lab)
+            plotted.append(yv)
+        for amp,xv,yv,lab,c in low:
+            sp_low.plot(xv,yv,linewidth=1.05,label=lab)
+        sp.set_title('High-amplitude spectra at selected pixel (raw scale)')
+        sp_low.set_title('Low-amplitude spectra at selected pixel (raw scale; independent y-axis)')
+        try:
+            if y_max is not None and float(y_max) > 0:
+                sp.set_ylim(top=float(y_max))
+        except Exception:
+            pass
+        try:
+            if y_max_lower is not None and float(y_max_lower) > 0:
+                sp_low.set_ylim(top=float(y_max_lower))
+        except Exception:
+            pass
+    if y_mode_l == 'manual' and sp_low is None:
         try:
             if y_min is not None and y_max is not None and float(y_max)>float(y_min):
                 sp.set_ylim(float(y_min), float(y_max))
         except Exception:
             pass
-    elif y_mode_l == 'auto p1-p99' and plotted:
+    elif y_mode_l == 'auto p1-p99' and plotted and sp_low is None:
         yy=np.concatenate([np.asarray(v).reshape(-1) for v in plotted if np.asarray(v).size])
         if yy.size:
             lo,hi=np.nanpercentile(yy,[1,99])
             if np.isfinite(lo) and np.isfinite(hi) and hi>lo:
                 sp.set_ylim(float(lo),float(hi))
-    sp.set_title(('Component spectra at selected pixel' if contrib is not None else 'Component spectra') + f' | Y: {y_mode}')
+    if sp_low is None:
+        sp.set_title(('Component spectra at selected pixel' if contrib is not None else 'Component spectra') + f' | Y: {y_mode}')
     sp.set_xlabel(axis.energy_label if axis is not None else 'Channel')
     sp.grid(True,alpha=0.25)
-    if sp_norm is not None:
-        sp_norm.set_title('Same spectra, individually normalized (shape comparison)')
-        sp_norm.set_xlabel(axis.energy_label if axis is not None else 'Channel')
-        sp_norm.grid(True, alpha=0.25)
-    # Optional inline EDS/EELS analysis overlays directly on the Full Mapping spectrum axis.
+    if sp_low is not None:
+        sp_low.set_xlabel(axis.energy_label if axis is not None else 'Channel')
+        sp_low.grid(True, alpha=0.25)
+
+    # Optional inline EDS/EELS analysis overlays directly on the Full Mapping spectrum axes.
     if inline_analysis:
         try:
             kind = str(inline_analysis.get("kind", "")).upper()
-            ylo, yhi = sp.get_ylim()
-            span = max(1e-12, float(yhi - ylo))
+            axes_for_markers=[sp] + ([sp_low] if sp_low is not None else [])
             if kind == "EELS":
-                # Full Mapping inline EELS mode intentionally shows selected edge
-                # lines only.  Pre-edge / integration windows are kept in the
-                # main EELS Interpretation tab where quantitative edge analysis
-                # is performed.
                 markers = inline_analysis.get("markers", []) or []
-                for xv, lab in markers:
-                    xv = float(xv)
-                    sp.axvline(xv, color="red", linestyle="-", linewidth=1.15, alpha=0.82)
-                    sp.text(xv, ylo + 0.90*span, str(lab), rotation=90, fontsize=7, color="red", va="top", ha="right")
-                    if sp_norm is not None:
-                        ylo2, yhi2 = sp_norm.get_ylim()
-                        span2 = max(1e-12, float(yhi2 - ylo2))
-                        sp_norm.axvline(xv, color="red", linestyle="-", linewidth=1.0, alpha=0.75)
-                        sp_norm.text(xv, ylo2 + 0.90*span2, str(lab), rotation=90, fontsize=7, color="red", va="top", ha="right")
+                for axm in axes_for_markers:
+                    ylo, yhi = axm.get_ylim(); span = max(1e-12, float(yhi - ylo))
+                    for xv, lab in markers:
+                        xv = float(xv)
+                        axm.axvline(xv, color="red", linestyle="-", linewidth=1.0, alpha=0.78)
+                        axm.text(xv, ylo + 0.90*span, str(lab), rotation=90, fontsize=7, color="red", va="top", ha="right")
             elif kind == "EDS":
                 markers = inline_analysis.get("markers", []) or []
-                for xv, lab in markers:
-                    sp.axvline(float(xv), color="red", linestyle="-", linewidth=0.9, alpha=0.70)
-                    sp.text(float(xv), ylo + 0.90*span, str(lab), rotation=90, fontsize=7, color="red", va="top", ha="right")
+                for axm in axes_for_markers:
+                    ylo, yhi = axm.get_ylim(); span = max(1e-12, float(yhi - ylo))
+                    for xv, lab in markers:
+                        axm.axvline(float(xv), color="red", linestyle="-", linewidth=0.9, alpha=0.70)
+                        axm.text(float(xv), ylo + 0.90*span, str(lab), rotation=90, fontsize=7, color="red", va="top", ha="right")
             label = inline_analysis.get("title", "")
             if label:
                 sp.text(0.01, 0.98, str(label), transform=sp.transAxes, fontsize=8, va="top", ha="left",
@@ -2598,7 +2628,26 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
             pass
     if len(spec_ids)<=12:
         sp.legend(fontsize=7)
-    fig.subplots_adjust(left=0.03,right=0.985,top=0.92,bottom=0.08,wspace=0.32,hspace=0.28)
+        if sp_low is not None:
+            sp_low.legend(fontsize=7)
+
+    # Thumbnail strip of the selected method/components.
+    axthumb=fig.add_subplot(gs[2,:])
+    axthumb.axis('off')
+    max_thumb=min(len(sel), 32)
+    if max_thumb:
+        cols=max_thumb
+        for k in range(max_thumb):
+            left=0.01 + k*(0.98/max(1,cols))
+            width=0.90/max(1,cols)
+            iax=axthumb.inset_axes([left,0.24,width,0.62])
+            iax.imshow(images[k], cmap='viridis', origin='upper', aspect='equal')
+            iax.set_xticks([]); iax.set_yticks([])
+            iax.set_title(labels[k], fontsize=6)
+        if len(sel)>max_thumb:
+            axthumb.text(0.985,0.5,f'+{len(sel)-max_thumb} more',ha='right',va='center',fontsize=8,transform=axthumb.transAxes)
+        axthumb.text(0.01,0.08,'Selected component W images',fontsize=9,fontweight='bold',transform=axthumb.transAxes)
+    fig.subplots_adjust(left=0.025,right=0.988,top=0.925,bottom=0.06,wspace=0.26,hspace=0.34)
 
 def plot_energy(fig, conv, rr):
     fig.clear(); fig.set_size_inches(12,7, forward=True)
@@ -3205,7 +3254,7 @@ class RR2NMFGui(QMainWindow):
         self.combo_map_norm.currentIndexChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
         map_ctrl2.addWidget(self.combo_map_norm)
         map_ctrl2.addWidget(QLabel("Composite mode"))
-        self.combo_map_mode=QComboBox(); self.combo_map_mode.addItems(["normalized hue blend", "sum weighted color", "max-color winner", "RGB cycle"])
+        self.combo_map_mode=QComboBox(); self.combo_map_mode.addItems(["normalized hue blend", "sum weighted color", "rainbow weighted color", "turbo weighted color", "max-color winner", "rainbow max-color winner", "turbo max-color winner", "RGB cycle"])
         self.combo_map_mode.currentIndexChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
         map_ctrl2.addWidget(self.combo_map_mode)
         self.chk_map_pca_clip=QCheckBox("Clip PCA maps < 0 to 0")
@@ -3233,12 +3282,14 @@ class RR2NMFGui(QMainWindow):
         # screens and made the mapping panel difficult to use.
         map_ctrl3=QHBoxLayout()
         map_ctrl3.addWidget(QLabel("Y mode"))
-        self.combo_map_y_mode=QComboBox(); self.combo_map_y_mode.addItems(["auto", "auto p1-p99", "normalize each", "log1p", "stacked normalized offset", "two panels raw+normalized", "manual"])
+        self.combo_map_y_mode=QComboBox(); self.combo_map_y_mode.addItems(["auto", "auto p1-p99", "normalize each", "log1p", "stacked normalized offset", "two panels raw split", "manual"])
         self.combo_map_y_mode.currentIndexChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
         map_ctrl3.addWidget(self.combo_map_y_mode)
         self.spin_map_ymin=QDoubleSpinBox(); self.spin_map_ymin.setRange(-1e12,1e12); self.spin_map_ymin.setDecimals(4); self.spin_map_ymin.setValue(0.0); self.spin_map_ymin.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
         self.spin_map_ymax=QDoubleSpinBox(); self.spin_map_ymax.setRange(-1e12,1e12); self.spin_map_ymax.setDecimals(4); self.spin_map_ymax.setValue(1.0); self.spin_map_ymax.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
         map_ctrl3.addWidget(QLabel("Y min/max")); map_ctrl3.addWidget(self.spin_map_ymin); map_ctrl3.addWidget(self.spin_map_ymax)
+        self.spin_map_ymax_lower=QDoubleSpinBox(); self.spin_map_ymax_lower.setRange(0.0,1e12); self.spin_map_ymax_lower.setDecimals(4); self.spin_map_ymax_lower.setValue(0.0); self.spin_map_ymax_lower.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
+        map_ctrl3.addWidget(QLabel("Lower Y max")); map_ctrl3.addWidget(self.spin_map_ymax_lower)
         map_ctrl3.addWidget(QLabel("Inline analysis"))
         self.combo_map_inline_analysis=QComboBox(); self.combo_map_inline_analysis.addItems(["None", "EDS", "EELS"])
         map_ctrl3.addWidget(self.combo_map_inline_analysis)
@@ -4480,6 +4531,7 @@ This does not modify the current rr-NMF/manual tree results.
                 y_mode=self.combo_map_y_mode.currentText() if hasattr(self,"combo_map_y_mode") else "auto",
                 y_min=float(self.spin_map_ymin.value()) if hasattr(self,"spin_map_ymin") else None,
                 y_max=float(self.spin_map_ymax.value()) if hasattr(self,"spin_map_ymax") else None,
+                y_max_lower=float(self.spin_map_ymax_lower.value()) if hasattr(self,"spin_map_ymax_lower") else None,
                 gain=float(self.spin_map_gain.value()) if hasattr(self,"spin_map_gain") else 1.0,
                 gamma=float(self.spin_map_gamma.value()) if hasattr(self,"spin_map_gamma") else 1.0,
                 inline_analysis=getattr(self, "_mapping_inline_analysis", None),
