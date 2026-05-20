@@ -325,18 +325,51 @@ def compute_residual_summary(X, W, H, image_shape, chunk_size=2048):
     return img.reshape(ih, iw), spec, eng
 
 
-def make_child_matrix_chunked(X, W, H, comp_i, rank, residual_mode, residual_nonnegative, chunk_size=2048):
+def residual_energy_weights(W, H, rank, eps=1e-12):
+    """Return residual split weights proportional to each W_i H_i energy.
+
+    alpha_i = ||W_i H_i||_F^2 / sum_j ||W_j H_j||_F^2
+            = (||W_i||_2^2 * ||H_i||_2^2) / sum_j (...).
+
+    If all component energies are zero or invalid, fall back to equal weights.
+    """
+    vals = []
+    for i in range(int(rank)):
+        try:
+            vals.append(component_energy_no_outer(W[:, i], H[i]))
+        except Exception:
+            vals.append(0.0)
+    vals = np.asarray(vals, dtype=np.float64)
+    vals = np.nan_to_num(vals, nan=0.0, posinf=0.0, neginf=0.0)
+    vals = np.clip(vals, 0.0, None)
+    s = float(np.sum(vals))
+    if s <= eps:
+        return np.ones(int(rank), dtype=np.float32) / float(max(1, int(rank)))
+    return (vals / s).astype(np.float32)
+
+
+def make_child_matrix_chunked(X, W, H, comp_i, rank, residual_mode, residual_nonnegative, chunk_size=2048, residual_weights=None):
     N, L = X.shape
     out = np.empty((N, L), dtype=np.float32)
     H32 = H.astype(np.float32, copy=False)
     hi = H32[comp_i]
+    if residual_mode == "energy_weighted" and residual_weights is None:
+        residual_weights = residual_energy_weights(W, H, rank)
+    alpha = 0.0
+    if residual_mode == "redistribute_equal":
+        alpha = 1.0 / float(max(1, rank))
+    elif residual_mode == "energy_weighted":
+        try:
+            alpha = float(np.asarray(residual_weights, dtype=np.float64)[int(comp_i)])
+        except Exception:
+            alpha = 1.0 / float(max(1, rank))
     for st in range(0, N, chunk_size):
         en = min(st + chunk_size, N)
         Xc = X[st:en].astype(np.float32, copy=False)
         Wc = W[st:en].astype(np.float32, copy=False)
         S = np.outer(Wc[:, comp_i], hi)
-        if residual_mode == "redistribute_equal":
-            S = S + (Xc - Wc @ H32) / float(rank)
+        if residual_mode in ("redistribute_equal", "energy_weighted") and alpha != 0.0:
+            S = S + np.float32(alpha) * (Xc - Wc @ H32)
         out[st:en] = nonnegative(S, residual_nonnegative)
     return out
 
@@ -951,6 +984,7 @@ def run_rr_nmf(X, image_shape, rank=2, max_depth=3, residual_mode="redistribute_
             model = NMF(n_components=rank, init=init, solver=solver, max_iter=max_iter, random_state=random_state)
             W = model.fit_transform(Xd)
             H = model.components_
+            residual_weights = residual_energy_weights(W, H, rank) if residual_mode == "energy_weighted" else None
             rimg, rspec, RE = compute_residual_summary(Xd, W, H, image_shape, chunk_size)
             ns = RRNodeSummary(d, node_id, parent_id, node["path"], residual_image=rimg, residual_spectrum=rspec, residual_energy=RE)
             ns.node_type = node.get("node_type", "component")
@@ -965,7 +999,7 @@ def run_rr_nmf(X, image_shape, rank=2, max_depth=3, residual_mode="redistribute_
                 erecs.append({"method": "rr_nmf", "depth": d, "node_local_index": li, "node_id": node_id, "parent_id": parent_id, "component_id": ci, "type": "component", "energy": ei, "node_energy": NE, "global_energy": GE, "node_ratio": ei/NE if NE > 0 else np.nan, "global_ratio": ei/GE if GE > 0 else np.nan, "path": f'{node["path"]}/C{ci}'})
                 # Always compute the exact child matrix so Manual Depth can merge
                 # depth-1 components as true next-depth inputs, including residual redistribution.
-                child = make_child_matrix_chunked(Xd, W, H, ci, rank, residual_mode, residual_nonnegative, chunk_size)
+                child = make_child_matrix_chunked(Xd, W, H, ci, rank, residual_mode, residual_nonnegative, chunk_size, residual_weights=residual_weights)
                 ns.child_matrices.append(child)
                 if d < max_depth:
                     nxt.append({"X": child, "node_id": nid, "parent_id": node_id, "path": f'{node["path"]}/C{ci}', "node_type": "component"})
@@ -2896,8 +2930,9 @@ def collect_rr_component_entries(rr):
 def build_combined_dataset(entries, name="", use_child_matrix=True):
     """Build a combined/pass-through dataset from selected rr-NMF components.
 
-    use_child_matrix=True uses the exact next-depth child matrix W_i H_i + R/r
-    when available.  For final displayed outputs after the last recursive depth,
+    use_child_matrix=True uses the exact next-depth child matrix.
+    Depending on residual mode, this may be W_i H_i + R/r or
+    W_i H_i + alpha_i R for energy_weighted residual splitting.  For final displayed outputs after the last recursive depth,
     use_child_matrix=False so the final result is the selected W_i H_i signal
     itself, without adding another residual fraction.
     """
@@ -3200,7 +3235,7 @@ class RR2NMFGui(QMainWindow):
         self.spin_manual_depth=QSpinBox(); self.spin_manual_depth.setRange(1,9999); self.spin_manual_depth.setValue(2)
         self.spin_manual_depth.valueChanged.connect(lambda *_: self.refresh_rr_component_list() if hasattr(self, "list_rr_components") else None)
         self.chk_manual_depth.stateChanged.connect(lambda *_: self.refresh_rr_component_list() if hasattr(self, "list_rr_components") else None)
-        self.combo_res_mode=QComboBox(); self.combo_res_mode.addItems(["discard","redistribute_equal","explicit_branch"]); self.combo_res_mode.setCurrentText("redistribute_equal")
+        self.combo_res_mode=QComboBox(); self.combo_res_mode.addItems(["discard","redistribute_equal","energy_weighted","explicit_branch"]); self.combo_res_mode.setCurrentText("redistribute_equal")
         self.combo_res_nn=QComboBox(); self.combo_res_nn.addItems(["clip","abs","shift"])
         self.chk_decomp_res=QCheckBox("Decompose residual branch")
         self.spin_iter=QSpinBox(); self.spin_iter.setRange(10,10000); self.spin_iter.setValue(300)
