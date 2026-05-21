@@ -2518,7 +2518,7 @@ def make_component_composite(images, mode="sum weighted color", norm_mode="perce
 def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum_indices=None, clicked_pixel=None,
                                norm_mode="percentile 99", composite_mode="sum weighted color", spectrum_mode="Selected components all", topn=6,
                                y_mode="auto", y_min=None, y_max=None, y_min_lower=None, y_max_lower=None, gain=1.0, gamma=1.0,
-                               inline_analysis=None):
+                               inline_analysis=None, weights_layout="right of map"):
     fig.clear()
     items=list(items or [])
     if not items:
@@ -2534,11 +2534,17 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
     images=[np.asarray(it['image'],dtype=np.float64) for it in sel]
     spectra=[np.asarray(it['spectrum'],dtype=np.float64) for it in sel]
     labels=[str(it.get('label',f'C{i}')) for i,it in zip(selected_indices,sel)]
+    display_labels=[f"{int(orig)}: {lab}" for orig, lab in zip(selected_indices, labels)]
     rgb,norm_maps,colors=make_component_composite(images,composite_mode,norm_mode,gain=gain,gamma=gamma)
     n_spec=len(sel)
-    fig.set_size_inches(30, max(10, 6.2+0.32*min(n_spec,24)), forward=True)
-    gs=fig.add_gridspec(3,3,width_ratios=[1.00,0.58,4.90],height_ratios=[1.0,1.0,0.72])
-    ax=fig.add_subplot(gs[0:2,0])
+    fig.set_size_inches(32, max(11, 6.8+0.36*min(n_spec,24)), forward=True)
+    weights_layout = str(weights_layout or "right of map").lower()
+    if weights_layout.startswith("below"):
+        gs=fig.add_gridspec(3,3,width_ratios=[1.30,0.62,4.90],height_ratios=[1.25,0.72,1.05])
+        ax=fig.add_subplot(gs[0,0])
+    else:
+        gs=fig.add_gridspec(3,3,width_ratios=[1.00,0.58,4.90],height_ratios=[1.0,1.0,1.05])
+        ax=fig.add_subplot(gs[0:2,0])
     if rgb is not None:
         ax.imshow(rgb,origin='upper',aspect='equal')
     ax.set_title(f'Composite map ({len(sel)} selected)\n{composite_mode}, {norm_mode}',fontsize=11)
@@ -2553,25 +2559,29 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
             vals=np.array([float(m[int(y),int(x)]) for m in norm_maps],dtype=np.float64)
             contrib=vals
             px_text=f'Pixel x={int(x)}, y={int(y)}'
-    axc=fig.add_subplot(gs[0,1])
+    if weights_layout.startswith("below"):
+        axc=fig.add_subplot(gs[1,0])
+        axleg=fig.add_subplot(gs[0:2,1]); axleg.axis('off')
+    else:
+        axc=fig.add_subplot(gs[0,1])
+        axleg=fig.add_subplot(gs[1,1]); axleg.axis('off')
     if contrib is not None:
         order=np.argsort(contrib)[::-1]
         show=order[:min(len(order),max(1,int(topn)))]
         axc.bar(range(len(show)),contrib[show])
         axc.set_xticks(range(len(show)))
-        axc.set_xticklabels([labels[i] for i in show],rotation=75,ha='right',fontsize=7)
+        axc.set_xticklabels([display_labels[i] for i in show],rotation=75,ha='right',fontsize=12)
         axc.set_ylim(0, max(1.0, float(np.nanmax(contrib))*1.05))
         axc.set_title('Selected-pixel normalized component weights')
     else:
         axc.axis('off'); axc.text(0.5,0.5,px_text,ha='center',va='center',fontsize=11)
-    axleg=fig.add_subplot(gs[1,1]); axleg.axis('off')
     y0=0.95
-    for k,(lab,c) in enumerate(zip(labels,colors)):
+    for k,(lab,c) in enumerate(zip(display_labels,colors)):
         if k>=18:
-            axleg.text(0.02,y0-k*0.05,'...',fontsize=9,transform=axleg.transAxes); break
+            axleg.text(0.02,y0-k*0.05,'...',fontsize=14,transform=axleg.transAxes); break
         axleg.add_patch(matplotlib.patches.Rectangle((0.02,y0-k*0.05-0.025),0.04,0.025,color=c,transform=axleg.transAxes,clip_on=False))
-        axleg.text(0.08,y0-k*0.05,lab,fontsize=8,va='center',transform=axleg.transAxes)
-    axleg.set_title('Component colors',fontsize=10)
+        axleg.text(0.08,y0-k*0.05,lab,fontsize=14,va='center',transform=axleg.transAxes)
+    axleg.set_title('Component colors',fontsize=14)
 
     if str(y_mode or '').lower() == 'two panels raw split':
         sub = gs[0:2,2].subgridspec(2,1, height_ratios=[1.0,1.0], hspace=0.24)
@@ -2618,11 +2628,11 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
             y=(y/m if m>0 else y) + float(rank)*1.15
         xaxis = axis.energy_axis if axis is not None and len(axis.energy_axis)==len(y) else np.arange(len(y))
         if sp_low is None:
-            sp.plot(xaxis,y,linewidth=1.05,label=labels[li])
+            sp.plot(xaxis,y,linewidth=1.05,label=display_labels[li])
             plotted.append(y)
         else:
             amp=float(np.nanmax(np.abs(y_raw))) if y_raw.size else 0.0
-            raw_records.append((amp, xaxis, y_raw, labels[li], colors[li] if li < len(colors) else None))
+            raw_records.append((amp, xaxis, y_raw, display_labels[li], colors[li] if li < len(colors) else None))
 
     if sp_low is not None and raw_records:
         amps=np.array([r[0] for r in raw_records], dtype=np.float64)
@@ -2712,11 +2722,11 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
         except Exception:
             pass
     if len(spec_ids)<=12:
-        sp.legend(fontsize=7)
+        sp.legend(fontsize=14)
         if sp_low is not None:
-            sp_low.legend(fontsize=7)
+            sp_low.legend(fontsize=14)
 
-    # Thumbnail strip of the selected method/components.
+    # Thumbnail strip of the selected method/components: W image plus H/loading basis.
     axthumb=fig.add_subplot(gs[2,:])
     axthumb.axis('off')
     max_thumb=min(len(sel), 32)
@@ -2725,14 +2735,20 @@ def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum
         for k in range(max_thumb):
             left=0.01 + k*(0.98/max(1,cols))
             width=0.90/max(1,cols)
-            iax=axthumb.inset_axes([left,0.24,width,0.62])
+            iax=axthumb.inset_axes([left,0.50,width,0.40])
             iax.imshow(images[k], cmap='viridis', origin='upper', aspect='equal')
             iax.set_xticks([]); iax.set_yticks([])
-            iax.set_title(labels[k], fontsize=6)
+            iax.set_title(display_labels[k], fontsize=12)
+            hax=axthumb.inset_axes([left,0.13,width,0.26])
+            yy=np.asarray(spectra[k], dtype=np.float64)
+            xx=axis.energy_axis if axis is not None and len(axis.energy_axis)==len(yy) else np.arange(len(yy))
+            hax.plot(xx, yy, lw=0.75)
+            hax.set_xticks([]); hax.set_yticks([])
+            hax.set_title('H / loading', fontsize=9, pad=1)
         if len(sel)>max_thumb:
-            axthumb.text(0.985,0.5,f'+{len(sel)-max_thumb} more',ha='right',va='center',fontsize=8,transform=axthumb.transAxes)
-        axthumb.text(0.01,0.08,'Selected component W images',fontsize=9,fontweight='bold',transform=axthumb.transAxes)
-    fig.subplots_adjust(left=0.025,right=0.988,top=0.925,bottom=0.06,wspace=0.26,hspace=0.34)
+            axthumb.text(0.985,0.5,f'+{len(sel)-max_thumb} more',ha='right',va='center',fontsize=12,transform=axthumb.transAxes)
+        axthumb.text(0.01,0.03,'Selected component W images and H/loading spectra',fontsize=14,fontweight='bold',transform=axthumb.transAxes)
+    fig.subplots_adjust(left=0.025,right=0.988,top=0.925,bottom=0.055,wspace=0.26,hspace=0.42)
 
 def plot_energy(fig, conv, rr):
     fig.clear(); fig.set_size_inches(12,7, forward=True)
@@ -3154,7 +3170,7 @@ class AnalysisWorker(QThread):
 
 class RR2NMFGui(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v9.0 Splitter Resize Fix"); self.resize(1850,1080); self.setMinimumSize(900, 620)
+        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v10.0 Mapping H-basis + Multi-BG"); self.resize(1850,1080); self.setMinimumSize(900, 620)
         self.cube=None; self.original_cube=None; self.roi_cube=None; self.X=None; self.image_shape=None
         self.axis_info=make_default_axis_info((1,1,1)); self.roi_axis_info=make_default_axis_info((1,1,1))
         self.conv_result=None; self.rr_result=None; self.pca_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.bg_applied=False; self._raw_mouse_press=None; self.selected_raw_pixel=None
@@ -3182,13 +3198,19 @@ class RR2NMFGui(QMainWindow):
         self.spin_y0=QSpinBox(); self.spin_y1=QSpinBox(); self.spin_x0=QSpinBox(); self.spin_x1=QSpinBox(); self.spin_l0=QSpinBox(); self.spin_l1=QSpinBox()
         for sp in [self.spin_y0,self.spin_y1,self.spin_x0,self.spin_x1]:
             sp.setRange(0,10**9); sp.valueChanged.connect(self.on_channel_roi_changed)
+        self.spin_y_stride=QSpinBox(); self.spin_x_stride=QSpinBox()
+        for sp in [self.spin_y_stride,self.spin_x_stride]:
+            sp.setRange(1,10**6); sp.setValue(1); sp.setToolTip("Spatial ROI stride in pixels. 1 = use every pixel."); sp.valueChanged.connect(self.update_roi_label)
         for sp in [self.spin_l0,self.spin_l1]:
             sp.setRange(0,10**9); sp.setEnabled(False); sp.setToolTip("Resolved channel index from Energy start/end; not a user input.")
-        self.spin_e0=QDoubleSpinBox(); self.spin_e1=QDoubleSpinBox()
+        self.spin_e0=QDoubleSpinBox(); self.spin_e1=QDoubleSpinBox(); self.spin_e_stride=QDoubleSpinBox()
         for sp in [self.spin_e0,self.spin_e1]:
             sp.setRange(-1e9,1e9); sp.setDecimals(6); sp.valueChanged.connect(self.on_energy_roi_changed)
+        self.spin_e_stride.setRange(0.0,1e9); self.spin_e_stride.setDecimals(6); self.spin_e_stride.setValue(0.0)
+        self.spin_e_stride.setToolTip("Energy-axis stride. 0 = every channel; otherwise converted to nearest integer channel step.")
+        self.spin_e_stride.valueChanged.connect(self.update_roi_label)
         self.btn_full=QPushButton("Use Full ROI"); self.btn_full.clicked.connect(self.set_roi_full)
-        for lab,w in [(None,self.btn_load),("File",self.lbl_file),("Loaded cube",self.lbl_shape),("Y start",self.spin_y0),("Y end",self.spin_y1),("X start",self.spin_x0),("X end",self.spin_x1),("Energy start",self.spin_e0),("Energy end",self.spin_e1),("Resolved ch start",self.spin_l0),("Resolved ch end",self.spin_l1),(None,self.btn_full),("ROI shape",self.lbl_roi),("Normalize",self.combo_norm)]:
+        for lab,w in [(None,self.btn_load),("File",self.lbl_file),("Loaded cube",self.lbl_shape),("Y start",self.spin_y0),("Y end",self.spin_y1),("Y stride (px)",self.spin_y_stride),("X start",self.spin_x0),("X end",self.spin_x1),("X stride (px)",self.spin_x_stride),("Energy start",self.spin_e0),("Energy end",self.spin_e1),("Energy stride",self.spin_e_stride),("Resolved ch start",self.spin_l0),("Resolved ch end",self.spin_l1),(None,self.btn_full),("ROI shape",self.lbl_roi),("Normalize",self.combo_norm)]:
             f.addRow(w) if lab is None else f.addRow(lab,w)
         cl.addWidget(g)
 
@@ -3205,6 +3227,9 @@ class RR2NMFGui(QMainWindow):
         self.bg_ref_ch0.setValue(0.0); self.bg_ref_ch1.setValue(1.0)
         self.combo_bg_after=QComboBox()
         self.combo_bg_after.addItems(["shift_min", "clip", "keep"])
+        self.edit_bg_multi_windows=QLineEdit("")
+        self.edit_bg_multi_windows.setPlaceholderText("optional: 100:130; 280:310; ... in energy units")
+        self.edit_bg_multi_windows.setToolTip("Optional multiple background fit windows. If set, each energy window is fit/subtracted sequentially with the selected BG mode. Example: 100:130; 280:310")
         self.chk_bg_clip=QCheckBox("Clip negative after power-law subtraction")
         self.chk_bg_clip.setChecked(True)
         self.btn_bg_current=QPushButton("Use Current Spatial ROI"); self.btn_bg_current.clicked.connect(self.use_current_roi_for_background)
@@ -3216,6 +3241,7 @@ class RR2NMFGui(QMainWindow):
             ("BG/fit Y start",self.bg_y0),("BG/fit Y end",self.bg_y1),
             ("BG/fit X start",self.bg_x0),("BG/fit X end",self.bg_x1),
             ("Power-law fit energy start",self.bg_e0),("Power-law fit energy end",self.bg_e1),
+            ("Multi fit windows",self.edit_bg_multi_windows),
             ("Reference scale energy start",self.bg_ref_ch0),("Reference scale energy end",self.bg_ref_ch1),
             ("Reference after subtraction",self.combo_bg_after),
             (None,self.chk_bg_clip),(None,self.btn_bg_current),(None,self.btn_apply_bg),(None,self.btn_reset_bg),
@@ -3350,6 +3376,10 @@ class RR2NMFGui(QMainWindow):
         self.spin_map_topn=QSpinBox(); self.spin_map_topn.setRange(1,50); self.spin_map_topn.setValue(6)
         self.spin_map_topn.valueChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
         map_ctrl2.addWidget(self.spin_map_topn)
+        map_ctrl2.addWidget(QLabel("Weights layout"))
+        self.combo_map_weights_layout=QComboBox(); self.combo_map_weights_layout.addItems(["right of map", "below map"])
+        self.combo_map_weights_layout.currentIndexChanged.connect(lambda *_: self._on_mapping_control_changed(rebuild=False))
+        map_ctrl2.addWidget(self.combo_map_weights_layout)
         self.chk_map_auto_refresh=QCheckBox("Auto redraw on selection")
         self.chk_map_auto_refresh.setChecked(False)
         map_ctrl2.addWidget(self.chk_map_auto_refresh)
@@ -3653,6 +3683,8 @@ class RR2NMFGui(QMainWindow):
         y,x,l=self.cube.shape; self._syncing=True
         for sp,mx,val in [(self.spin_y0,y,0),(self.spin_y1,y,y),(self.spin_x0,x,0),(self.spin_x1,x,x),(self.spin_l0,l,0),(self.spin_l1,l,l)]:
             sp.blockSignals(True); sp.setRange(0,mx); sp.setValue(val); sp.blockSignals(False)
+        if hasattr(self, 'spin_y_stride'):
+            self.spin_y_stride.setValue(1); self.spin_x_stride.setValue(1); self.spin_e_stride.setValue(0.0)
         e=self.axis_info.energy_axis; self.spin_e0.blockSignals(True); self.spin_e1.blockSignals(True)
         if len(e)>0:
             mn,mx=float(np.nanmin(e)),float(np.nanmax(e)); pad=abs(mx-mn)*.1+1; self.spin_e0.setRange(mn-pad,mx+pad); self.spin_e1.setRange(mn-pad,mx+pad); self.spin_e0.setValue(float(e[0])); self.spin_e1.setValue(float(e[-1]))
@@ -3692,15 +3724,28 @@ class RR2NMFGui(QMainWindow):
     def update_roi_label(self):
         if self.cube is None: self.lbl_roi.setText("ROI: -"); return
         y,x,l=self.cube.shape; y0,y1=max(0,min(self.spin_y0.value(),y)),max(0,min(self.spin_y1.value(),y)); x0,x1=max(0,min(self.spin_x0.value(),x)),max(0,min(self.spin_x1.value(),x)); l0,l1=max(0,min(self.spin_l0.value(),l)),max(0,min(self.spin_l1.value(),l))
-        self.lbl_roi.setText("Invalid ROI" if y1<=y0 or x1<=x0 or l1<=l0 else f"({y1-y0}, {x1-x0}, {l1-l0}) -> X={(y1-y0)*(x1-x0)}")
+        ys,xs,es = self.current_roi_strides() if hasattr(self, 'current_roi_strides') else (1,1,1)
+        ny = len(range(y0,y1,ys)) if y1>y0 else 0
+        nx = len(range(x0,x1,xs)) if x1>x0 else 0
+        nl = len(range(l0,l1,es)) if l1>l0 else 0
+        if y1<=y0 or x1<=x0 or l1<=l0 or ny<=0 or nx<=0 or nl<=0:
+            self.lbl_roi.setText("Invalid ROI")
+        else:
+            self.lbl_roi.setText(f"({ny}, {nx}, {nl}) stride=Y{ys}/X{xs}/Ech{es} -> X={ny*nx}")
 
     def get_roi_cube_and_X(self):
         if self.cube is None: raise ValueError("No cube loaded")
         y,x,l=self.cube.shape; y0,y1=max(0,min(self.spin_y0.value(),y)),max(0,min(self.spin_y1.value(),y)); x0,x1=max(0,min(self.spin_x0.value(),x)),max(0,min(self.spin_x1.value(),x)); l0,l1=max(0,min(self.spin_l0.value(),l)),max(0,min(self.spin_l1.value(),l))
+        ys,xs,es = self.current_roi_strides() if hasattr(self, 'current_roi_strides') else (1,1,1)
         if y1<=y0 or x1<=x0 or l1<=l0: raise ValueError("Invalid ROI")
-        roi=self.cube[y0:y1,x0:x1,l0:l1].astype(np.float32,copy=False); hh,ww,ll=roi.shape
+        roi=self.cube[y0:y1:ys,x0:x1:xs,l0:l1:es].astype(np.float32,copy=False); hh,ww,ll=roi.shape
+        if hh <= 0 or ww <= 0 or ll <= 0: raise ValueError("Invalid ROI after stride")
         X=nonnegative(normalize_spectra(roi.reshape(hh*ww,ll),self.combo_norm.currentText()),"clip")
-        axis=AxisInfo(energy_axis=self.axis_info.energy_axis[l0:l1].copy() if len(self.axis_info.energy_axis)==l else np.arange(ll,dtype=np.float32), energy_unit=self.axis_info.energy_unit, energy_label=self.axis_info.energy_label)
+        if len(self.axis_info.energy_axis)==l:
+            eaxis=self.axis_info.energy_axis[l0:l1:es].copy()
+        else:
+            eaxis=np.arange(ll,dtype=np.float32)
+        axis=AxisInfo(energy_axis=eaxis, energy_unit=self.axis_info.energy_unit, energy_label=self.axis_info.energy_label)
         return roi,X,(hh,ww),axis
 
     def current_spatial_roi_bounds(self):
@@ -3715,6 +3760,24 @@ class RR2NMFGui(QMainWindow):
         L=self.cube.shape[2]
         l0=max(0,min(self.spin_l0.value(),L)); l1=max(0,min(self.spin_l1.value(),L))
         return l0,l1
+
+    def current_roi_strides(self):
+        ys = int(self.spin_y_stride.value()) if hasattr(self, 'spin_y_stride') else 1
+        xs = int(self.spin_x_stride.value()) if hasattr(self, 'spin_x_stride') else 1
+        ys = max(1, ys); xs = max(1, xs)
+        es_val = float(self.spin_e_stride.value()) if hasattr(self, 'spin_e_stride') else 0.0
+        L = self.cube.shape[2] if self.cube is not None else 0
+        estep = 1
+        if es_val > 0 and self.cube is not None:
+            e = np.asarray(self.axis_info.energy_axis, dtype=np.float64)
+            if len(e) == L and L > 1:
+                dif = np.diff(e)
+                dif = dif[np.isfinite(dif) & (np.abs(dif) > 0)]
+                de = float(np.nanmedian(np.abs(dif))) if dif.size else 1.0
+                estep = max(1, int(round(abs(es_val) / max(de, 1e-12))))
+            else:
+                estep = max(1, int(round(abs(es_val))))
+        return ys, xs, estep
 
     def _connect_raw_roi_mouse(self):
         self.canvas_raw.mpl_connect("button_press_event", self.on_raw_mouse_press)
@@ -3785,6 +3848,35 @@ class RR2NMFGui(QMainWindow):
             n = n + 1 if n < L else n - 1
         return max(1, int(n))
 
+    def parse_bg_fit_windows(self):
+        """Return a list of (energy_start, energy_end) fit windows.
+
+        Empty input falls back to the single Power-law fit energy start/end widgets.
+        Syntax: "100:130; 280:310" in the current energy-axis unit.
+        """
+        txt = ""
+        try:
+            txt = self.edit_bg_multi_windows.text().strip()
+        except Exception:
+            txt = ""
+        if not txt:
+            return [(float(self.bg_e0.value()), float(self.bg_e1.value()))]
+        out = []
+        for part in txt.replace(",", ";").split(";"):
+            part = part.strip()
+            if not part:
+                continue
+            if ":" not in part:
+                raise ValueError("Multi fit windows must use start:end; start:end syntax.")
+            a, b = part.split(":", 1)
+            e0, e1 = float(a.strip()), float(b.strip())
+            if e1 <= e0:
+                raise ValueError(f"Invalid BG fit window {part!r}: end must be larger than start.")
+            out.append((e0, e1))
+        if not out:
+            out = [(float(self.bg_e0.value()), float(self.bg_e1.value()))]
+        return out
+
     def background_channel_range(self):
         if self.cube is None: raise ValueError("No cube loaded")
         return self.energy_range_to_channel_bounds(self.bg_e0.value(), self.bg_e1.value(), self.axis_info, self.cube.shape[2])
@@ -3800,39 +3892,45 @@ class RR2NMFGui(QMainWindow):
                 raise ValueError("Invalid background spatial ROI.")
 
             mode = self.combo_bg_mode.currentText()
+            windows = self.parse_bg_fit_windows()
+            work = self.cube.astype(np.float32, copy=False)
+            meta_msgs = []
             if mode.startswith("Reference BG"):
                 s0, s1 = self.energy_range_to_channel_bounds(self.bg_ref_ch0.value(), self.bg_ref_ch1.value(), self.axis_info, L)
-                l0, l1 = self.background_channel_range()
-                corrected, meta = apply_reference_bg_low_energy_scaling(
-                    self.cube,
-                    self.axis_info,
-                    spatial_roi=(y0, y1, x0, x1),
-                    fit_channel_roi=(l0, l1),
-                    scale_channel_roi=(s0, s1),
-                    after_mode=self.combo_bg_after.currentText(),
-                    chunk_pixels=max(512, self.spin_chunk.value()),
-                )
-                self.cube = corrected
+                for e0, e1 in windows:
+                    l0, l1 = self.energy_range_to_channel_bounds(e0, e1, self.axis_info, L)
+                    corrected, meta = apply_reference_bg_low_energy_scaling(
+                        work,
+                        self.axis_info,
+                        spatial_roi=(y0, y1, x0, x1),
+                        fit_channel_roi=(l0, l1),
+                        scale_channel_roi=(s0, s1),
+                        after_mode=self.combo_bg_after.currentText(),
+                        chunk_pixels=max(512, self.spin_chunk.value()),
+                    )
+                    work = corrected.astype(np.float32, copy=False)
+                    meta_msgs.append(f"[{e0:.6g}:{e1:.6g}] ch[{l0}:{l1}] r={meta['r_ref']:.4g}, alpha={meta['alpha_mean']:.4g}")
+                self.cube = work
                 self.lbl_bg.setText(
-                    "Applied: fitted reference BG × low-energy scale "
-                    f"fit_energy[{self.bg_e0.value():.6g}:{self.bg_e1.value():.6g}] -> ch[{l0}:{l1}], scale_energy[{self.bg_ref_ch0.value():.6g}:{self.bg_ref_ch1.value():.6g}] -> ch[{s0}:{s1}], "
-                    f"r={meta['r_ref']:.4g}, after={self.combo_bg_after.currentText()}, "
-                    f"alpha mean={meta['alpha_mean']:.4g}"
+                    "Applied multi-window reference BG: " + "; ".join(meta_msgs) +
+                    f" | scale_energy[{self.bg_ref_ch0.value():.6g}:{self.bg_ref_ch1.value():.6g}] -> ch[{s0}:{s1}], after={self.combo_bg_after.currentText()}"
                 )
             else:
-                l0, l1 = self.background_channel_range()
-                fit = fit_powerlaw_exponent_from_roi(self.cube, self.axis_info, (y0, y1, x0, x1), (l0, l1))
-                self.cube = apply_powerlaw_background_correction(
-                    self.cube, self.axis_info, (l0, l1), fit["r"],
-                    self.chk_bg_clip.isChecked(), max(512, self.spin_chunk.value())
-                )
-                self.lbl_bg.setText(
-                    f'Applied: global r={fit["r"]:.4g}, pixelwise A, RMSE={fit["rmse"]:.4g}'
-                )
+                for e0, e1 in windows:
+                    l0, l1 = self.energy_range_to_channel_bounds(e0, e1, self.axis_info, L)
+                    fit = fit_powerlaw_exponent_from_roi(work, self.axis_info, (y0, y1, x0, x1), (l0, l1))
+                    work = apply_powerlaw_background_correction(
+                        work, self.axis_info, (l0, l1), fit["r"],
+                        self.chk_bg_clip.isChecked(), max(512, self.spin_chunk.value())
+                    ).astype(np.float32, copy=False)
+                    meta_msgs.append(f"[{e0:.6g}:{e1:.6g}] ch[{l0}:{l1}] r={fit['r']:.4g}, RMSE={fit['rmse']:.4g}")
+                self.cube = work
+                self.lbl_bg.setText("Applied multi-window power-law BG: " + "; ".join(meta_msgs))
 
             self.bg_applied = True
             self.conv_result = None
             self.rr_result = None
+            self.pca_result = None
             self.refresh_views()
             self.refresh_spectrum_sources()
         except Exception as e:
@@ -4641,6 +4739,7 @@ This does not modify the current rr-NMF/manual tree results.
                 gain=float(self.spin_map_gain.value()) if hasattr(self,"spin_map_gain") else 1.0,
                 gamma=float(self.spin_map_gamma.value()) if hasattr(self,"spin_map_gamma") else 1.0,
                 inline_analysis=getattr(self, "_mapping_inline_analysis", None),
+                weights_layout=self.combo_map_weights_layout.currentText() if hasattr(self,"combo_map_weights_layout") else "right of map",
             )
             self.canvas_full_mapping.set_base(); self.canvas_full_mapping.draw()
         except Exception as e:
@@ -5623,6 +5722,9 @@ This does not modify the current rr-NMF/manual tree results.
                 "x0": self.spin_x0.value(), "x1": self.spin_x1.value(),
                 "l0": self.spin_l0.value(), "l1": self.spin_l1.value(),
                 "e0": self.spin_e0.value(), "e1": self.spin_e1.value(),
+                "y_stride": self.spin_y_stride.value() if hasattr(self, "spin_y_stride") else 1,
+                "x_stride": self.spin_x_stride.value() if hasattr(self, "spin_x_stride") else 1,
+                "energy_stride": self.spin_e_stride.value() if hasattr(self, "spin_e_stride") else 0.0,
                 "normalize": self.combo_norm.currentText(),
             },
             "background": {
@@ -5663,12 +5765,18 @@ This does not modify the current rr-NMF/manual tree results.
 
         # Block ROI energy/channel cross-update signals while restoring values.
         widgets_to_block = [self.spin_y0,self.spin_y1,self.spin_x0,self.spin_x1,self.spin_l0,self.spin_l1,self.spin_e0,self.spin_e1]
+        if hasattr(self, "spin_y_stride"):
+            widgets_to_block += [self.spin_y_stride, self.spin_x_stride, self.spin_e_stride]
         old_states = [w.blockSignals(True) for w in widgets_to_block]
         try:
             for key, widget in [("y0",self.spin_y0),("y1",self.spin_y1),("x0",self.spin_x0),("x1",self.spin_x1),("l0",self.spin_l0),("l1",self.spin_l1)]:
                 if key in roi: widget.setValue(int(roi[key]))
             for key, widget in [("e0",self.spin_e0),("e1",self.spin_e1)]:
                 if key in roi: widget.setValue(float(roi[key]))
+            if hasattr(self, "spin_y_stride"):
+                if "y_stride" in roi: self.spin_y_stride.setValue(max(1, int(roi["y_stride"])))
+                if "x_stride" in roi: self.spin_x_stride.setValue(max(1, int(roi["x_stride"])))
+                if "energy_stride" in roi: self.spin_e_stride.setValue(float(roi["energy_stride"]))
         finally:
             for w, old in zip(widgets_to_block, old_states):
                 w.blockSignals(old)
