@@ -2515,6 +2515,153 @@ def make_component_composite(images, mode="sum weighted color", norm_mode="perce
     return np.clip(rgb, 0.0, 1.0), norm, colors
 
 
+
+
+def _safe_corr_1d(a, b, eps=1e-12):
+    a=np.asarray(a,dtype=np.float64).reshape(-1); b=np.asarray(b,dtype=np.float64).reshape(-1)
+    n=min(a.size,b.size)
+    if n<=2: return np.nan
+    a=a[:n]; b=b[:n]
+    m=np.isfinite(a)&np.isfinite(b)
+    if np.count_nonzero(m)<=2: return np.nan
+    a=a[m]-np.nanmean(a[m]); b=b[m]-np.nanmean(b[m])
+    da=float(np.sqrt(np.nansum(a*a))); db=float(np.sqrt(np.nansum(b*b)))
+    if da<=eps or db<=eps: return np.nan
+    return float(np.nansum(a*b)/(da*db+eps))
+
+def _edge_integral_simple(energy_axis, spectrum, edge_e, width_eV=30.0, mode='post'):
+    x=np.asarray(energy_axis,dtype=np.float64); y=np.asarray(spectrum,dtype=np.float64)
+    if x.size!=y.size or x.size<2: return np.nan
+    edge_e=float(edge_e); width=max(1e-12,float(width_eV))
+    if mode=='center':
+        m=(x>=edge_e-width/2.0)&(x<=edge_e+width/2.0)
+    else:
+        m=(x>=edge_e)&(x<=edge_e+width)
+    m=m&np.isfinite(x)&np.isfinite(y)
+    if np.count_nonzero(m)<2: return np.nan
+    return float(np.trapz(np.nan_to_num(y[m],nan=0.0), x[m]))
+
+def _parse_index_list_text(txt, n):
+    vals=[]
+    txt=str(txt or '').replace(';',',').replace(' ', ',')
+    for part in txt.split(','):
+        part=part.strip()
+        if not part: continue
+        if '-' in part:
+            try:
+                a,b=part.split('-',1); a=int(a); b=int(b)
+                step=1 if b>=a else -1
+                vals.extend(list(range(a,b+step,step)))
+                continue
+            except Exception:
+                pass
+        try:
+            vals.append(int(part))
+        except Exception:
+            pass
+    out=[]
+    for v in vals:
+        if 0<=v<int(n) and v not in out:
+            out.append(v)
+    return out
+
+def compute_interface_state_analysis(items, axis_info, a_idx, b_idx, i_idx, edge_a_name, edge_b_name, edge_width_eV=30.0):
+    items=list(items or [])
+    if not items:
+        return {"rows":[],"summary":{},"plots":{}}
+    L=len(np.asarray(items[0].get('spectrum',[])))
+    x=axis_info.energy_axis if axis_info is not None and len(axis_info.energy_axis)==L else np.arange(L,dtype=np.float64)
+    spectra=[np.asarray(it.get('spectrum',np.zeros(L)),dtype=np.float64) for it in items]
+    images=[np.asarray(it.get('image'),dtype=np.float64) for it in items]
+    labels=[str(it.get('label',f'C{k}')) for k,it in enumerate(items)]
+    if not a_idx or not b_idx or not i_idx:
+        return {"rows":[],"summary":{"message":"Select A-like, B-like, and interface-like components."},"plots":{}}
+    HA=np.nanmean([spectra[k] for k in a_idx],axis=0)
+    HB=np.nanmean([spectra[k] for k in b_idx],axis=0)
+    HI_mean=np.nanmean([spectra[k] for k in i_idx],axis=0)
+    edge_a=EELS_EDGE_DB.get(edge_a_name,{}) if edge_a_name else {}
+    edge_b=EELS_EDGE_DB.get(edge_b_name,{}) if edge_b_name else {}
+    ea=float(edge_a.get('energy_eV',np.nan)); eb=float(edge_b.get('energy_eV',np.nan))
+    rows=[]
+    ratios=[]; weights=[]
+    # Component-wise stoichiometry-like values for all current items.
+    for k,(lab,sp) in enumerate(zip(labels,spectra)):
+        IA=_edge_integral_simple(x,sp,ea,edge_width_eV) if np.isfinite(ea) else np.nan
+        IB=_edge_integral_simple(x,sp,eb,edge_width_eV) if np.isfinite(eb) else np.nan
+        den=IA+IB if np.isfinite(IA) and np.isfinite(IB) else np.nan
+        xA=float(IA/den) if np.isfinite(den) and abs(den)>1e-12 else np.nan
+        xB=float(IB/den) if np.isfinite(den) and abs(den)>1e-12 else np.nan
+        affinity=_safe_corr_1d(sp,HI_mean)
+        rows.append({"type":"component","index":k,"label":lab,"IA":IA,"IB":IB,"xA":xA,"xB":xB,"affinity_to_I":affinity})
+        if np.isfinite(xA):
+            ratios.append((k,xA)); weights.append(np.maximum(images[k],0))
+    # Interface mixture fitting per interface component.
+    Xab=np.vstack([HA,HB]).T
+    mix_rows=[]; residuals=[]
+    for k in i_idx:
+        HI=spectra[k]
+        try:
+            coef, *_=np.linalg.lstsq(Xab, HI, rcond=None)
+            coef=np.clip(coef,0,None)
+            mix=coef[0]*HA+coef[1]*HB
+        except Exception:
+            coef=np.array([np.nan,np.nan]); mix=np.zeros_like(HI)
+        R=HI-mix
+        novelty_norm=float(np.linalg.norm(R)/(np.linalg.norm(HI)+1e-12)) if HI.size else np.nan
+        novelty_corr=float(1.0-_safe_corr_1d(HI,mix)) if HI.size else np.nan
+        RA=_edge_integral_simple(x,R,ea,edge_width_eV) if np.isfinite(ea) else np.nan
+        RB=_edge_integral_simple(x,R,eb,edge_width_eV) if np.isfinite(eb) else np.nan
+        mix_rows.append({"type":"interface_fit","index":k,"label":labels[k],"alpha_A":float(coef[0]),"beta_B":float(coef[1]),"novelty_norm":novelty_norm,"novelty_corr":novelty_corr,"resid_A":RA,"resid_B":RB})
+        residuals.append(R)
+    # Spatial stoichiometry-like map and affinity map.
+    sto_map=None
+    if ratios and weights:
+        num=None; den=None
+        for (k,xA),w in zip(ratios,weights):
+            if num is None:
+                num=np.zeros_like(w,dtype=np.float64); den=np.zeros_like(w,dtype=np.float64)
+            num += w*float(xA); den += w
+        sto_map=num/(den+1e-12)
+    aff_map=None
+    try:
+        aff_map=np.nansum([np.maximum(images[k],0) for k in i_idx],axis=0)
+        mx=float(np.nanmax(aff_map)) if aff_map is not None and aff_map.size else 0.0
+        if mx>0: aff_map=aff_map/mx
+    except Exception:
+        aff_map=None
+    all_rows=rows+mix_rows
+    return {"rows":all_rows,"summary":{"A_indices":a_idx,"B_indices":b_idx,"I_indices":i_idx,"edge_A":edge_a_name,"edge_B":edge_b_name,"edge_width_eV":edge_width_eV},"plots":{"energy":x,"HA":HA,"HB":HB,"HI_mean":HI_mean,"residual_mean":np.nanmean(residuals,axis=0) if residuals else None,"sto_map":sto_map,"affinity_map":aff_map}}
+
+def plot_interface_state_analysis(fig, result, cmap='viridis'):
+    fig.clear(); fig.set_size_inches(18,7.5,forward=True)
+    if not result or not result.get('rows'):
+        ax=fig.add_subplot(111); ax.axis('off'); ax.text(0.5,0.5,'No interface analysis result.\nSelect A/B/interface components and run analysis.',ha='center',va='center',fontsize=13)
+        return
+    plots=result.get('plots',{}) or {}
+    gs=fig.add_gridspec(2,3,width_ratios=[1,1,2.2],height_ratios=[1,1])
+    ax1=fig.add_subplot(gs[0,0]); ax2=fig.add_subplot(gs[1,0]); ax3=fig.add_subplot(gs[:,1:])
+    sto=plots.get('sto_map'); aff=plots.get('affinity_map')
+    if sto is not None:
+        im=ax1.imshow(sto,cmap='coolwarm',origin='upper',vmin=0,vmax=1); ax1.set_title('Stoichiometry-like xA map'); ax1.set_xticks([]); ax1.set_yticks([]); add_colorbar(fig,ax1,im)
+    else:
+        ax1.axis('off'); ax1.text(0.5,0.5,'No xA map',ha='center',va='center')
+    if aff is not None:
+        im=ax2.imshow(aff,cmap=cmap,origin='upper'); ax2.set_title('Interface affinity map'); ax2.set_xticks([]); ax2.set_yticks([]); add_colorbar(fig,ax2,im)
+    else:
+        ax2.axis('off'); ax2.text(0.5,0.5,'No affinity map',ha='center',va='center')
+    x=plots.get('energy')
+    if x is None:
+        ax3.axis('off'); return
+    for key,lab,lw in [('HA','A-like mean H',1.8),('HB','B-like mean H',1.8),('HI_mean','Interface mean H',2.3),('residual_mean','Interface residual mean',1.5)]:
+        y=plots.get(key)
+        if y is None: continue
+        y=np.asarray(y,dtype=np.float64)
+        ax3.plot(x, y, lw=lw, label=lab)
+    ax3.set_title('Interface mixture / novelty spectra')
+    ax3.set_xlabel('Energy')
+    ax3.grid(True,alpha=0.25); ax3.legend(fontsize=9)
+    fig.tight_layout()
+
 def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum_indices=None, clicked_pixel=None,
                                norm_mode="percentile 99", composite_mode="sum weighted color", spectrum_mode="Selected components all", topn=6,
                                y_mode="auto", y_min=None, y_max=None, y_min_lower=None, y_max_lower=None, gain=1.0, gamma=1.0,
@@ -3429,6 +3576,36 @@ class RR2NMFGui(QMainWindow):
         map_ctrl3.addStretch(1)
         mapping_lay.addLayout(map_ctrl3)
 
+        iface_box=QGroupBox("Interface State Analysis")
+        iface_lay=QGridLayout(iface_box)
+        self.chk_iface_enable=QCheckBox("Enable")
+        iface_lay.addWidget(self.chk_iface_enable,0,0)
+        iface_lay.addWidget(QLabel("A-like idx"),0,1)
+        self.edit_iface_A=QLineEdit(""); self.edit_iface_A.setPlaceholderText("e.g. 0,1 or 0-2")
+        iface_lay.addWidget(self.edit_iface_A,0,2)
+        iface_lay.addWidget(QLabel("B-like idx"),0,3)
+        self.edit_iface_B=QLineEdit(""); self.edit_iface_B.setPlaceholderText("e.g. 6,7")
+        iface_lay.addWidget(self.edit_iface_B,0,4)
+        iface_lay.addWidget(QLabel("Interface idx"),0,5)
+        self.edit_iface_I=QLineEdit(""); self.edit_iface_I.setPlaceholderText("e.g. 3,4,5")
+        iface_lay.addWidget(self.edit_iface_I,0,6)
+        iface_lay.addWidget(QLabel("A edge"),1,1)
+        self.combo_iface_edge_A=QComboBox(); self.combo_iface_edge_A.addItems(sorted(EELS_EDGE_DB.keys()))
+        iface_lay.addWidget(self.combo_iface_edge_A,1,2)
+        iface_lay.addWidget(QLabel("B edge"),1,3)
+        self.combo_iface_edge_B=QComboBox(); self.combo_iface_edge_B.addItems(sorted(EELS_EDGE_DB.keys()))
+        iface_lay.addWidget(self.combo_iface_edge_B,1,4)
+        iface_lay.addWidget(QLabel("Edge width (eV)"),1,5)
+        self.spin_iface_edge_width=QDoubleSpinBox(); self.spin_iface_edge_width.setRange(0.1,10000.0); self.spin_iface_edge_width.setDecimals(2); self.spin_iface_edge_width.setValue(30.0)
+        iface_lay.addWidget(self.spin_iface_edge_width,1,6)
+        self.btn_run_iface=QPushButton("Run Interface State Analysis")
+        self.btn_run_iface.clicked.connect(self.run_interface_state_analysis)
+        iface_lay.addWidget(self.btn_run_iface,0,7,2,1)
+        self.btn_clear_iface=QPushButton("Clear")
+        self.btn_clear_iface.clicked.connect(self.clear_interface_state_analysis)
+        iface_lay.addWidget(self.btn_clear_iface,0,8,2,1)
+        mapping_lay.addWidget(iface_box)
+
         map_lists=QHBoxLayout()
         self.list_map_components=QListWidget(); self.list_map_components.setSelectionMode(QListWidget.MultiSelection); self.list_map_components.itemSelectionChanged.connect(lambda: self._on_mapping_selection_changed())
         self.list_map_spectra=QListWidget(); self.list_map_spectra.setSelectionMode(QListWidget.MultiSelection); self.list_map_spectra.itemSelectionChanged.connect(lambda: self._on_mapping_selection_changed())
@@ -3440,9 +3617,14 @@ class RR2NMFGui(QMainWindow):
         mapping_split.setHandleWidth(8)
         mapping_split.addWidget(PlotPanel(self.canvas_full_mapping))
         inline_panel=QWidget(); inline_lay=QVBoxLayout(inline_panel); inline_lay.setContentsMargins(0,0,0,0)
-        inline_lay.addWidget(QLabel("Inline EDS/EELS analysis results for visible Full Mapping spectra"))
+        inline_lay.addWidget(QLabel("Inline EDS/EELS and Interface State Analysis results"))
         self.table_mapping_inline=QTableWidget(); self.table_mapping_inline.setMinimumHeight(90)
         inline_lay.addWidget(self.table_mapping_inline)
+        self.canvas_interface_state=Canvas(18,7)
+        inline_lay.addWidget(PlotPanel(self.canvas_interface_state))
+        self.table_interface_state=QTableWidget(); self.table_interface_state.setMinimumHeight(120)
+        inline_lay.addWidget(QLabel("Interface component stoichiometry / novelty table"))
+        inline_lay.addWidget(self.table_interface_state)
         mapping_split.addWidget(inline_panel)
         mapping_split.setStretchFactor(0, 5)
         mapping_split.setStretchFactor(1, 1)
@@ -3452,6 +3634,7 @@ class RR2NMFGui(QMainWindow):
         self.mapping_analysis_sources=[]
         self._mapping_inline_analysis=None
         self.mapping_eels_elements=[]
+        self._interface_state_result=None
         try:
             self.canvas_full_mapping.mpl_connect('button_press_event', self.on_full_mapping_click)
             self.canvas_full_mapping.mpl_connect('key_press_event', self.on_full_mapping_key)
@@ -4709,6 +4892,63 @@ This does not modify the current rr-NMF/manual tree results.
         except Exception:
             return float(default)
         return float(default)
+
+
+    def _fill_table_from_rows(self, table, rows, columns):
+        try:
+            table.clear()
+            table.setColumnCount(len(columns))
+            table.setHorizontalHeaderLabels(columns)
+            table.setRowCount(len(rows))
+            for r,row in enumerate(rows):
+                for c,col in enumerate(columns):
+                    val=row.get(col, "") if isinstance(row, dict) else ""
+                    if isinstance(val, float):
+                        txt=f"{val:.6g}" if np.isfinite(val) else ""
+                    else:
+                        txt=str(val)
+                    table.setItem(r,c,QTableWidgetItem(txt))
+            table.resizeColumnsToContents()
+        except Exception:
+            pass
+
+    def run_interface_state_analysis(self):
+        if not hasattr(self,"table_interface_state"):
+            return
+        try:
+            items=self._full_mapping_items()
+            n=len(items)
+            a_idx=_parse_index_list_text(self.edit_iface_A.text() if hasattr(self,"edit_iface_A") else "", n)
+            b_idx=_parse_index_list_text(self.edit_iface_B.text() if hasattr(self,"edit_iface_B") else "", n)
+            i_idx=_parse_index_list_text(self.edit_iface_I.text() if hasattr(self,"edit_iface_I") else "", n)
+            result=compute_interface_state_analysis(
+                items,
+                self.roi_axis_info,
+                a_idx,b_idx,i_idx,
+                self.combo_iface_edge_A.currentText() if hasattr(self,"combo_iface_edge_A") else "",
+                self.combo_iface_edge_B.currentText() if hasattr(self,"combo_iface_edge_B") else "",
+                float(self.spin_iface_edge_width.value()) if hasattr(self,"spin_iface_edge_width") else 30.0,
+            )
+            self._interface_state_result=result
+            rows=result.get("rows",[]) or []
+            cols=["type","index","label","IA","IB","xA","xB","affinity_to_I","alpha_A","beta_B","novelty_norm","novelty_corr","resid_A","resid_B"]
+            self._fill_table_from_rows(self.table_interface_state, rows, cols)
+            plot_interface_state_analysis(self.canvas_interface_state.fig,result,cmap=self.combo_cmap.currentText() if hasattr(self,"combo_cmap") else "viridis")
+            self.canvas_interface_state.set_base(); self.canvas_interface_state.draw()
+            self.append_log(f"Interface State Analysis updated: A={a_idx}, B={b_idx}, I={i_idx}")
+        except Exception as e:
+            QMessageBox.warning(self,"Interface State Analysis",str(e))
+            try: self.append_log("Interface analysis failed: "+str(e))
+            except Exception: pass
+
+    def clear_interface_state_analysis(self):
+        self._interface_state_result=None
+        try:
+            self.table_interface_state.clear(); self.table_interface_state.setRowCount(0); self.table_interface_state.setColumnCount(0)
+            self.canvas_interface_state.clear()
+            self.append_log("Interface State Analysis cleared.")
+        except Exception:
+            pass
 
     def refresh_full_mapping_view(self):
         if not hasattr(self,"canvas_full_mapping"):
