@@ -1888,33 +1888,44 @@ def plot_raw(
     corrected_full_cube=None,
     corrected_full_history=None,
 ):
-    """Raw-data view with click-selected single-pixel spectrum and iterative BG results.
-
-    If corrected_full_history is provided, the left column shows the raw image followed
-    by every sequential background-correction result (#1..#N).  The spectrum panel plots
-    the raw spectrum and all sequential corrected spectra.
-    """
+    """Raw-data view with independent image/spectrum rows for every BG round."""
     fig.clear()
     history = list(corrected_full_history or [])
     if bg_applied and not history and corrected_full_cube is not None:
         history = [corrected_full_cube]
 
-    n_img_rows = 1 + (len(history) if bg_applied else 0)
-    n_img_rows = max(1, n_img_rows)
-    fig_h = max(6.4, 3.2 * n_img_rows + 1.2)
-    fig.set_size_inches(17.5, fig_h, forward=True)
-    gs = fig.add_gridspec(n_img_rows, 2, width_ratios=[1.0, 1.55], height_ratios=[1.0] * n_img_rows)
-    image_axes = [fig.add_subplot(gs[0, 0])]
-    for ri in range(1, n_img_rows):
-        image_axes.append(fig.add_subplot(gs[ri, 0]))
-    sp = fig.add_subplot(gs[:, 1])
+    rows = 1 + (len(history) if bg_applied else 0)
+    rows = max(1, rows)
+    fig_h = max(6.2, 3.6 * rows)
+    fig.set_size_inches(18.5, fig_h, forward=True)
+    gs = fig.add_gridspec(rows, 2, width_ratios=[1.0, 1.45], height_ratios=[1.0] * rows)
 
     show_cube = full_cube if full_cube is not None else cube
+    src_raw = raw_roi_before_bg if raw_roi_before_bg is not None else cube
+
+    def _safe_sum_image(img_cube):
+        arr = np.asarray(img_cube, dtype=np.float64)
+        img = np.nansum(arr, axis=2)
+        img = np.nan_to_num(img, nan=0.0, posinf=0.0, neginf=0.0)
+        return img
+
+    def _robust_limits(img):
+        vals = np.asarray(img, dtype=np.float64)
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            return None, None
+        lo, hi = np.nanpercentile(vals, [1, 99])
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            lo, hi = float(np.nanmin(vals)), float(np.nanmax(vals))
+        if hi <= lo:
+            return None, None
+        return float(lo), float(hi)
 
     def _draw_img(ax, img_cube, title):
-        img = np.sum(img_cube, axis=2)
-        im = ax.imshow(img, cmap=cmap, origin="upper", aspect="equal")
-        ax.set_title(title, pad=18 if title.startswith("Raw") else 12)
+        img = _safe_sum_image(img_cube)
+        vmin, vmax = _robust_limits(img)
+        im = ax.imshow(img, cmap=cmap, origin="upper", aspect="equal", vmin=vmin, vmax=vmax)
+        ax.set_title(title, pad=14)
         ax.set_xlabel("X"); ax.set_ylabel("Y")
         if spatial_roi is not None:
             y0, y1, x0, x1 = spatial_roi
@@ -1936,49 +1947,35 @@ def plot_raw(
                 )
         add_colorbar(fig, ax, im)
 
-    _draw_img(image_axes[0], show_cube, "Raw sum image: click a pixel to inspect spectrum")
-    for k, hc in enumerate(history, start=1):
-        if k < len(image_axes):
-            _draw_img(image_axes[k], hc, f"BG correction #{k} sum image")
-
-    # Spectrum: selected single pixel; default to analysis ROI mean.
-    src_raw = raw_roi_before_bg if raw_roi_before_bg is not None else cube
-    if selected_pixel is not None:
-        px, py = selected_pixel
-        if full_cube is not None and 0 <= py < full_cube.shape[0] and 0 <= px < full_cube.shape[1] and src_raw.ndim == 3 and src_raw.shape[:2] == full_cube.shape[:2]:
-            raw_spec = np.asarray(src_raw[py, px, :], dtype=np.float64)
-            raw_std = None
-        else:
-            raw_spec, raw_std = roi_mean_std_spectrum(src_raw)
-        spec_title = f"Single-pixel spectrum x={px}, y={py}"
-    else:
-        raw_spec, raw_std = roi_mean_std_spectrum(src_raw)
-        spec_title = "Analysis ROI mean spectrum (click image for one pixel)"
-
-    x = axis.energy_axis if len(axis.energy_axis) == len(raw_spec) else np.arange(len(raw_spec))
-    sp.plot(x, raw_spec, linewidth=1.4, label="raw pixel" if selected_pixel is not None else "ROI raw mean")
-    if selected_pixel is None and raw_std is not None:
-        sp.fill_between(x, raw_spec - raw_std, raw_spec + raw_std, alpha=0.14, label="ROI raw ±1σ")
-
-    # Plot every sequential corrected spectrum.  These are more useful than plotting only
-    # the final correction when assessing whether repeated correction is too aggressive.
-    for k, hc in enumerate(history, start=1):
-        corr_spec = None
-        corr_std = None
+    def _spectrum_from_cube(img_cube):
         if selected_pixel is not None:
             px, py = selected_pixel
-            if full_cube is not None and 0 <= py < full_cube.shape[0] and 0 <= px < full_cube.shape[1] and hc.ndim == 3 and hc.shape[:2] == full_cube.shape[:2]:
-                corr_spec = np.asarray(hc[py, px, :], dtype=np.float64)
-        if corr_spec is None:
-            corr_spec, corr_std = roi_mean_std_spectrum(hc)
-        sp.plot(x, corr_spec, linewidth=1.35, label=f"BG corr #{k}")
-        if selected_pixel is None and corr_std is not None and k == len(history):
-            sp.fill_between(x, corr_spec - corr_std, corr_spec + corr_std, alpha=0.10, label=f"BG corr #{k} ±1σ")
+            ref_shape = show_cube.shape[:2] if show_cube is not None and np.ndim(show_cube) == 3 else img_cube.shape[:2]
+            if 0 <= py < ref_shape[0] and 0 <= px < ref_shape[1] and img_cube.ndim == 3 and img_cube.shape[:2] == ref_shape:
+                return np.asarray(img_cube[py, px, :], dtype=np.float64), None
+        return roi_mean_std_spectrum(img_cube)
 
-    sp.set_title(spec_title)
-    sp.set_xlabel(axis.energy_label); sp.set_ylabel("Intensity")
-    sp.grid(True, alpha=.3); sp.legend(fontsize=8)
-    fig.subplots_adjust(left=.055, right=.975, top=.94, bottom=.07, wspace=.32, hspace=.42)
+    plot_cubes = [("Raw", show_cube, src_raw)]
+    for k, hc in enumerate(history, start=1):
+        plot_cubes.append((f"BG correction #{k}", hc, hc))
+
+    for r, (name, img_cube, spec_cube) in enumerate(plot_cubes[:rows]):
+        ax_img = fig.add_subplot(gs[r, 0])
+        ax_sp = fig.add_subplot(gs[r, 1])
+        img_title = "Raw sum image: click a pixel to inspect spectrum" if r == 0 else f"{name} sum image"
+        _draw_img(ax_img, img_cube, img_title)
+
+        spec, std = _spectrum_from_cube(spec_cube)
+        x = axis.energy_axis if len(axis.energy_axis) == len(spec) else np.arange(len(spec))
+        lbl = f"{name} pixel" if selected_pixel is not None else f"{name} ROI mean"
+        ax_sp.plot(x, spec, linewidth=1.35, label=lbl)
+        if selected_pixel is None and std is not None:
+            ax_sp.fill_between(x, spec - std, spec + std, alpha=0.12, label=f"{name} ±1σ")
+        ax_sp.set_title(("Single-pixel" if selected_pixel is not None else "ROI mean") + f" spectrum: {name}")
+        ax_sp.set_xlabel(axis.energy_label); ax_sp.set_ylabel("Intensity")
+        ax_sp.grid(True, alpha=.3); ax_sp.legend(fontsize=8)
+
+    fig.subplots_adjust(left=.055, right=.975, top=.94, bottom=.07, wspace=.28, hspace=.55)
 
 def plot_conv(fig, conv, axis, cmap="viridis", maxn=20):
     fig.clear()
@@ -3314,7 +3311,7 @@ class RR2NMFGui(QMainWindow):
         super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v10.3 Iterative BG Steps"); self.resize(1850,1080); self.setMinimumSize(900, 620)
         self.cube=None; self.original_cube=None; self.roi_cube=None; self.X=None; self.image_shape=None
         self.axis_info=make_default_axis_info((1,1,1)); self.roi_axis_info=make_default_axis_info((1,1,1))
-        self.conv_result=None; self.rr_result=None; self.pca_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.bg_applied=False; self.bg_correction_history=[]; self.bg_correction_steps=[]; self._raw_mouse_press=None; self.selected_raw_pixel=None
+        self.conv_result=None; self.rr_result=None; self.pca_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.bg_applied=False; self.bg_correction_history=[]; self.bg_round_params=[]; self._bg_round_syncing=False; self._bg_active_round=1; self._raw_mouse_press=None; self.selected_raw_pixel=None
         self.eds_elements=[]; self.eels_elements=[]; self.eds_sources=[]; self.eels_sources=[]; self.eds_hits=[]; self.eels_hits=[]
         self._syncing=False; self.loaded_decomp_sources=[]; self._auto_score_active=False; self._auto_score_target_depth=None; self._auto_score_stop_after_current=False; self._auto_score_unchanged_count=0; self._build_ui()
 
@@ -3371,13 +3368,17 @@ class RR2NMFGui(QMainWindow):
         self.spin_bg_iterations=QSpinBox()
         self.spin_bg_iterations.setRange(1, 50)
         self.spin_bg_iterations.setValue(1)
-        self.spin_bg_iterations.setToolTip("Correction rounds. If no explicit BG steps are recorded, the current parameters are repeated N times. If BG steps are recorded, those steps are run sequentially from raw -> step 1 -> step 2 ...")
+        self.spin_bg_iterations.setToolTip("Number of sequential background-correction rounds. Round #2 uses the output of round #1 as its input.")
+        self.spin_bg_iterations.valueChanged.connect(self.on_bg_round_count_changed)
+        self.spin_bg_round_select=QSpinBox()
+        self.spin_bg_round_select.setRange(1, 1)
+        self.spin_bg_round_select.setValue(1)
+        self.spin_bg_round_select.setToolTip("Select which round's BG parameters are shown/edited below.")
+        self.spin_bg_round_select.valueChanged.connect(self.on_bg_round_selected)
         self.chk_bg_clip=QCheckBox("Clip negative after power-law subtraction")
         self.chk_bg_clip.setChecked(True)
         self.btn_bg_current=QPushButton("Use Current Spatial ROI"); self.btn_bg_current.clicked.connect(self.use_current_roi_for_background)
-        self.btn_bg_add_step=QPushButton("Add/Record Current BG Step"); self.btn_bg_add_step.clicked.connect(self.add_bg_correction_step)
-        self.btn_bg_clear_steps=QPushButton("Clear BG Steps"); self.btn_bg_clear_steps.clicked.connect(self.clear_bg_correction_steps)
-        self.txt_bg_steps=QTextEdit(); self.txt_bg_steps.setReadOnly(True); self.txt_bg_steps.setMaximumHeight(92); self.txt_bg_steps.setPlainText("No recorded BG steps. Current parameters will be repeated by Correction rounds.")
+        self.lbl_bg_round_status=QLabel("Round 1 parameters")
         self.btn_apply_bg=QPushButton("Apply Background Correction"); self.btn_apply_bg.clicked.connect(self.apply_background_correction)
         self.btn_reset_bg=QPushButton("Reset Original"); self.btn_reset_bg.clicked.connect(self.reset_background_correction)
         self.lbl_bg=QLabel("Not applied")
@@ -3387,12 +3388,26 @@ class RR2NMFGui(QMainWindow):
             ("BG/fit X start",self.bg_x0),("BG/fit X end",self.bg_x1),
             ("Power-law fit energy start",self.bg_e0),("Power-law fit energy end",self.bg_e1),
             ("BG correction rounds",self.spin_bg_iterations),
+            ("Background Correction - round",self.spin_bg_round_select),
+            ("Round status",self.lbl_bg_round_status),
             ("Reference scale energy start",self.bg_ref_ch0),("Reference scale energy end",self.bg_ref_ch1),
             ("Reference after subtraction",self.combo_bg_after),
-            (None,self.chk_bg_clip),(None,self.btn_bg_current),(None,self.btn_bg_add_step),(None,self.btn_bg_clear_steps),("Recorded BG steps",self.txt_bg_steps),(None,self.btn_apply_bg),(None,self.btn_reset_bg),
+            (None,self.chk_bg_clip),(None,self.btn_bg_current),(None,self.btn_apply_bg),(None,self.btn_reset_bg),
             ("Status",self.lbl_bg)
         ]:
             bf.addRow(w) if lab is None else bf.addRow(lab,w)
+        # Keep per-round BG parameters synchronized with the currently selected round.
+        for _w in [self.combo_bg_mode, self.bg_y0, self.bg_y1, self.bg_x0, self.bg_x1, self.bg_e0, self.bg_e1, self.bg_ref_ch0, self.bg_ref_ch1, self.combo_bg_after, self.chk_bg_clip]:
+            try:
+                if hasattr(_w, "valueChanged"):
+                    _w.valueChanged.connect(self._save_current_bg_round_params)
+                elif hasattr(_w, "currentIndexChanged"):
+                    _w.currentIndexChanged.connect(self._save_current_bg_round_params)
+                elif hasattr(_w, "stateChanged"):
+                    _w.stateChanged.connect(self._save_current_bg_round_params)
+            except Exception:
+                pass
+        self._ensure_bg_round_params()
         cl.addWidget(bg)
 
         ng=QGroupBox("NMF Settings"); nf=QFormLayout(ng)
@@ -3855,7 +3870,7 @@ class RR2NMFGui(QMainWindow):
         if not path: return
         try:
             cube,meta,axis=load_hyperspectral_file(path); cube=nonnegative(cube,"clip")
-            self.cube=cube.copy(); self.original_cube=cube.copy(); self.axis_info=axis; self.roi_axis_info=axis; self.bg_applied=False; self.bg_correction_history=[]; self.bg_correction_steps=[]; self.conv_result=None; self.rr_result=None; self.pca_result=None; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.selected_raw_pixel=None
+            self.cube=cube.copy(); self.original_cube=cube.copy(); self.axis_info=axis; self.roi_axis_info=axis; self.bg_applied=False; self.bg_correction_history=[]; self.bg_round_params=[]; self._bg_active_round=1; self.conv_result=None; self.rr_result=None; self.pca_result=None; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.selected_raw_pixel=None
             self.lbl_file.setText(os.path.basename(path)); self.lbl_shape.setText(str(cube.shape)); self.set_roi_full(); self.set_background_roi_full(); self.refresh_views(); self.refresh_spectrum_sources(); self.append_log(f"Loaded {cube.shape}")
         except Exception as e: QMessageBox.critical(self,"Load failed",str(e)); self.append_log(traceback.format_exc())
 
@@ -3991,6 +4006,82 @@ class RR2NMFGui(QMainWindow):
             "clip": bool(self.chk_bg_clip.isChecked()),
         }
 
+    def _apply_bg_step_to_widgets(self, step):
+        self._bg_round_syncing = True
+        try:
+            self.combo_bg_mode.setCurrentText(str(step.get("mode", self.combo_bg_mode.currentText())))
+            self.bg_y0.setValue(int(step.get("y0", self.bg_y0.value())))
+            self.bg_y1.setValue(int(step.get("y1", self.bg_y1.value())))
+            self.bg_x0.setValue(int(step.get("x0", self.bg_x0.value())))
+            self.bg_x1.setValue(int(step.get("x1", self.bg_x1.value())))
+            self.bg_e0.setValue(float(step.get("fit_e0", self.bg_e0.value())))
+            self.bg_e1.setValue(float(step.get("fit_e1", self.bg_e1.value())))
+            self.bg_ref_ch0.setValue(float(step.get("ref_e0", self.bg_ref_ch0.value())))
+            self.bg_ref_ch1.setValue(float(step.get("ref_e1", self.bg_ref_ch1.value())))
+            self.combo_bg_after.setCurrentText(str(step.get("after", self.combo_bg_after.currentText())))
+            self.chk_bg_clip.setChecked(bool(step.get("clip", self.chk_bg_clip.isChecked())))
+        finally:
+            self._bg_round_syncing = False
+        self._update_bg_round_status()
+
+    def _ensure_bg_round_params(self):
+        n = 1
+        if hasattr(self, "spin_bg_iterations"):
+            n = max(1, int(self.spin_bg_iterations.value()))
+        if not hasattr(self, "bg_round_params") or not isinstance(self.bg_round_params, list):
+            self.bg_round_params = []
+        if not self.bg_round_params:
+            self.bg_round_params = [self._current_bg_step_dict()]
+        while len(self.bg_round_params) < n:
+            self.bg_round_params.append(dict(self.bg_round_params[-1]))
+        if len(self.bg_round_params) > n:
+            self.bg_round_params = self.bg_round_params[:n]
+        if hasattr(self, "spin_bg_round_select"):
+            cur = min(max(1, int(self.spin_bg_round_select.value())), n)
+            self.spin_bg_round_select.blockSignals(True)
+            self.spin_bg_round_select.setRange(1, n)
+            self.spin_bg_round_select.setValue(cur)
+            self.spin_bg_round_select.blockSignals(False)
+            self._bg_active_round = cur
+        self._update_bg_round_status()
+
+    def _save_current_bg_round_params(self, *args):
+        if getattr(self, "_bg_round_syncing", False):
+            return
+        if not hasattr(self, "spin_bg_round_select"):
+            return
+        self._ensure_bg_round_params()
+        idx = max(0, min(int(self.spin_bg_round_select.value()) - 1, len(self.bg_round_params) - 1))
+        self.bg_round_params[idx] = self._current_bg_step_dict()
+        self._update_bg_round_status()
+
+    def _update_bg_round_status(self):
+        if not hasattr(self, "lbl_bg_round_status"):
+            return
+        n = int(self.spin_bg_iterations.value()) if hasattr(self, "spin_bg_iterations") else 1
+        r = int(self.spin_bg_round_select.value()) if hasattr(self, "spin_bg_round_select") else 1
+        self.lbl_bg_round_status.setText(f"Editing round {r} of {n}. Apply runs raw -> #1 -> #2 -> ... sequentially.")
+
+    def on_bg_round_count_changed(self, n):
+        # Save the visible round before resizing the parameter list.
+        self._save_current_bg_round_params()
+        self._ensure_bg_round_params()
+        cur = min(max(1, int(getattr(self, "_bg_active_round", 1))), int(n))
+        if hasattr(self, "spin_bg_round_select"):
+            self.spin_bg_round_select.setValue(cur)
+        self._apply_bg_step_to_widgets(self.bg_round_params[cur - 1])
+
+    def on_bg_round_selected(self, r):
+        if getattr(self, "_bg_round_syncing", False):
+            return
+        old = int(getattr(self, "_bg_active_round", 1))
+        self._ensure_bg_round_params()
+        if 1 <= old <= len(self.bg_round_params):
+            self.bg_round_params[old - 1] = self._current_bg_step_dict()
+        r = max(1, min(int(r), len(self.bg_round_params)))
+        self._bg_active_round = r
+        self._apply_bg_step_to_widgets(self.bg_round_params[r - 1])
+
     def _format_bg_step(self, step, idx=None):
         prefix = f"#{idx}: " if idx is not None else ""
         if str(step.get("mode", "")).startswith("Fitted reference"):
@@ -4005,36 +4096,11 @@ class RR2NMFGui(QMainWindow):
             f"| clip={step.get('clip')}"
         )
 
-    def _refresh_bg_steps_text(self):
-        steps = getattr(self, "bg_correction_steps", []) or []
-        if not hasattr(self, "txt_bg_steps"):
-            return
-        if not steps:
-            self.txt_bg_steps.setPlainText("No recorded BG steps. Current parameters will be repeated by Correction rounds.")
-            return
-        self.txt_bg_steps.setPlainText("\n".join(self._format_bg_step(st, i + 1) for i, st in enumerate(steps)))
-
-    def add_bg_correction_step(self):
-        if not hasattr(self, "bg_correction_steps"):
-            self.bg_correction_steps = []
-        self.bg_correction_steps.append(self._current_bg_step_dict())
-        self.spin_bg_iterations.setValue(len(self.bg_correction_steps))
-        self._refresh_bg_steps_text()
-        self.append_log(f"Recorded BG correction step #{len(self.bg_correction_steps)}: {self._format_bg_step(self.bg_correction_steps[-1])}")
-
-    def clear_bg_correction_steps(self):
-        self.bg_correction_steps = []
-        self._refresh_bg_steps_text()
-        self.append_log("Cleared recorded BG correction steps. Current parameters will be repeated by Correction rounds.")
-
     def _bg_steps_for_apply(self):
-        recorded = list(getattr(self, "bg_correction_steps", []) or [])
-        if recorded:
-            return recorded
+        self._save_current_bg_round_params()
+        self._ensure_bg_round_params()
         n_iter = int(self.spin_bg_iterations.value()) if hasattr(self, "spin_bg_iterations") else 1
-        n_iter = max(1, n_iter)
-        cur = self._current_bg_step_dict()
-        return [dict(cur) for _ in range(n_iter)]
+        return [dict(st) for st in self.bg_round_params[:max(1, n_iter)]]
 
     def energy_range_to_channel_bounds(self, e0, e1, axis_info=None, L=None):
         """Convert an energy-axis interval to half-open channel bounds [lo, hi).
@@ -4166,7 +4232,6 @@ class RR2NMFGui(QMainWindow):
             self.rr_result = None
             self.pca_result = None
             self.lbl_bg.setText(f"Applied {len(steps)} sequential BG correction step(s). Last: {meta_msgs[-1] if meta_msgs else '-'}")
-            self._refresh_bg_steps_text()
             self.refresh_views()
             self.refresh_spectrum_sources()
         except Exception as e:
