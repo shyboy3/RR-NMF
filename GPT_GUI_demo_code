@@ -2556,101 +2556,155 @@ def _parse_index_list_text(txt, n):
             out.append(v)
     return out
 
-def compute_interface_state_analysis(items, axis_info, a_idx, b_idx, i_idx, edge_a_name, edge_b_name, edge_width_eV=30.0):
+
+def _energy_window_indices(axis_info, L, e0, e1):
+    x = np.asarray(axis_info.energy_axis if axis_info is not None and len(axis_info.energy_axis)==L else np.arange(L), dtype=np.float64)
+    a=float(min(e0,e1)); b=float(max(e0,e1))
+    if not np.isfinite(a) or not np.isfinite(b) or abs(b-a) <= 1e-12:
+        return x, np.ones(L, dtype=bool)
+    return x, (x>=a) & (x<=b)
+
+
+def _weighted_spectrum_from_images_spectra(images, spectra, mask=None, weights_override=None):
+    """Build a component-model spectrum from W images and H/loading spectra over a spatial ROI/mask."""
+    if not images or not spectra:
+        return None
+    L=len(np.asarray(spectra[0]).reshape(-1))
+    coeffs=[]
+    for i,img in enumerate(images):
+        w=np.asarray(img,dtype=np.float64)
+        if weights_override is not None and i < len(weights_override):
+            coeff=float(weights_override[i])
+        elif mask is not None:
+            m=np.asarray(mask, dtype=bool)
+            if m.shape != w.shape:
+                coeff=float(np.nanmean(np.maximum(w,0)))
+            else:
+                vals=np.maximum(w[m],0)
+                coeff=float(np.nanmean(vals)) if vals.size else 0.0
+        else:
+            coeff=float(np.nanmean(np.maximum(w,0)))
+        coeffs.append(coeff)
+    coeffs=np.asarray(coeffs,dtype=np.float64)
+    if not np.any(np.isfinite(coeffs)) or float(np.nansum(np.abs(coeffs))) <= 1e-12:
+        coeffs=np.ones(len(images),dtype=np.float64)
+    out=np.zeros(L,dtype=np.float64)
+    for c,sp in zip(coeffs,spectra):
+        out += float(np.nan_to_num(c))*np.asarray(sp,dtype=np.float64).reshape(-1)
+    den=float(np.nansum(np.abs(coeffs)))
+    return out/(den+1e-12)
+
+
+def compute_shared_feature_analysis(items, axis_info, mode='Manual ROI', ref_indices=None,
+                                    roi=None, top_percent=10.0, feature_range=(0.0, 0.0)):
+    """Shared spectral feature analysis for mixed rr-NMF/PCA/NMF components.
+
+    This intentionally avoids the old A/B/interface phase assumption.  A reference spectrum is
+    created either from a user ROI or from top-percent pixels of reference component(s).  The
+    selected feature energy window is then compared to every component spectrum, and a shared
+    feature map is built from component maps weighted by their feature similarity.
+    """
     items=list(items or [])
     if not items:
-        return {"rows":[],"summary":{},"plots":{}}
-    L=len(np.asarray(items[0].get('spectrum',[])))
-    x=axis_info.energy_axis if axis_info is not None and len(axis_info.energy_axis)==L else np.arange(L,dtype=np.float64)
-    spectra=[np.asarray(it.get('spectrum',np.zeros(L)),dtype=np.float64) for it in items]
+        return {'rows':[], 'summary':{'message':'No mapping items.'}, 'plots':{}}
     images=[np.asarray(it.get('image'),dtype=np.float64) for it in items]
-    labels=[str(it.get('label',f'C{k}')) for k,it in enumerate(items)]
-    if not a_idx or not b_idx or not i_idx:
-        return {"rows":[],"summary":{"message":"Select A-like, B-like, and interface-like components."},"plots":{}}
-    HA=np.nanmean([spectra[k] for k in a_idx],axis=0)
-    HB=np.nanmean([spectra[k] for k in b_idx],axis=0)
-    HI_mean=np.nanmean([spectra[k] for k in i_idx],axis=0)
-    edge_a=EELS_EDGE_DB.get(edge_a_name,{}) if edge_a_name else {}
-    edge_b=EELS_EDGE_DB.get(edge_b_name,{}) if edge_b_name else {}
-    ea=float(edge_a.get('energy_eV',np.nan)); eb=float(edge_b.get('energy_eV',np.nan))
-    rows=[]
-    ratios=[]; weights=[]
-    # Component-wise stoichiometry-like values for all current items.
-    for k,(lab,sp) in enumerate(zip(labels,spectra)):
-        IA=_edge_integral_simple(x,sp,ea,edge_width_eV) if np.isfinite(ea) else np.nan
-        IB=_edge_integral_simple(x,sp,eb,edge_width_eV) if np.isfinite(eb) else np.nan
-        den=IA+IB if np.isfinite(IA) and np.isfinite(IB) else np.nan
-        xA=float(IA/den) if np.isfinite(den) and abs(den)>1e-12 else np.nan
-        xB=float(IB/den) if np.isfinite(den) and abs(den)>1e-12 else np.nan
-        affinity=_safe_corr_1d(sp,HI_mean)
-        rows.append({"type":"component","index":k,"label":lab,"IA":IA,"IB":IB,"xA":xA,"xB":xB,"affinity_to_I":affinity})
-        if np.isfinite(xA):
-            ratios.append((k,xA)); weights.append(np.maximum(images[k],0))
-    # Interface mixture fitting per interface component.
-    Xab=np.vstack([HA,HB]).T
-    mix_rows=[]; residuals=[]
-    for k in i_idx:
-        HI=spectra[k]
-        try:
-            coef, *_=np.linalg.lstsq(Xab, HI, rcond=None)
-            coef=np.clip(coef,0,None)
-            mix=coef[0]*HA+coef[1]*HB
-        except Exception:
-            coef=np.array([np.nan,np.nan]); mix=np.zeros_like(HI)
-        R=HI-mix
-        novelty_norm=float(np.linalg.norm(R)/(np.linalg.norm(HI)+1e-12)) if HI.size else np.nan
-        novelty_corr=float(1.0-_safe_corr_1d(HI,mix)) if HI.size else np.nan
-        RA=_edge_integral_simple(x,R,ea,edge_width_eV) if np.isfinite(ea) else np.nan
-        RB=_edge_integral_simple(x,R,eb,edge_width_eV) if np.isfinite(eb) else np.nan
-        mix_rows.append({"type":"interface_fit","index":k,"label":labels[k],"alpha_A":float(coef[0]),"beta_B":float(coef[1]),"novelty_norm":novelty_norm,"novelty_corr":novelty_corr,"resid_A":RA,"resid_B":RB})
-        residuals.append(R)
-    # Spatial stoichiometry-like map and affinity map.
-    sto_map=None
-    if ratios and weights:
-        num=None; den=None
-        for (k,xA),w in zip(ratios,weights):
-            if num is None:
-                num=np.zeros_like(w,dtype=np.float64); den=np.zeros_like(w,dtype=np.float64)
-            num += w*float(xA); den += w
-        sto_map=num/(den+1e-12)
-    aff_map=None
-    try:
-        aff_map=np.nansum([np.maximum(images[k],0) for k in i_idx],axis=0)
-        mx=float(np.nanmax(aff_map)) if aff_map is not None and aff_map.size else 0.0
-        if mx>0: aff_map=aff_map/mx
-    except Exception:
-        aff_map=None
-    all_rows=rows+mix_rows
-    return {"rows":all_rows,"summary":{"A_indices":a_idx,"B_indices":b_idx,"I_indices":i_idx,"edge_A":edge_a_name,"edge_B":edge_b_name,"edge_width_eV":edge_width_eV},"plots":{"energy":x,"HA":HA,"HB":HB,"HI_mean":HI_mean,"residual_mean":np.nanmean(residuals,axis=0) if residuals else None,"sto_map":sto_map,"affinity_map":aff_map}}
+    spectra=[np.asarray(it.get('spectrum'),dtype=np.float64).reshape(-1) for it in items]
+    labels=[str(it.get('display_label', it.get('label', f'C{k}'))) for k,it in enumerate(items)]
+    L=len(spectra[0]) if spectra else 0
+    x,win=_energy_window_indices(axis_info,L,feature_range[0],feature_range[1])
+    h,w=images[0].shape if images and images[0].ndim==2 else (0,0)
+    n=len(items)
+    ref_indices=[int(i) for i in (ref_indices or []) if 0 <= int(i) < n]
+    if not ref_indices:
+        ref_indices=list(range(n))
 
-def plot_interface_state_analysis(fig, result, cmap='viridis'):
+    roi_mask=None
+    ref_label=''
+    if str(mode).lower().startswith('manual'):
+        if roi is None:
+            y0,y1,x0,x1=0,h,0,w
+        else:
+            x0,x1,y0,y1=roi
+            x0=max(0,min(int(x0),w)); x1=max(0,min(int(x1),w))
+            y0=max(0,min(int(y0),h)); y1=max(0,min(int(y1),h))
+            if x1<=x0: x1=min(w,x0+1)
+            if y1<=y0: y1=min(h,y0+1)
+        roi_mask=np.zeros((h,w),dtype=bool); roi_mask[y0:y1,x0:x1]=True
+        ref_spec=_weighted_spectrum_from_images_spectra(images, spectra, mask=roi_mask)
+        ref_label=f'Manual ROI x[{x0}:{x1}] y[{y0}:{y1}]'
+    else:
+        # Use the union of top-percent pixels of selected reference component maps.
+        pct=float(top_percent)
+        pct=max(0.1,min(100.0,pct))
+        roi_mask=np.zeros((h,w),dtype=bool)
+        for idx in ref_indices:
+            arr=np.asarray(images[idx],dtype=np.float64)
+            vals=arr[np.isfinite(arr)]
+            if vals.size:
+                thr=float(np.nanpercentile(vals,100.0-pct))
+                roi_mask |= arr>=thr
+        ref_spec=_weighted_spectrum_from_images_spectra(images, spectra, mask=roi_mask)
+        ref_label=f'Top {pct:g}% of components '+','.join(map(str,ref_indices))
+
+    if ref_spec is None:
+        ref_spec=np.zeros(L,dtype=np.float64)
+    ref_win=ref_spec[win]
+    rows=[]; scores=[]
+    ref_norm=float(np.linalg.norm(ref_win))
+    for k,(lab,sp,img) in enumerate(zip(labels,spectra,images)):
+        sw=sp[win]
+        corr=_safe_corr_1d(ref_win,sw) if sw.size>=2 else np.nan
+        # positive feature overlap coefficient independent of total intensity scale
+        ref_pos=np.clip(ref_win,0,None); sp_pos=np.clip(sw,0,None)
+        overlap=float(np.sum(np.minimum(ref_pos,sp_pos))/(np.sum(ref_pos)+1e-12)) if ref_pos.size else np.nan
+        rel_amp=float(np.linalg.norm(sw)/(ref_norm+1e-12)) if sw.size else np.nan
+        score=max(0.0,float(corr)) if np.isfinite(corr) else 0.0
+        scores.append(score)
+        rows.append({'index':k,'label':lab,'feature_corr':corr,'positive_overlap':overlap,'relative_amp':rel_amp,'score_used_for_map':score})
+    # Shared feature map: component maps weighted by non-negative feature correlation.
+    shared=None
+    try:
+        shared=np.zeros_like(images[0],dtype=np.float64)
+        den=0.0
+        for sc,img in zip(scores,images):
+            if sc>0:
+                arr=np.maximum(np.asarray(img,dtype=np.float64),0)
+                mx=float(np.nanpercentile(arr,99)) if arr.size else 0.0
+                if mx>0: arr=arr/(mx+1e-12)
+                shared += sc*arr; den += sc
+        if den>0: shared=shared/den
+    except Exception:
+        shared=None
+    return {'rows':rows,'summary':{'mode':mode,'reference':ref_label,'feature_start':float(feature_range[0]),'feature_end':float(feature_range[1]),'ref_indices':ref_indices},'plots':{'energy':x,'ref_spectrum':ref_spec,'feature_mask':win,'shared_map':shared,'roi_mask':roi_mask}}
+
+
+def plot_shared_feature_analysis(fig, result, cmap='viridis'):
     fig.clear(); fig.set_size_inches(18,7.5,forward=True)
     if not result or not result.get('rows'):
-        ax=fig.add_subplot(111); ax.axis('off'); ax.text(0.5,0.5,'No interface analysis result.\nSelect A/B/interface components and run analysis.',ha='center',va='center',fontsize=13)
+        ax=fig.add_subplot(111); ax.axis('off'); ax.text(0.5,0.5,'No shared feature analysis result.\nChoose Manual ROI or Component top-percent reference, then run analysis.',ha='center',va='center',fontsize=13)
         return
-    plots=result.get('plots',{}) or {}
-    gs=fig.add_gridspec(2,3,width_ratios=[1,1,2.2],height_ratios=[1,1])
+    plots=result.get('plots',{}) or {}; summary=result.get('summary',{}) or {}
+    gs=fig.add_gridspec(2,3,width_ratios=[1,1,2.4],height_ratios=[1,1])
     ax1=fig.add_subplot(gs[0,0]); ax2=fig.add_subplot(gs[1,0]); ax3=fig.add_subplot(gs[:,1:])
-    sto=plots.get('sto_map'); aff=plots.get('affinity_map')
-    if sto is not None:
-        im=ax1.imshow(sto,cmap='coolwarm',origin='upper',vmin=0,vmax=1); ax1.set_title('Stoichiometry-like xA map'); ax1.set_xticks([]); ax1.set_yticks([]); add_colorbar(fig,ax1,im)
+    smap=plots.get('shared_map'); mask=plots.get('roi_mask')
+    if smap is not None:
+        im=ax1.imshow(smap,cmap=cmap,origin='upper'); ax1.set_title('Shared feature map'); ax1.set_xticks([]); ax1.set_yticks([]); add_colorbar(fig,ax1,im)
     else:
-        ax1.axis('off'); ax1.text(0.5,0.5,'No xA map',ha='center',va='center')
-    if aff is not None:
-        im=ax2.imshow(aff,cmap=cmap,origin='upper'); ax2.set_title('Interface affinity map'); ax2.set_xticks([]); ax2.set_yticks([]); add_colorbar(fig,ax2,im)
+        ax1.axis('off'); ax1.text(0.5,0.5,'No shared map',ha='center',va='center')
+    if mask is not None:
+        ax2.imshow(mask,cmap='gray',origin='upper',vmin=0,vmax=1); ax2.set_title('Reference ROI / top-percent mask'); ax2.set_xticks([]); ax2.set_yticks([])
     else:
-        ax2.axis('off'); ax2.text(0.5,0.5,'No affinity map',ha='center',va='center')
-    x=plots.get('energy')
-    if x is None:
-        ax3.axis('off'); return
-    for key,lab,lw in [('HA','A-like mean H',1.8),('HB','B-like mean H',1.8),('HI_mean','Interface mean H',2.3),('residual_mean','Interface residual mean',1.5)]:
-        y=plots.get(key)
-        if y is None: continue
-        y=np.asarray(y,dtype=np.float64)
-        ax3.plot(x, y, lw=lw, label=lab)
-    ax3.set_title('Interface mixture / novelty spectra')
-    ax3.set_xlabel('Energy')
-    ax3.grid(True,alpha=0.25); ax3.legend(fontsize=9)
+        ax2.axis('off'); ax2.text(0.5,0.5,'No reference mask',ha='center',va='center')
+    x=plots.get('energy'); ref=plots.get('ref_spectrum'); win=plots.get('feature_mask')
+    if x is not None and ref is not None:
+        ax3.plot(x,ref,lw=2.2,label='Reference spectrum')
+        if win is not None and np.any(win):
+            xx=np.asarray(x)[win]
+            ax3.axvspan(float(np.nanmin(xx)),float(np.nanmax(xx)),alpha=0.18,label='Feature window')
+        ax3.set_title('Shared spectral feature reference: '+str(summary.get('reference','')))
+        ax3.set_xlabel('Energy'); ax3.grid(True,alpha=0.25); ax3.legend(fontsize=10)
+    else:
+        ax3.axis('off')
     fig.tight_layout()
 
 def plot_full_mapping_analysis(fig, items, axis, selected_indices=None, spectrum_indices=None, clicked_pixel=None,
@@ -3589,35 +3643,38 @@ class RR2NMFGui(QMainWindow):
         map_ctrl3.addStretch(1)
         mapping_lay.addLayout(map_ctrl3)
 
-        iface_box=QGroupBox("Interface State Analysis")
-        iface_lay=QGridLayout(iface_box)
-        self.chk_iface_enable=QCheckBox("Enable")
-        iface_lay.addWidget(self.chk_iface_enable,0,0)
-        iface_lay.addWidget(QLabel("A-like idx"),0,1)
-        self.edit_iface_A=QLineEdit(""); self.edit_iface_A.setPlaceholderText("e.g. 0,1 or 0-2")
-        iface_lay.addWidget(self.edit_iface_A,0,2)
-        iface_lay.addWidget(QLabel("B-like idx"),0,3)
-        self.edit_iface_B=QLineEdit(""); self.edit_iface_B.setPlaceholderText("e.g. 6,7")
-        iface_lay.addWidget(self.edit_iface_B,0,4)
-        iface_lay.addWidget(QLabel("Interface idx"),0,5)
-        self.edit_iface_I=QLineEdit(""); self.edit_iface_I.setPlaceholderText("e.g. 3,4,5")
-        iface_lay.addWidget(self.edit_iface_I,0,6)
-        iface_lay.addWidget(QLabel("A edge"),1,1)
-        self.combo_iface_edge_A=QComboBox(); self.combo_iface_edge_A.addItems(sorted(EELS_EDGE_DB.keys()))
-        iface_lay.addWidget(self.combo_iface_edge_A,1,2)
-        iface_lay.addWidget(QLabel("B edge"),1,3)
-        self.combo_iface_edge_B=QComboBox(); self.combo_iface_edge_B.addItems(sorted(EELS_EDGE_DB.keys()))
-        iface_lay.addWidget(self.combo_iface_edge_B,1,4)
-        iface_lay.addWidget(QLabel("Edge width (eV)"),1,5)
-        self.spin_iface_edge_width=QDoubleSpinBox(); self.spin_iface_edge_width.setRange(0.1,10000.0); self.spin_iface_edge_width.setDecimals(2); self.spin_iface_edge_width.setValue(30.0)
-        iface_lay.addWidget(self.spin_iface_edge_width,1,6)
-        self.btn_run_iface=QPushButton("Run Interface State Analysis")
-        self.btn_run_iface.clicked.connect(self.run_interface_state_analysis)
-        iface_lay.addWidget(self.btn_run_iface,0,7,2,1)
-        self.btn_clear_iface=QPushButton("Clear")
-        self.btn_clear_iface.clicked.connect(self.clear_interface_state_analysis)
-        iface_lay.addWidget(self.btn_clear_iface,0,8,2,1)
-        mapping_lay.addWidget(iface_box)
+        shared_box=QGroupBox("Shared Feature Analysis")
+        shared_lay=QGridLayout(shared_box)
+        self.chk_shared_enable=QCheckBox("Enable")
+        shared_lay.addWidget(self.chk_shared_enable,0,0)
+        shared_lay.addWidget(QLabel("Reference mode"),0,1)
+        self.combo_shared_ref_mode=QComboBox(); self.combo_shared_ref_mode.addItems(["Manual ROI", "Component top-percent ROI"])
+        shared_lay.addWidget(self.combo_shared_ref_mode,0,2)
+        shared_lay.addWidget(QLabel("Ref component idx"),0,3)
+        self.edit_shared_ref_idx=QLineEdit(""); self.edit_shared_ref_idx.setPlaceholderText("e.g. 0 or 0,2,4")
+        shared_lay.addWidget(self.edit_shared_ref_idx,0,4)
+        shared_lay.addWidget(QLabel("Top %"),0,5)
+        self.spin_shared_top_percent=QDoubleSpinBox(); self.spin_shared_top_percent.setRange(0.1,100.0); self.spin_shared_top_percent.setDecimals(1); self.spin_shared_top_percent.setValue(10.0)
+        shared_lay.addWidget(self.spin_shared_top_percent,0,6)
+        shared_lay.addWidget(QLabel("ROI x0:x1"),1,1)
+        self.spin_shared_x0=QSpinBox(); self.spin_shared_x0.setRange(0,999999); self.spin_shared_x0.setValue(0)
+        self.spin_shared_x1=QSpinBox(); self.spin_shared_x1.setRange(0,999999); self.spin_shared_x1.setValue(999999)
+        shared_lay.addWidget(self.spin_shared_x0,1,2); shared_lay.addWidget(self.spin_shared_x1,1,3)
+        shared_lay.addWidget(QLabel("ROI y0:y1"),1,4)
+        self.spin_shared_y0=QSpinBox(); self.spin_shared_y0.setRange(0,999999); self.spin_shared_y0.setValue(0)
+        self.spin_shared_y1=QSpinBox(); self.spin_shared_y1.setRange(0,999999); self.spin_shared_y1.setValue(999999)
+        shared_lay.addWidget(self.spin_shared_y0,1,5); shared_lay.addWidget(self.spin_shared_y1,1,6)
+        shared_lay.addWidget(QLabel("Feature energy start/end"),2,1)
+        self.spin_shared_e0=QDoubleSpinBox(); self.spin_shared_e0.setRange(-1e9,1e9); self.spin_shared_e0.setDecimals(3); self.spin_shared_e0.setValue(0.0)
+        self.spin_shared_e1=QDoubleSpinBox(); self.spin_shared_e1.setRange(-1e9,1e9); self.spin_shared_e1.setDecimals(3); self.spin_shared_e1.setValue(0.0)
+        shared_lay.addWidget(self.spin_shared_e0,2,2); shared_lay.addWidget(self.spin_shared_e1,2,3)
+        self.btn_run_shared=QPushButton("Run Shared Feature Analysis")
+        self.btn_run_shared.clicked.connect(self.run_shared_feature_analysis)
+        shared_lay.addWidget(self.btn_run_shared,0,7,2,1)
+        self.btn_clear_shared=QPushButton("Clear")
+        self.btn_clear_shared.clicked.connect(self.clear_shared_feature_analysis)
+        shared_lay.addWidget(self.btn_clear_shared,2,7)
+        mapping_lay.addWidget(shared_box)
 
         map_lists=QHBoxLayout()
         self.list_map_components=QListWidget(); self.list_map_components.setSelectionMode(QListWidget.MultiSelection); self.list_map_components.itemSelectionChanged.connect(lambda: self._on_mapping_selection_changed())
@@ -3630,14 +3687,14 @@ class RR2NMFGui(QMainWindow):
         mapping_split.setHandleWidth(8)
         mapping_split.addWidget(PlotPanel(self.canvas_full_mapping))
         inline_panel=QWidget(); inline_lay=QVBoxLayout(inline_panel); inline_lay.setContentsMargins(0,0,0,0)
-        inline_lay.addWidget(QLabel("Inline EDS/EELS and Interface State Analysis results"))
+        inline_lay.addWidget(QLabel("Inline EDS/EELS and Shared Feature Analysis results"))
         self.table_mapping_inline=QTableWidget(); self.table_mapping_inline.setMinimumHeight(90)
         inline_lay.addWidget(self.table_mapping_inline)
-        self.canvas_interface_state=Canvas(18,7)
-        inline_lay.addWidget(PlotPanel(self.canvas_interface_state))
-        self.table_interface_state=QTableWidget(); self.table_interface_state.setMinimumHeight(120)
-        inline_lay.addWidget(QLabel("Interface component stoichiometry / novelty table"))
-        inline_lay.addWidget(self.table_interface_state)
+        self.canvas_shared_feature=Canvas(18,7)
+        inline_lay.addWidget(PlotPanel(self.canvas_shared_feature))
+        self.table_shared_feature=QTableWidget(); self.table_shared_feature.setMinimumHeight(120)
+        inline_lay.addWidget(QLabel("Shared feature component table"))
+        inline_lay.addWidget(self.table_shared_feature)
         mapping_split.addWidget(inline_panel)
         mapping_split.setStretchFactor(0, 5)
         mapping_split.setStretchFactor(1, 1)
@@ -3647,7 +3704,7 @@ class RR2NMFGui(QMainWindow):
         self.mapping_analysis_sources=[]
         self._mapping_inline_analysis=None
         self.mapping_eels_elements=[]
-        self._interface_state_result=None
+        self._shared_feature_result=None
         try:
             self.canvas_full_mapping.mpl_connect('button_press_event', self.on_full_mapping_click)
             self.canvas_full_mapping.mpl_connect('key_press_event', self.on_full_mapping_key)
@@ -5030,41 +5087,49 @@ This does not modify the current rr-NMF/manual tree results.
         except Exception:
             pass
 
-    def run_interface_state_analysis(self):
-        if not hasattr(self,"table_interface_state"):
+    def run_shared_feature_analysis(self):
+        if not hasattr(self,"table_shared_feature"):
             return
         try:
             items=self._full_mapping_items()
             n=len(items)
-            a_idx=_parse_index_list_text(self.edit_iface_A.text() if hasattr(self,"edit_iface_A") else "", n)
-            b_idx=_parse_index_list_text(self.edit_iface_B.text() if hasattr(self,"edit_iface_B") else "", n)
-            i_idx=_parse_index_list_text(self.edit_iface_I.text() if hasattr(self,"edit_iface_I") else "", n)
-            result=compute_interface_state_analysis(
+            ref_idx=_parse_index_list_text(self.edit_shared_ref_idx.text() if hasattr(self,"edit_shared_ref_idx") else "", n)
+            roi=(
+                int(self.spin_shared_x0.value()) if hasattr(self,"spin_shared_x0") else 0,
+                int(self.spin_shared_x1.value()) if hasattr(self,"spin_shared_x1") else 999999,
+                int(self.spin_shared_y0.value()) if hasattr(self,"spin_shared_y0") else 0,
+                int(self.spin_shared_y1.value()) if hasattr(self,"spin_shared_y1") else 999999,
+            )
+            result=compute_shared_feature_analysis(
                 items,
                 self.roi_axis_info,
-                a_idx,b_idx,i_idx,
-                self.combo_iface_edge_A.currentText() if hasattr(self,"combo_iface_edge_A") else "",
-                self.combo_iface_edge_B.currentText() if hasattr(self,"combo_iface_edge_B") else "",
-                float(self.spin_iface_edge_width.value()) if hasattr(self,"spin_iface_edge_width") else 30.0,
+                self.combo_shared_ref_mode.currentText() if hasattr(self,"combo_shared_ref_mode") else "Manual ROI",
+                ref_indices=ref_idx,
+                roi=roi,
+                top_percent=float(self.spin_shared_top_percent.value()) if hasattr(self,"spin_shared_top_percent") else 10.0,
+                feature_range=(
+                    float(self.spin_shared_e0.value()) if hasattr(self,"spin_shared_e0") else 0.0,
+                    float(self.spin_shared_e1.value()) if hasattr(self,"spin_shared_e1") else 0.0,
+                ),
             )
-            self._interface_state_result=result
+            self._shared_feature_result=result
             rows=result.get("rows",[]) or []
-            cols=["type","index","label","IA","IB","xA","xB","affinity_to_I","alpha_A","beta_B","novelty_norm","novelty_corr","resid_A","resid_B"]
-            self._fill_table_from_rows(self.table_interface_state, rows, cols)
-            plot_interface_state_analysis(self.canvas_interface_state.fig,result,cmap=self.combo_cmap.currentText() if hasattr(self,"combo_cmap") else "viridis")
-            self.canvas_interface_state.set_base(); self.canvas_interface_state.draw()
-            self.append_log(f"Interface State Analysis updated: A={a_idx}, B={b_idx}, I={i_idx}")
+            cols=["index","label","feature_corr","positive_overlap","relative_amp","score_used_for_map"]
+            self._fill_table_from_rows(self.table_shared_feature, rows, cols)
+            plot_shared_feature_analysis(self.canvas_shared_feature.fig,result,cmap=self.combo_cmap.currentText() if hasattr(self,"combo_cmap") else "viridis")
+            self.canvas_shared_feature.set_base(); self.canvas_shared_feature.draw()
+            self.append_log("Shared Feature Analysis updated: "+str(result.get('summary',{}).get('reference','')))
         except Exception as e:
-            QMessageBox.warning(self,"Interface State Analysis",str(e))
-            try: self.append_log("Interface analysis failed: "+str(e))
+            QMessageBox.warning(self,"Shared Feature Analysis",str(e))
+            try: self.append_log("Shared feature analysis failed: "+str(e))
             except Exception: pass
 
-    def clear_interface_state_analysis(self):
-        self._interface_state_result=None
+    def clear_shared_feature_analysis(self):
+        self._shared_feature_result=None
         try:
-            self.table_interface_state.clear(); self.table_interface_state.setRowCount(0); self.table_interface_state.setColumnCount(0)
-            self.canvas_interface_state.clear()
-            self.append_log("Interface State Analysis cleared.")
+            self.table_shared_feature.clear(); self.table_shared_feature.setRowCount(0); self.table_shared_feature.setColumnCount(0)
+            self.canvas_shared_feature.clear()
+            self.append_log("Shared Feature Analysis cleared.")
         except Exception:
             pass
 
