@@ -3311,10 +3311,10 @@ class AnalysisWorker(QThread):
 
 class RR2NMFGui(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v10.0 Mapping H-basis + Multi-BG"); self.resize(1850,1080); self.setMinimumSize(900, 620)
+        super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v10.3 Iterative BG Steps"); self.resize(1850,1080); self.setMinimumSize(900, 620)
         self.cube=None; self.original_cube=None; self.roi_cube=None; self.X=None; self.image_shape=None
         self.axis_info=make_default_axis_info((1,1,1)); self.roi_axis_info=make_default_axis_info((1,1,1))
-        self.conv_result=None; self.rr_result=None; self.pca_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.bg_applied=False; self.bg_correction_history=[]; self._raw_mouse_press=None; self.selected_raw_pixel=None
+        self.conv_result=None; self.rr_result=None; self.pca_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.bg_applied=False; self.bg_correction_history=[]; self.bg_correction_steps=[]; self._raw_mouse_press=None; self.selected_raw_pixel=None
         self.eds_elements=[]; self.eels_elements=[]; self.eds_sources=[]; self.eels_sources=[]; self.eds_hits=[]; self.eels_hits=[]
         self._syncing=False; self.loaded_decomp_sources=[]; self._auto_score_active=False; self._auto_score_target_depth=None; self._auto_score_stop_after_current=False; self._auto_score_unchanged_count=0; self._build_ui()
 
@@ -3371,10 +3371,13 @@ class RR2NMFGui(QMainWindow):
         self.spin_bg_iterations=QSpinBox()
         self.spin_bg_iterations.setRange(1, 50)
         self.spin_bg_iterations.setValue(1)
-        self.spin_bg_iterations.setToolTip("Number of sequential background-correction passes. N=1 corrects the raw cube; N=2 corrects the N=1 result again using the same settings; etc.")
+        self.spin_bg_iterations.setToolTip("Correction rounds. If no explicit BG steps are recorded, the current parameters are repeated N times. If BG steps are recorded, those steps are run sequentially from raw -> step 1 -> step 2 ...")
         self.chk_bg_clip=QCheckBox("Clip negative after power-law subtraction")
         self.chk_bg_clip.setChecked(True)
         self.btn_bg_current=QPushButton("Use Current Spatial ROI"); self.btn_bg_current.clicked.connect(self.use_current_roi_for_background)
+        self.btn_bg_add_step=QPushButton("Add/Record Current BG Step"); self.btn_bg_add_step.clicked.connect(self.add_bg_correction_step)
+        self.btn_bg_clear_steps=QPushButton("Clear BG Steps"); self.btn_bg_clear_steps.clicked.connect(self.clear_bg_correction_steps)
+        self.txt_bg_steps=QTextEdit(); self.txt_bg_steps.setReadOnly(True); self.txt_bg_steps.setMaximumHeight(92); self.txt_bg_steps.setPlainText("No recorded BG steps. Current parameters will be repeated by Correction rounds.")
         self.btn_apply_bg=QPushButton("Apply Background Correction"); self.btn_apply_bg.clicked.connect(self.apply_background_correction)
         self.btn_reset_bg=QPushButton("Reset Original"); self.btn_reset_bg.clicked.connect(self.reset_background_correction)
         self.lbl_bg=QLabel("Not applied")
@@ -3383,10 +3386,10 @@ class RR2NMFGui(QMainWindow):
             ("BG/fit Y start",self.bg_y0),("BG/fit Y end",self.bg_y1),
             ("BG/fit X start",self.bg_x0),("BG/fit X end",self.bg_x1),
             ("Power-law fit energy start",self.bg_e0),("Power-law fit energy end",self.bg_e1),
-            ("BG correction iterations",self.spin_bg_iterations),
+            ("BG correction rounds",self.spin_bg_iterations),
             ("Reference scale energy start",self.bg_ref_ch0),("Reference scale energy end",self.bg_ref_ch1),
             ("Reference after subtraction",self.combo_bg_after),
-            (None,self.chk_bg_clip),(None,self.btn_bg_current),(None,self.btn_apply_bg),(None,self.btn_reset_bg),
+            (None,self.chk_bg_clip),(None,self.btn_bg_current),(None,self.btn_bg_add_step),(None,self.btn_bg_clear_steps),("Recorded BG steps",self.txt_bg_steps),(None,self.btn_apply_bg),(None,self.btn_reset_bg),
             ("Status",self.lbl_bg)
         ]:
             bf.addRow(w) if lab is None else bf.addRow(lab,w)
@@ -3852,7 +3855,7 @@ class RR2NMFGui(QMainWindow):
         if not path: return
         try:
             cube,meta,axis=load_hyperspectral_file(path); cube=nonnegative(cube,"clip")
-            self.cube=cube.copy(); self.original_cube=cube.copy(); self.axis_info=axis; self.roi_axis_info=axis; self.bg_applied=False; self.bg_correction_history=[]; self.conv_result=None; self.rr_result=None; self.pca_result=None; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.selected_raw_pixel=None
+            self.cube=cube.copy(); self.original_cube=cube.copy(); self.axis_info=axis; self.roi_axis_info=axis; self.bg_applied=False; self.bg_correction_history=[]; self.bg_correction_steps=[]; self.conv_result=None; self.rr_result=None; self.pca_result=None; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.selected_raw_pixel=None
             self.lbl_file.setText(os.path.basename(path)); self.lbl_shape.setText(str(cube.shape)); self.set_roi_full(); self.set_background_roi_full(); self.refresh_views(); self.refresh_spectrum_sources(); self.append_log(f"Loaded {cube.shape}")
         except Exception as e: QMessageBox.critical(self,"Load failed",str(e)); self.append_log(traceback.format_exc())
 
@@ -3977,6 +3980,62 @@ class RR2NMFGui(QMainWindow):
         if self.cube is None: return
         y,x,_=self.cube.shape; self.bg_y0.setValue(max(0,min(self.spin_y0.value(),y))); self.bg_y1.setValue(max(0,min(self.spin_y1.value(),y))); self.bg_x0.setValue(max(0,min(self.spin_x0.value(),x))); self.bg_x1.setValue(max(0,min(self.spin_x1.value(),x)))
 
+    def _current_bg_step_dict(self):
+        return {
+            "mode": self.combo_bg_mode.currentText(),
+            "y0": int(self.bg_y0.value()), "y1": int(self.bg_y1.value()),
+            "x0": int(self.bg_x0.value()), "x1": int(self.bg_x1.value()),
+            "fit_e0": float(self.bg_e0.value()), "fit_e1": float(self.bg_e1.value()),
+            "ref_e0": float(self.bg_ref_ch0.value()), "ref_e1": float(self.bg_ref_ch1.value()),
+            "after": self.combo_bg_after.currentText(),
+            "clip": bool(self.chk_bg_clip.isChecked()),
+        }
+
+    def _format_bg_step(self, step, idx=None):
+        prefix = f"#{idx}: " if idx is not None else ""
+        if str(step.get("mode", "")).startswith("Fitted reference"):
+            return (
+                f"{prefix}{step.get('mode')} | spatial y[{step.get('y0')}:{step.get('y1')}] "
+                f"x[{step.get('x0')}:{step.get('x1')}] | fit E[{step.get('fit_e0'):.6g}:{step.get('fit_e1'):.6g}] "
+                f"| scale E[{step.get('ref_e0'):.6g}:{step.get('ref_e1'):.6g}] | after={step.get('after')}"
+            )
+        return (
+            f"{prefix}{step.get('mode')} | spatial y[{step.get('y0')}:{step.get('y1')}] "
+            f"x[{step.get('x0')}:{step.get('x1')}] | fit E[{step.get('fit_e0'):.6g}:{step.get('fit_e1'):.6g}] "
+            f"| clip={step.get('clip')}"
+        )
+
+    def _refresh_bg_steps_text(self):
+        steps = getattr(self, "bg_correction_steps", []) or []
+        if not hasattr(self, "txt_bg_steps"):
+            return
+        if not steps:
+            self.txt_bg_steps.setPlainText("No recorded BG steps. Current parameters will be repeated by Correction rounds.")
+            return
+        self.txt_bg_steps.setPlainText("\n".join(self._format_bg_step(st, i + 1) for i, st in enumerate(steps)))
+
+    def add_bg_correction_step(self):
+        if not hasattr(self, "bg_correction_steps"):
+            self.bg_correction_steps = []
+        self.bg_correction_steps.append(self._current_bg_step_dict())
+        self.spin_bg_iterations.setValue(len(self.bg_correction_steps))
+        self._refresh_bg_steps_text()
+        self.append_log(f"Recorded BG correction step #{len(self.bg_correction_steps)}: {self._format_bg_step(self.bg_correction_steps[-1])}")
+
+    def clear_bg_correction_steps(self):
+        self.bg_correction_steps = []
+        self._refresh_bg_steps_text()
+        self.append_log("Cleared recorded BG correction steps. Current parameters will be repeated by Correction rounds.")
+
+    def _bg_steps_for_apply(self):
+        recorded = list(getattr(self, "bg_correction_steps", []) or [])
+        if recorded:
+            return recorded
+        n_iter = int(self.spin_bg_iterations.value()) if hasattr(self, "spin_bg_iterations") else 1
+        n_iter = max(1, n_iter)
+        cur = self._current_bg_step_dict()
+        return [dict(cur) for _ in range(n_iter)]
+
     def energy_range_to_channel_bounds(self, e0, e1, axis_info=None, L=None):
         """Convert an energy-axis interval to half-open channel bounds [lo, hi).
 
@@ -4031,75 +4090,83 @@ class RR2NMFGui(QMainWindow):
         return self.energy_range_to_channel_bounds(self.bg_e0.value(), self.bg_e1.value(), self.axis_info, self.cube.shape[2])
 
     def apply_background_correction(self):
-        """Apply the original single-window BG correction sequentially N times.
+        """Apply BG correction as an explicit sequence of single-window correction steps.
 
-        This intentionally restores the ver9.8 single-fit-window behavior.  The new
-        "BG correction iterations" control repeats that same correction: pass #1 starts
-        from the raw/original cube, pass #2 starts from the pass #1 result, and so on.
-        Every intermediate corrected cube is stored for display under the raw image.
+        This version deliberately avoids the ver10.0 multi-fit-window behavior.  Each
+        step uses one fit range and is applied to the output of the previous step:
+
+            raw -> BG step #1 -> BG step #2 -> ...
+
+        If no steps are recorded, the current UI parameters are repeated according to
+        "BG correction rounds".  If steps are recorded, every recorded step keeps its
+        own spatial ROI, fit-energy range, scale-energy range, and correction mode.
         """
         if self.cube is None:
             return
         try:
-            y, x, L = self.cube.shape
-            y0, y1 = max(0, min(self.bg_y0.value(), y)), max(0, min(self.bg_y1.value(), y))
-            x0, x1 = max(0, min(self.bg_x0.value(), x)), max(0, min(self.bg_x1.value(), x))
-            if y1 <= y0 or x1 <= x0:
-                raise ValueError("Invalid background spatial ROI.")
-
-            n_iter = int(self.spin_bg_iterations.value()) if hasattr(self, "spin_bg_iterations") else 1
-            n_iter = max(1, n_iter)
-            mode = self.combo_bg_mode.currentText()
-            l0, l1 = self.background_channel_range()
             base = self.original_cube if self.original_cube is not None else self.cube
             work = base.astype(np.float32, copy=True)
+            y, x, L = work.shape
+            steps = self._bg_steps_for_apply()
             history = []
             meta_msgs = []
 
-            if mode.startswith("Reference BG"):
-                s0, s1 = self.energy_range_to_channel_bounds(self.bg_ref_ch0.value(), self.bg_ref_ch1.value(), self.axis_info, L)
-                for it in range(1, n_iter + 1):
+            for it, step in enumerate(steps, start=1):
+                y0 = max(0, min(int(step.get("y0", 0)), y))
+                y1 = max(0, min(int(step.get("y1", y)), y))
+                x0 = max(0, min(int(step.get("x0", 0)), x))
+                x1 = max(0, min(int(step.get("x1", x)), x))
+                if y1 <= y0 or x1 <= x0:
+                    raise ValueError(f"Invalid background spatial ROI in BG step #{it}.")
+                l0, l1 = self.energy_range_to_channel_bounds(step.get("fit_e0", 0.0), step.get("fit_e1", 1.0), self.axis_info, L)
+                mode = str(step.get("mode", self.combo_bg_mode.currentText()))
+
+                if mode.startswith("Fitted reference"):
+                    s0, s1 = self.energy_range_to_channel_bounds(step.get("ref_e0", 0.0), step.get("ref_e1", 1.0), self.axis_info, L)
                     corrected, meta = apply_reference_bg_low_energy_scaling(
                         work,
                         self.axis_info,
                         spatial_roi=(y0, y1, x0, x1),
                         fit_channel_roi=(l0, l1),
                         scale_channel_roi=(s0, s1),
-                        after_mode=self.combo_bg_after.currentText(),
+                        after_mode=str(step.get("after", self.combo_bg_after.currentText())),
                         chunk_pixels=max(512, self.spin_chunk.value()),
                     )
                     work = corrected.astype(np.float32, copy=False)
-                    history.append(work.copy())
-                    meta_msgs.append(
-                        f"#{it}: fit_energy[{self.bg_e0.value():.6g}:{self.bg_e1.value():.6g}] -> ch[{l0}:{l1}], "
-                        f"scale_energy[{self.bg_ref_ch0.value():.6g}:{self.bg_ref_ch1.value():.6g}] -> ch[{s0}:{s1}], "
-                        f"r={meta['r_ref']:.4g}, alpha={meta['alpha_mean']:.4g}"
+                    meta_msg = (
+                        f"#{it}: ReferenceBG y[{y0}:{y1}] x[{x0}:{x1}], "
+                        f"fitE[{float(step.get('fit_e0', 0.0)):.6g}:{float(step.get('fit_e1', 1.0)):.6g}]->ch[{l0}:{l1}], "
+                        f"scaleE[{float(step.get('ref_e0', 0.0)):.6g}:{float(step.get('ref_e1', 1.0)):.6g}]->ch[{s0}:{s1}], "
+                        f"r={meta.get('r_ref', np.nan):.4g}, alpha={meta.get('alpha_mean', np.nan):.4g}, after={step.get('after')}"
                     )
-                self.cube = work
-                self.lbl_bg.setText(
-                    f"Applied iterative reference BG × {n_iter}: " + "; ".join(meta_msgs) +
-                    f" | after={self.combo_bg_after.currentText()}"
-                )
-            else:
-                for it in range(1, n_iter + 1):
+                else:
                     fit = fit_powerlaw_exponent_from_roi(work, self.axis_info, (y0, y1, x0, x1), (l0, l1))
                     work = apply_powerlaw_background_correction(
-                        work, self.axis_info, (l0, l1), fit["r"],
-                        self.chk_bg_clip.isChecked(), max(512, self.spin_chunk.value())
+                        work,
+                        self.axis_info,
+                        (l0, l1),
+                        fit["r"],
+                        bool(step.get("clip", self.chk_bg_clip.isChecked())),
+                        max(512, self.spin_chunk.value()),
                     ).astype(np.float32, copy=False)
-                    history.append(work.copy())
-                    meta_msgs.append(f"#{it}: r={fit['r']:.4g}, RMSE={fit['rmse']:.4g}")
-                self.cube = work
-                self.lbl_bg.setText(
-                    f"Applied iterative single-window power-law BG × {n_iter}: " + "; ".join(meta_msgs) +
-                    f" | fit_energy[{self.bg_e0.value():.6g}:{self.bg_e1.value():.6g}] -> ch[{l0}:{l1}]"
-                )
+                    meta_msg = (
+                        f"#{it}: PowerLaw y[{y0}:{y1}] x[{x0}:{x1}], "
+                        f"fitE[{float(step.get('fit_e0', 0.0)):.6g}:{float(step.get('fit_e1', 1.0)):.6g}]->ch[{l0}:{l1}], "
+                        f"r={fit.get('r', np.nan):.4g}, RMSE={fit.get('rmse', np.nan):.4g}, clip={step.get('clip')}"
+                    )
 
+                history.append(work.copy())
+                meta_msgs.append(meta_msg)
+                self.append_log("BG correction " + meta_msg)
+
+            self.cube = work
             self.bg_correction_history = history
             self.bg_applied = True
             self.conv_result = None
             self.rr_result = None
             self.pca_result = None
+            self.lbl_bg.setText(f"Applied {len(steps)} sequential BG correction step(s). Last: {meta_msgs[-1] if meta_msgs else '-'}")
+            self._refresh_bg_steps_text()
             self.refresh_views()
             self.refresh_spectrum_sources()
         except Exception as e:
