@@ -1,6 +1,6 @@
 
 """
-rr2_nmf_gui_ver8_0_fullresult_arrow_perf.py
+rr2_nmf_gui_ver10_6_interactive_shared_feature.py
 
 Single-file rr-NMF GUI based on the v4.4 workflow, with EELS Interpretation added.
 This file keeps the v4.4-style core workflow in one executable Python file.
@@ -3643,7 +3643,7 @@ class RR2NMFGui(QMainWindow):
         map_ctrl3.addStretch(1)
         mapping_lay.addLayout(map_ctrl3)
 
-        shared_box=QGroupBox("Shared Feature Analysis")
+        shared_box=QGroupBox("Shared Feature Analysis (interactive ROI/window)")
         shared_lay=QGridLayout(shared_box)
         self.chk_shared_enable=QCheckBox("Enable")
         shared_lay.addWidget(self.chk_shared_enable,0,0)
@@ -3652,28 +3652,24 @@ class RR2NMFGui(QMainWindow):
         shared_lay.addWidget(self.combo_shared_ref_mode,0,2)
         shared_lay.addWidget(QLabel("Ref component idx"),0,3)
         self.edit_shared_ref_idx=QLineEdit(""); self.edit_shared_ref_idx.setPlaceholderText("e.g. 0 or 0,2,4")
+        self.edit_shared_ref_idx.setMaximumWidth(180)
         shared_lay.addWidget(self.edit_shared_ref_idx,0,4)
         shared_lay.addWidget(QLabel("Top %"),0,5)
-        self.spin_shared_top_percent=QDoubleSpinBox(); self.spin_shared_top_percent.setRange(0.1,100.0); self.spin_shared_top_percent.setDecimals(1); self.spin_shared_top_percent.setValue(10.0)
+        self.spin_shared_top_percent=QDoubleSpinBox(); self.spin_shared_top_percent.setRange(0.1,100.0); self.spin_shared_top_percent.setDecimals(1); self.spin_shared_top_percent.setValue(10.0); self.spin_shared_top_percent.setMaximumWidth(80)
         shared_lay.addWidget(self.spin_shared_top_percent,0,6)
-        shared_lay.addWidget(QLabel("ROI x0:x1"),1,1)
-        self.spin_shared_x0=QSpinBox(); self.spin_shared_x0.setRange(0,999999); self.spin_shared_x0.setValue(0)
-        self.spin_shared_x1=QSpinBox(); self.spin_shared_x1.setRange(0,999999); self.spin_shared_x1.setValue(999999)
-        shared_lay.addWidget(self.spin_shared_x0,1,2); shared_lay.addWidget(self.spin_shared_x1,1,3)
-        shared_lay.addWidget(QLabel("ROI y0:y1"),1,4)
-        self.spin_shared_y0=QSpinBox(); self.spin_shared_y0.setRange(0,999999); self.spin_shared_y0.setValue(0)
-        self.spin_shared_y1=QSpinBox(); self.spin_shared_y1.setRange(0,999999); self.spin_shared_y1.setValue(999999)
-        shared_lay.addWidget(self.spin_shared_y0,1,5); shared_lay.addWidget(self.spin_shared_y1,1,6)
-        shared_lay.addWidget(QLabel("Feature energy start/end"),2,1)
-        self.spin_shared_e0=QDoubleSpinBox(); self.spin_shared_e0.setRange(-1e9,1e9); self.spin_shared_e0.setDecimals(3); self.spin_shared_e0.setValue(0.0)
-        self.spin_shared_e1=QDoubleSpinBox(); self.spin_shared_e1.setRange(-1e9,1e9); self.spin_shared_e1.setDecimals(3); self.spin_shared_e1.setValue(0.0)
-        shared_lay.addWidget(self.spin_shared_e0,2,2); shared_lay.addWidget(self.spin_shared_e1,2,3)
+        self.lbl_shared_window=QLabel("Energy window: drag on H spectra panel")
+        shared_lay.addWidget(self.lbl_shared_window,1,1,1,3)
+        self.lbl_shared_roi=QLabel("ROI: drag on feature-energy map")
+        shared_lay.addWidget(self.lbl_shared_roi,1,4,1,3)
+        self.btn_shared_update=QPushButton("Update H/energy-map preview")
+        self.btn_shared_update.clicked.connect(self.update_shared_feature_interactive_preview)
+        shared_lay.addWidget(self.btn_shared_update,0,7)
         self.btn_run_shared=QPushButton("Run Shared Feature Analysis")
         self.btn_run_shared.clicked.connect(self.run_shared_feature_analysis)
-        shared_lay.addWidget(self.btn_run_shared,0,7,2,1)
+        shared_lay.addWidget(self.btn_run_shared,1,7)
         self.btn_clear_shared=QPushButton("Clear")
         self.btn_clear_shared.clicked.connect(self.clear_shared_feature_analysis)
-        shared_lay.addWidget(self.btn_clear_shared,2,7)
+        shared_lay.addWidget(self.btn_clear_shared,1,8)
         mapping_lay.addWidget(shared_box)
 
         map_lists=QHBoxLayout()
@@ -3688,13 +3684,22 @@ class RR2NMFGui(QMainWindow):
         mapping_split.addWidget(PlotPanel(self.canvas_full_mapping))
         inline_panel=QWidget(); inline_lay=QVBoxLayout(inline_panel); inline_lay.setContentsMargins(0,0,0,0)
         inline_lay.addWidget(QLabel("Inline EDS/EELS and Shared Feature Analysis results"))
-        self.table_mapping_inline=QTableWidget(); self.table_mapping_inline.setMinimumHeight(90)
-        inline_lay.addWidget(self.table_mapping_inline)
-        self.canvas_shared_feature=Canvas(18,7)
+        self.canvas_shared_interactive=Canvas(22,7)
+        shared_result_split=QSplitter(Qt.Horizontal)
+        shared_result_split.setChildrenCollapsible(False)
+        shared_result_split.setHandleWidth(8)
+        shared_result_split.addWidget(PlotPanel(self.canvas_shared_interactive))
+        right_tables=QWidget(); right_lay=QVBoxLayout(right_tables); right_lay.setContentsMargins(0,0,0,0)
+        self.table_mapping_inline=QTableWidget(); self.table_mapping_inline.setMinimumHeight(80)
+        right_lay.addWidget(QLabel("Inline EDS/EELS table")); right_lay.addWidget(self.table_mapping_inline)
+        self.table_shared_feature=QTableWidget(); self.table_shared_feature.setMinimumHeight(220)
+        right_lay.addWidget(QLabel("Shared feature component table")); right_lay.addWidget(self.table_shared_feature)
+        shared_result_split.addWidget(right_tables)
+        shared_result_split.setStretchFactor(0, 4)
+        shared_result_split.setStretchFactor(1, 2)
+        inline_lay.addWidget(shared_result_split, 1)
+        self.canvas_shared_feature=Canvas(18,5)
         inline_lay.addWidget(PlotPanel(self.canvas_shared_feature))
-        self.table_shared_feature=QTableWidget(); self.table_shared_feature.setMinimumHeight(120)
-        inline_lay.addWidget(QLabel("Shared feature component table"))
-        inline_lay.addWidget(self.table_shared_feature)
         mapping_split.addWidget(inline_panel)
         mapping_split.setStretchFactor(0, 5)
         mapping_split.setStretchFactor(1, 1)
@@ -3705,10 +3710,20 @@ class RR2NMFGui(QMainWindow):
         self._mapping_inline_analysis=None
         self.mapping_eels_elements=[]
         self._shared_feature_result=None
+        self._shared_feature_range=None
+        self._shared_feature_roi=None
+        self._shared_drag_mode=None
+        self._shared_drag_start=None
+        self._shared_feature_map=None
         try:
             self.canvas_full_mapping.mpl_connect('button_press_event', self.on_full_mapping_click)
             self.canvas_full_mapping.mpl_connect('key_press_event', self.on_full_mapping_key)
             self.canvas_full_mapping.setFocusPolicy(Qt.ClickFocus)
+        except Exception:
+            pass
+        try:
+            self.canvas_shared_interactive.mpl_connect('button_press_event', self.on_shared_interactive_press)
+            self.canvas_shared_interactive.mpl_connect('button_release_event', self.on_shared_interactive_release)
         except Exception:
             pass
 
@@ -4708,6 +4723,10 @@ This does not modify the current rr-NMF/manual tree results.
         # rr-NMF mapping lists can contain many items; avoid expensive redraw on every click by default.
         if hasattr(self, "chk_map_auto_refresh") and self.chk_map_auto_refresh.isChecked():
             self.refresh_full_mapping_view()
+        try:
+            self.update_shared_feature_interactive_preview()
+        except Exception:
+            pass
 
     def _current_mapping_sources_for_analysis(self):
         items=self._full_mapping_items() if hasattr(self, "_full_mapping_items") else []
@@ -5038,6 +5057,10 @@ This does not modify the current rr-NMF/manual tree results.
         self.list_map_components.blockSignals(False)
         self.list_map_spectra.blockSignals(False)
         self.refresh_full_mapping_view()
+        try:
+            self.update_shared_feature_interactive_preview()
+        except Exception:
+            pass
 
     def _selected_mapping_indices(self, list_widget, all_if_empty=True):
         if list_widget is None:
@@ -5087,6 +5110,155 @@ This does not modify the current rr-NMF/manual tree results.
         except Exception:
             pass
 
+    def _shared_selected_indices_and_items(self):
+        items=self._full_mapping_items()
+        if hasattr(self,"list_map_components") and self.combo_map_component_mode.currentText() == "User select":
+            selected=self._selected_mapping_indices(self.list_map_components, all_if_empty=False)
+        else:
+            selected=list(range(len(items)))
+        if not selected:
+            selected=list(range(len(items)))
+        selected=[i for i in selected if 0 <= int(i) < len(items)]
+        return items, selected
+
+    def _shared_energy_window(self, L=None):
+        rng=getattr(self,"_shared_feature_range",None)
+        if rng is None:
+            # Default to a small central window if nothing has been selected yet.
+            axis=getattr(self,"roi_axis_info",None)
+            if axis is not None and len(axis.energy_axis):
+                e=np.asarray(axis.energy_axis,dtype=np.float64)
+                c=len(e)//2
+                lo=max(0,c-5); hi=min(len(e)-1,c+5)
+                rng=(float(e[lo]), float(e[hi]))
+            else:
+                rng=(0.0,0.0)
+        e0,e1=float(rng[0]),float(rng[1])
+        if e1 < e0:
+            e0,e1=e1,e0
+        return e0,e1
+
+    def _build_shared_feature_energy_map(self, items, selected, feature_range=None):
+        if not items or not selected:
+            return None
+        axis=getattr(self,"roi_axis_info",None)
+        first=np.asarray(items[selected[0]].get('spectrum'),dtype=np.float64).reshape(-1)
+        L=len(first)
+        e0,e1=feature_range if feature_range is not None else self._shared_energy_window(L)
+        _,win=_energy_window_indices(axis,L,e0,e1)
+        acc=None; den=0.0
+        for idx in selected:
+            it=items[idx]
+            img=np.asarray(it.get('image'),dtype=np.float64)
+            sp=np.asarray(it.get('spectrum'),dtype=np.float64).reshape(-1)
+            if img.ndim!=2 or len(sp)!=L:
+                continue
+            amp=float(np.nanmean(np.clip(sp[win],0,None))) if np.any(win) else 0.0
+            if not np.isfinite(amp): amp=0.0
+            arr=np.clip(img,0,None)
+            scale=float(np.nanpercentile(arr,99)) if arr.size else 0.0
+            if scale>0: arr=arr/(scale+1e-12)
+            if acc is None: acc=np.zeros_like(arr,dtype=np.float64)
+            acc += max(0.0,amp)*arr; den += max(0.0,amp)
+        if acc is not None and den>0:
+            acc=acc/den
+        return acc
+
+    def update_shared_feature_interactive_preview(self):
+        if not hasattr(self,"canvas_shared_interactive"):
+            return
+        fig=self.canvas_shared_interactive.fig
+        fig.clear(); fig.set_size_inches(22,7,forward=True)
+        try:
+            items, selected = self._shared_selected_indices_and_items()
+            if not items:
+                ax=fig.add_subplot(111); ax.axis('off'); ax.text(0.5,0.5,'No mapping items available.',ha='center',va='center',fontsize=13)
+                self.canvas_shared_interactive.draw(); return
+            axis=getattr(self,"roi_axis_info",None)
+            e0,e1=self._shared_energy_window()
+            fmap=self._build_shared_feature_energy_map(items, selected, (e0,e1))
+            self._shared_feature_map=fmap
+            gs=fig.add_gridspec(1,2,width_ratios=[2.2,1.0])
+            axsp=fig.add_subplot(gs[0,0])
+            axim=fig.add_subplot(gs[0,1])
+            for rank,idx in enumerate(selected):
+                it=items[idx]
+                sp=np.asarray(it.get('spectrum'),dtype=np.float64).reshape(-1)
+                x=axis.energy_axis if axis is not None and len(axis.energy_axis)==len(sp) else np.arange(len(sp))
+                lab=f"{idx}: {it.get('label',f'C{idx}') }"
+                axsp.plot(x,sp,lw=1.1,label=lab)
+            axsp.axvspan(e0,e1,alpha=0.18,color='orange',label='Selected feature window')
+            axsp.set_title('Selected H/loading spectra — drag horizontally to choose feature energy window',fontsize=13)
+            axsp.set_xlabel(axis.energy_label if axis is not None else 'Channel')
+            axsp.grid(True,alpha=0.25)
+            if len(selected)<=14: axsp.legend(fontsize=9,loc='best')
+            if fmap is not None:
+                im=axim.imshow(fmap,cmap=self.combo_cmap.currentText() if hasattr(self,'combo_cmap') else 'viridis',origin='upper')
+                axim.set_title('Feature-energy image — drag ROI here',fontsize=13)
+                add_colorbar(fig,axim,im)
+                roi=getattr(self,"_shared_feature_roi",None)
+                if roi is not None:
+                    x0,x1,y0,y1=roi
+                    axim.add_patch(Rectangle((x0,y0),max(1,x1-x0),max(1,y1-y0),fill=False,edgecolor='red',lw=2.0))
+            else:
+                axim.axis('off'); axim.text(0.5,0.5,'No feature image',ha='center',va='center')
+            axim.set_xticks([]); axim.set_yticks([])
+            if hasattr(self,"lbl_shared_window"):
+                self.lbl_shared_window.setText(f"Energy window: {e0:.4g}–{e1:.4g}")
+            if hasattr(self,"lbl_shared_roi"):
+                roi=getattr(self,"_shared_feature_roi",None)
+                self.lbl_shared_roi.setText("ROI: not selected" if roi is None else f"ROI x[{roi[0]}:{roi[1]}] y[{roi[2]}:{roi[3]}]")
+            fig.tight_layout()
+            self.canvas_shared_interactive.set_base(); self.canvas_shared_interactive.draw()
+        except Exception as e:
+            ax=fig.add_subplot(111); ax.axis('off'); ax.text(0.5,0.5,'Shared preview failed: '+str(e),ha='center',va='center')
+            try: self.canvas_shared_interactive.draw()
+            except Exception: pass
+
+    def on_shared_interactive_press(self, event):
+        if event.inaxes is None or event.xdata is None or event.ydata is None:
+            return
+        axes=list(self.canvas_shared_interactive.fig.axes)
+        # First data axis is the spectrum axis; second data axis is usually the feature image axis.
+        try:
+            if event.inaxes is axes[0]:
+                self._shared_drag_mode='energy'; self._shared_drag_start=(float(event.xdata),float(event.ydata))
+            elif len(axes)>1 and event.inaxes is axes[1]:
+                self._shared_drag_mode='roi'; self._shared_drag_start=(float(event.xdata),float(event.ydata))
+            else:
+                self._shared_drag_mode=None; self._shared_drag_start=None
+        except Exception:
+            self._shared_drag_mode=None; self._shared_drag_start=None
+
+    def on_shared_interactive_release(self, event):
+        mode=getattr(self,"_shared_drag_mode",None); start=getattr(self,"_shared_drag_start",None)
+        self._shared_drag_mode=None; self._shared_drag_start=None
+        if mode is None or start is None or event.xdata is None or event.ydata is None:
+            return
+        try:
+            if mode == 'energy':
+                x0=float(start[0]); x1=float(event.xdata)
+                if abs(x1-x0) > 1e-12:
+                    self._shared_feature_range=(min(x0,x1),max(x0,x1))
+            elif mode == 'roi':
+                fmap=getattr(self,"_shared_feature_map",None)
+                if fmap is None:
+                    return
+                h,w=fmap.shape[:2]
+                x0=int(round(min(start[0],event.xdata))); x1=int(round(max(start[0],event.xdata)))
+                y0=int(round(min(start[1],event.ydata))); y1=int(round(max(start[1],event.ydata)))
+                x0=max(0,min(w-1,x0)); x1=max(0,min(w,x1+1))
+                y0=max(0,min(h-1,y0)); y1=max(0,min(h,y1+1))
+                if x1<=x0: x1=min(w,x0+1)
+                if y1<=y0: y1=min(h,y0+1)
+                self._shared_feature_roi=(x0,x1,y0,y1)
+                # ROI selection is the natural trigger for analysis.
+                self.run_shared_feature_analysis()
+        except Exception as e:
+            try: self.append_log('Shared interactive selection failed: '+str(e))
+            except Exception: pass
+        self.update_shared_feature_interactive_preview()
+
     def run_shared_feature_analysis(self):
         if not hasattr(self,"table_shared_feature"):
             return
@@ -5094,12 +5266,15 @@ This does not modify the current rr-NMF/manual tree results.
             items=self._full_mapping_items()
             n=len(items)
             ref_idx=_parse_index_list_text(self.edit_shared_ref_idx.text() if hasattr(self,"edit_shared_ref_idx") else "", n)
-            roi=(
-                int(self.spin_shared_x0.value()) if hasattr(self,"spin_shared_x0") else 0,
-                int(self.spin_shared_x1.value()) if hasattr(self,"spin_shared_x1") else 999999,
-                int(self.spin_shared_y0.value()) if hasattr(self,"spin_shared_y0") else 0,
-                int(self.spin_shared_y1.value()) if hasattr(self,"spin_shared_y1") else 999999,
-            )
+            roi=getattr(self,"_shared_feature_roi",None)
+            if roi is None:
+                # Default to full field if user has not dragged an ROI yet.
+                if items:
+                    arr=np.asarray(items[0].get('image'))
+                    h,w=arr.shape[:2]
+                    roi=(0,w,0,h)
+                else:
+                    roi=(0,1,0,1)
             result=compute_shared_feature_analysis(
                 items,
                 self.roi_axis_info,
@@ -5107,17 +5282,20 @@ This does not modify the current rr-NMF/manual tree results.
                 ref_indices=ref_idx,
                 roi=roi,
                 top_percent=float(self.spin_shared_top_percent.value()) if hasattr(self,"spin_shared_top_percent") else 10.0,
-                feature_range=(
-                    float(self.spin_shared_e0.value()) if hasattr(self,"spin_shared_e0") else 0.0,
-                    float(self.spin_shared_e1.value()) if hasattr(self,"spin_shared_e1") else 0.0,
-                ),
+                feature_range=self._shared_energy_window(),
             )
             self._shared_feature_result=result
             rows=result.get("rows",[]) or []
+            # Sort for visibility: strongest shared-feature score first.
+            try:
+                rows=sorted(rows,key=lambda r: float(r.get('score_used_for_map',0.0)), reverse=True)
+            except Exception:
+                pass
             cols=["index","label","feature_corr","positive_overlap","relative_amp","score_used_for_map"]
             self._fill_table_from_rows(self.table_shared_feature, rows, cols)
             plot_shared_feature_analysis(self.canvas_shared_feature.fig,result,cmap=self.combo_cmap.currentText() if hasattr(self,"combo_cmap") else "viridis")
             self.canvas_shared_feature.set_base(); self.canvas_shared_feature.draw()
+            self.update_shared_feature_interactive_preview()
             self.append_log("Shared Feature Analysis updated: "+str(result.get('summary',{}).get('reference','')))
         except Exception as e:
             QMessageBox.warning(self,"Shared Feature Analysis",str(e))
@@ -5126,9 +5304,14 @@ This does not modify the current rr-NMF/manual tree results.
 
     def clear_shared_feature_analysis(self):
         self._shared_feature_result=None
+        self._shared_feature_range=None
+        self._shared_feature_roi=None
+        self._shared_feature_map=None
         try:
             self.table_shared_feature.clear(); self.table_shared_feature.setRowCount(0); self.table_shared_feature.setColumnCount(0)
             self.canvas_shared_feature.clear()
+            if hasattr(self,"canvas_shared_interactive"):
+                self.update_shared_feature_interactive_preview()
             self.append_log("Shared Feature Analysis cleared.")
         except Exception:
             pass
@@ -6460,4 +6643,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
