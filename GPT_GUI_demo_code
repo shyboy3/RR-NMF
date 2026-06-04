@@ -1886,105 +1886,99 @@ def plot_raw(
     bg_applied=False,
     selected_pixel=None,
     corrected_full_cube=None,
+    corrected_full_history=None,
 ):
-    """Raw-data view with click-selected single-pixel spectrum.
+    """Raw-data view with click-selected single-pixel spectrum and iterative BG results.
 
-    The spinbox ROI still defines the analysis ROI. Mouse interaction on this tab now only
-    selects one spatial pixel for inspection and does not modify the analysis ROI.
+    If corrected_full_history is provided, the left column shows the raw image followed
+    by every sequential background-correction result (#1..#N).  The spectrum panel plots
+    the raw spectrum and all sequential corrected spectra.
     """
     fig.clear()
-    if bg_applied and corrected_full_cube is not None:
-        fig.set_size_inches(16, 9.2, forward=True)
-        gs = fig.add_gridspec(2, 2, width_ratios=[1.0, 1.35], height_ratios=[1, 1])
-        ax = fig.add_subplot(gs[0, 0])
-        ax_corr = fig.add_subplot(gs[1, 0])
-        sp = fig.add_subplot(gs[:, 1])
-    else:
-        fig.set_size_inches(16, 6.4, forward=True)
-        gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 1.35])
-        ax = fig.add_subplot(gs[0, 0])
-        ax_corr = None
-        sp = fig.add_subplot(gs[0, 1])
+    history = list(corrected_full_history or [])
+    if bg_applied and not history and corrected_full_cube is not None:
+        history = [corrected_full_cube]
+
+    n_img_rows = 1 + (len(history) if bg_applied else 0)
+    n_img_rows = max(1, n_img_rows)
+    fig_h = max(6.4, 3.2 * n_img_rows + 1.2)
+    fig.set_size_inches(17.5, fig_h, forward=True)
+    gs = fig.add_gridspec(n_img_rows, 2, width_ratios=[1.0, 1.55], height_ratios=[1.0] * n_img_rows)
+    image_axes = [fig.add_subplot(gs[0, 0])]
+    for ri in range(1, n_img_rows):
+        image_axes.append(fig.add_subplot(gs[ri, 0]))
+    sp = fig.add_subplot(gs[:, 1])
 
     show_cube = full_cube if full_cube is not None else cube
-    raw_img = np.sum(show_cube, axis=2)
-    im = ax.imshow(raw_img, cmap=cmap, origin="upper", aspect="equal")
-    ax.set_title("Raw sum image: click a pixel to inspect spectrum", pad=18)
-    ax.set_xlabel("X"); ax.set_ylabel("Y")
 
-    if spatial_roi is not None:
-        y0, y1, x0, x1 = spatial_roi
-        rect = Rectangle((x0, y0), max(1, x1 - x0), max(1, y1 - y0), fill=False, linewidth=1.8)
-        ax.add_patch(rect)
-        ax.text(
-            0.02, 0.98, f"Analysis ROI x[{x0}:{x1}] y[{y0}:{y1}]",
-            transform=ax.transAxes,
-            fontsize=9, va="top", ha="left", clip_on=True,
-            bbox=dict(facecolor="white", alpha=0.82, edgecolor="black", linewidth=0.3, pad=2.5),
-        )
-
-    if selected_pixel is not None:
-        px, py = selected_pixel
-        ax.plot([px], [py], marker="x", markersize=8, markeredgewidth=1.8)
-        ax.text(
-            0.02, 0.08, f"Selected pixel: x={px}, y={py}",
-            transform=ax.transAxes,
-            fontsize=9, va="bottom", ha="left", clip_on=True,
-            bbox=dict(facecolor="white", alpha=0.82, edgecolor="black", linewidth=0.3, pad=2.5),
-        )
-    add_colorbar(fig, ax, im)
-
-    if ax_corr is not None:
-        corr_img = np.sum(corrected_full_cube, axis=2)
-        im2 = ax_corr.imshow(corr_img, cmap=cmap, origin="upper", aspect="equal")
-        ax_corr.set_title("Background-corrected raw image", pad=12)
-        ax_corr.set_xlabel("X"); ax_corr.set_ylabel("Y")
+    def _draw_img(ax, img_cube, title):
+        img = np.sum(img_cube, axis=2)
+        im = ax.imshow(img, cmap=cmap, origin="upper", aspect="equal")
+        ax.set_title(title, pad=18 if title.startswith("Raw") else 12)
+        ax.set_xlabel("X"); ax.set_ylabel("Y")
         if spatial_roi is not None:
             y0, y1, x0, x1 = spatial_roi
-            ax_corr.add_patch(Rectangle((x0, y0), max(1, x1 - x0), max(1, y1 - y0), fill=False, linewidth=1.8))
+            ax.add_patch(Rectangle((x0, y0), max(1, x1 - x0), max(1, y1 - y0), fill=False, linewidth=1.8))
+            if title.startswith("Raw"):
+                ax.text(
+                    0.02, 0.98, f"Analysis ROI x[{x0}:{x1}] y[{y0}:{y1}]",
+                    transform=ax.transAxes, fontsize=9, va="top", ha="left", clip_on=True,
+                    bbox=dict(facecolor="white", alpha=0.82, edgecolor="black", linewidth=0.3, pad=2.5),
+                )
         if selected_pixel is not None:
             px, py = selected_pixel
-            ax_corr.plot([px], [py], marker="x", markersize=8, markeredgewidth=1.8)
-        add_colorbar(fig, ax_corr, im2)
+            ax.plot([px], [py], marker="x", markersize=8, markeredgewidth=1.8)
+            if title.startswith("Raw"):
+                ax.text(
+                    0.02, 0.08, f"Selected pixel: x={px}, y={py}",
+                    transform=ax.transAxes, fontsize=9, va="bottom", ha="left", clip_on=True,
+                    bbox=dict(facecolor="white", alpha=0.82, edgecolor="black", linewidth=0.3, pad=2.5),
+                )
+        add_colorbar(fig, ax, im)
 
-    # Spectrum: single clicked pixel. If no pixel is selected yet, use the analysis-ROI mean
-    # as a safe default and label it explicitly.
+    _draw_img(image_axes[0], show_cube, "Raw sum image: click a pixel to inspect spectrum")
+    for k, hc in enumerate(history, start=1):
+        if k < len(image_axes):
+            _draw_img(image_axes[k], hc, f"BG correction #{k} sum image")
+
+    # Spectrum: selected single pixel; default to analysis ROI mean.
     src_raw = raw_roi_before_bg if raw_roi_before_bg is not None else cube
-    src_corr = corrected_roi if corrected_roi is not None else cube
     if selected_pixel is not None:
         px, py = selected_pixel
-        l0_len = src_corr.shape[-1]
-        if full_cube is not None and 0 <= py < full_cube.shape[0] and 0 <= px < full_cube.shape[1]:
-            # selected pixel in full-image coordinates; channel range is already matched to axis
-            # by caller via current_channel_bounds.
-            raw_spec = np.asarray(src_raw[py, px, :], dtype=np.float64) if src_raw.ndim == 3 and src_raw.shape[:2] == full_cube.shape[:2] else None
-            corr_spec = np.asarray(src_corr[py, px, :], dtype=np.float64) if src_corr.ndim == 3 and src_corr.shape[:2] == full_cube.shape[:2] else None
+        if full_cube is not None and 0 <= py < full_cube.shape[0] and 0 <= px < full_cube.shape[1] and src_raw.ndim == 3 and src_raw.shape[:2] == full_cube.shape[:2]:
+            raw_spec = np.asarray(src_raw[py, px, :], dtype=np.float64)
+            raw_std = None
         else:
-            raw_spec = corr_spec = None
-        if raw_spec is None:
-            raw_spec, _ = roi_mean_std_spectrum(src_raw)
-        if corr_spec is None:
-            corr_spec, _ = roi_mean_std_spectrum(src_corr)
+            raw_spec, raw_std = roi_mean_std_spectrum(src_raw)
         spec_title = f"Single-pixel spectrum x={px}, y={py}"
     else:
         raw_spec, raw_std = roi_mean_std_spectrum(src_raw)
-        corr_spec, corr_std = roi_mean_std_spectrum(src_corr)
         spec_title = "Analysis ROI mean spectrum (click image for one pixel)"
 
     x = axis.energy_axis if len(axis.energy_axis) == len(raw_spec) else np.arange(len(raw_spec))
     sp.plot(x, raw_spec, linewidth=1.4, label="raw pixel" if selected_pixel is not None else "ROI raw mean")
-    if selected_pixel is None:
-        sp.fill_between(x, raw_spec - raw_std, raw_spec + raw_std, alpha=0.16, label="ROI raw ±1σ")
-    if bg_applied and corrected_roi is not None:
-        bg_spec = raw_spec - corr_spec
-        sp.plot(x, bg_spec, linewidth=1.2, label="estimated BG = raw - corrected")
-        sp.plot(x, corr_spec, linewidth=1.5, label="raw - BG / corrected")
-        if selected_pixel is None:
-            sp.fill_between(x, corr_spec - corr_std, corr_spec + corr_std, alpha=0.12, label="corrected ±1σ")
+    if selected_pixel is None and raw_std is not None:
+        sp.fill_between(x, raw_spec - raw_std, raw_spec + raw_std, alpha=0.14, label="ROI raw ±1σ")
+
+    # Plot every sequential corrected spectrum.  These are more useful than plotting only
+    # the final correction when assessing whether repeated correction is too aggressive.
+    for k, hc in enumerate(history, start=1):
+        corr_spec = None
+        corr_std = None
+        if selected_pixel is not None:
+            px, py = selected_pixel
+            if full_cube is not None and 0 <= py < full_cube.shape[0] and 0 <= px < full_cube.shape[1] and hc.ndim == 3 and hc.shape[:2] == full_cube.shape[:2]:
+                corr_spec = np.asarray(hc[py, px, :], dtype=np.float64)
+        if corr_spec is None:
+            corr_spec, corr_std = roi_mean_std_spectrum(hc)
+        sp.plot(x, corr_spec, linewidth=1.35, label=f"BG corr #{k}")
+        if selected_pixel is None and corr_std is not None and k == len(history):
+            sp.fill_between(x, corr_spec - corr_std, corr_spec + corr_std, alpha=0.10, label=f"BG corr #{k} ±1σ")
+
     sp.set_title(spec_title)
     sp.set_xlabel(axis.energy_label); sp.set_ylabel("Intensity")
     sp.grid(True, alpha=.3); sp.legend(fontsize=8)
-    fig.subplots_adjust(left=.055, right=.97, top=.93, bottom=.09, wspace=.34, hspace=.34)
+    fig.subplots_adjust(left=.055, right=.975, top=.94, bottom=.07, wspace=.32, hspace=.42)
 
 def plot_conv(fig, conv, axis, cmap="viridis", maxn=20):
     fig.clear()
@@ -3320,7 +3314,7 @@ class RR2NMFGui(QMainWindow):
         super().__init__(); self.setWindowTitle("rr-NMF EELS/EDS GUI v10.0 Mapping H-basis + Multi-BG"); self.resize(1850,1080); self.setMinimumSize(900, 620)
         self.cube=None; self.original_cube=None; self.roi_cube=None; self.X=None; self.image_shape=None
         self.axis_info=make_default_axis_info((1,1,1)); self.roi_axis_info=make_default_axis_info((1,1,1))
-        self.conv_result=None; self.rr_result=None; self.pca_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.bg_applied=False; self._raw_mouse_press=None; self.selected_raw_pixel=None
+        self.conv_result=None; self.rr_result=None; self.pca_result=None; self.worker=None; self.rr_component_entries=[]; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.bg_applied=False; self.bg_correction_history=[]; self._raw_mouse_press=None; self.selected_raw_pixel=None
         self.eds_elements=[]; self.eels_elements=[]; self.eds_sources=[]; self.eels_sources=[]; self.eds_hits=[]; self.eels_hits=[]
         self._syncing=False; self.loaded_decomp_sources=[]; self._auto_score_active=False; self._auto_score_target_depth=None; self._auto_score_stop_after_current=False; self._auto_score_unchanged_count=0; self._build_ui()
 
@@ -3374,9 +3368,10 @@ class RR2NMFGui(QMainWindow):
         self.bg_ref_ch0.setValue(0.0); self.bg_ref_ch1.setValue(1.0)
         self.combo_bg_after=QComboBox()
         self.combo_bg_after.addItems(["shift_min", "clip", "keep"])
-        self.edit_bg_multi_windows=QLineEdit("")
-        self.edit_bg_multi_windows.setPlaceholderText("optional: 100:130; 280:310; ... in energy units")
-        self.edit_bg_multi_windows.setToolTip("Optional multiple background fit windows. If set, each energy window is fit/subtracted sequentially with the selected BG mode. Example: 100:130; 280:310")
+        self.spin_bg_iterations=QSpinBox()
+        self.spin_bg_iterations.setRange(1, 50)
+        self.spin_bg_iterations.setValue(1)
+        self.spin_bg_iterations.setToolTip("Number of sequential background-correction passes. N=1 corrects the raw cube; N=2 corrects the N=1 result again using the same settings; etc.")
         self.chk_bg_clip=QCheckBox("Clip negative after power-law subtraction")
         self.chk_bg_clip.setChecked(True)
         self.btn_bg_current=QPushButton("Use Current Spatial ROI"); self.btn_bg_current.clicked.connect(self.use_current_roi_for_background)
@@ -3388,7 +3383,7 @@ class RR2NMFGui(QMainWindow):
             ("BG/fit Y start",self.bg_y0),("BG/fit Y end",self.bg_y1),
             ("BG/fit X start",self.bg_x0),("BG/fit X end",self.bg_x1),
             ("Power-law fit energy start",self.bg_e0),("Power-law fit energy end",self.bg_e1),
-            ("Multi fit windows",self.edit_bg_multi_windows),
+            ("BG correction iterations",self.spin_bg_iterations),
             ("Reference scale energy start",self.bg_ref_ch0),("Reference scale energy end",self.bg_ref_ch1),
             ("Reference after subtraction",self.combo_bg_after),
             (None,self.chk_bg_clip),(None,self.btn_bg_current),(None,self.btn_apply_bg),(None,self.btn_reset_bg),
@@ -3857,7 +3852,7 @@ class RR2NMFGui(QMainWindow):
         if not path: return
         try:
             cube,meta,axis=load_hyperspectral_file(path); cube=nonnegative(cube,"clip")
-            self.cube=cube.copy(); self.original_cube=cube.copy(); self.axis_info=axis; self.roi_axis_info=axis; self.bg_applied=False; self.conv_result=None; self.rr_result=None; self.pca_result=None; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.selected_raw_pixel=None
+            self.cube=cube.copy(); self.original_cube=cube.copy(); self.axis_info=axis; self.roi_axis_info=axis; self.bg_applied=False; self.bg_correction_history=[]; self.conv_result=None; self.rr_result=None; self.pca_result=None; self.rr_combined_sets=[]; self.manual_depth_groups={}; self.selected_raw_pixel=None
             self.lbl_file.setText(os.path.basename(path)); self.lbl_shape.setText(str(cube.shape)); self.set_roi_full(); self.set_background_roi_full(); self.refresh_views(); self.refresh_spectrum_sources(); self.append_log(f"Loaded {cube.shape}")
         except Exception as e: QMessageBox.critical(self,"Load failed",str(e)); self.append_log(traceback.format_exc())
 
@@ -4031,40 +4026,18 @@ class RR2NMFGui(QMainWindow):
             n = n + 1 if n < L else n - 1
         return max(1, int(n))
 
-    def parse_bg_fit_windows(self):
-        """Return a list of (energy_start, energy_end) fit windows.
-
-        Empty input falls back to the single Power-law fit energy start/end widgets.
-        Syntax: "100:130; 280:310" in the current energy-axis unit.
-        """
-        txt = ""
-        try:
-            txt = self.edit_bg_multi_windows.text().strip()
-        except Exception:
-            txt = ""
-        if not txt:
-            return [(float(self.bg_e0.value()), float(self.bg_e1.value()))]
-        out = []
-        for part in txt.replace(",", ";").split(";"):
-            part = part.strip()
-            if not part:
-                continue
-            if ":" not in part:
-                raise ValueError("Multi fit windows must use start:end; start:end syntax.")
-            a, b = part.split(":", 1)
-            e0, e1 = float(a.strip()), float(b.strip())
-            if e1 <= e0:
-                raise ValueError(f"Invalid BG fit window {part!r}: end must be larger than start.")
-            out.append((e0, e1))
-        if not out:
-            out = [(float(self.bg_e0.value()), float(self.bg_e1.value()))]
-        return out
-
     def background_channel_range(self):
         if self.cube is None: raise ValueError("No cube loaded")
         return self.energy_range_to_channel_bounds(self.bg_e0.value(), self.bg_e1.value(), self.axis_info, self.cube.shape[2])
 
     def apply_background_correction(self):
+        """Apply the original single-window BG correction sequentially N times.
+
+        This intentionally restores the ver9.8 single-fit-window behavior.  The new
+        "BG correction iterations" control repeats that same correction: pass #1 starts
+        from the raw/original cube, pass #2 starts from the pass #1 result, and so on.
+        Every intermediate corrected cube is stored for display under the raw image.
+        """
         if self.cube is None:
             return
         try:
@@ -4074,14 +4047,18 @@ class RR2NMFGui(QMainWindow):
             if y1 <= y0 or x1 <= x0:
                 raise ValueError("Invalid background spatial ROI.")
 
+            n_iter = int(self.spin_bg_iterations.value()) if hasattr(self, "spin_bg_iterations") else 1
+            n_iter = max(1, n_iter)
             mode = self.combo_bg_mode.currentText()
-            windows = self.parse_bg_fit_windows()
-            work = self.cube.astype(np.float32, copy=False)
+            l0, l1 = self.background_channel_range()
+            base = self.original_cube if self.original_cube is not None else self.cube
+            work = base.astype(np.float32, copy=True)
+            history = []
             meta_msgs = []
+
             if mode.startswith("Reference BG"):
                 s0, s1 = self.energy_range_to_channel_bounds(self.bg_ref_ch0.value(), self.bg_ref_ch1.value(), self.axis_info, L)
-                for e0, e1 in windows:
-                    l0, l1 = self.energy_range_to_channel_bounds(e0, e1, self.axis_info, L)
+                for it in range(1, n_iter + 1):
                     corrected, meta = apply_reference_bg_low_energy_scaling(
                         work,
                         self.axis_info,
@@ -4092,24 +4069,33 @@ class RR2NMFGui(QMainWindow):
                         chunk_pixels=max(512, self.spin_chunk.value()),
                     )
                     work = corrected.astype(np.float32, copy=False)
-                    meta_msgs.append(f"[{e0:.6g}:{e1:.6g}] ch[{l0}:{l1}] r={meta['r_ref']:.4g}, alpha={meta['alpha_mean']:.4g}")
+                    history.append(work.copy())
+                    meta_msgs.append(
+                        f"#{it}: fit_energy[{self.bg_e0.value():.6g}:{self.bg_e1.value():.6g}] -> ch[{l0}:{l1}], "
+                        f"scale_energy[{self.bg_ref_ch0.value():.6g}:{self.bg_ref_ch1.value():.6g}] -> ch[{s0}:{s1}], "
+                        f"r={meta['r_ref']:.4g}, alpha={meta['alpha_mean']:.4g}"
+                    )
                 self.cube = work
                 self.lbl_bg.setText(
-                    "Applied multi-window reference BG: " + "; ".join(meta_msgs) +
-                    f" | scale_energy[{self.bg_ref_ch0.value():.6g}:{self.bg_ref_ch1.value():.6g}] -> ch[{s0}:{s1}], after={self.combo_bg_after.currentText()}"
+                    f"Applied iterative reference BG × {n_iter}: " + "; ".join(meta_msgs) +
+                    f" | after={self.combo_bg_after.currentText()}"
                 )
             else:
-                for e0, e1 in windows:
-                    l0, l1 = self.energy_range_to_channel_bounds(e0, e1, self.axis_info, L)
+                for it in range(1, n_iter + 1):
                     fit = fit_powerlaw_exponent_from_roi(work, self.axis_info, (y0, y1, x0, x1), (l0, l1))
                     work = apply_powerlaw_background_correction(
                         work, self.axis_info, (l0, l1), fit["r"],
                         self.chk_bg_clip.isChecked(), max(512, self.spin_chunk.value())
                     ).astype(np.float32, copy=False)
-                    meta_msgs.append(f"[{e0:.6g}:{e1:.6g}] ch[{l0}:{l1}] r={fit['r']:.4g}, RMSE={fit['rmse']:.4g}")
+                    history.append(work.copy())
+                    meta_msgs.append(f"#{it}: r={fit['r']:.4g}, RMSE={fit['rmse']:.4g}")
                 self.cube = work
-                self.lbl_bg.setText("Applied multi-window power-law BG: " + "; ".join(meta_msgs))
+                self.lbl_bg.setText(
+                    f"Applied iterative single-window power-law BG × {n_iter}: " + "; ".join(meta_msgs) +
+                    f" | fit_energy[{self.bg_e0.value():.6g}:{self.bg_e1.value():.6g}] -> ch[{l0}:{l1}]"
+                )
 
+            self.bg_correction_history = history
             self.bg_applied = True
             self.conv_result = None
             self.rr_result = None
@@ -4123,7 +4109,7 @@ class RR2NMFGui(QMainWindow):
 
     def reset_background_correction(self):
         if self.original_cube is None: return
-        self.cube=self.original_cube.copy(); self.bg_applied=False; self.conv_result=None; self.rr_result=None; self.pca_result=None; self.lbl_bg.setText("Reset to original"); self.refresh_views(); self.refresh_spectrum_sources()
+        self.cube=self.original_cube.copy(); self.bg_applied=False; self.bg_correction_history=[]; self.conv_result=None; self.rr_result=None; self.pca_result=None; self.lbl_bg.setText("Reset to original"); self.refresh_views(); self.refresh_spectrum_sources()
 
     def collect_params(self, include_manual=True, max_manual_depth=None):
         params={"run_conventional":self.chk_conv.isChecked(),"conv_components":self.spin_k.value(),"run_rr":self.chk_rr.isChecked(),"rr_rank":self.spin_rank.value(),"rr_depth":self.spin_depth.value(),"residual_mode":self.combo_res_mode.currentText(),"residual_nonnegative":self.combo_res_nn.currentText(),"decompose_residual_branch":self.chk_decomp_res.isChecked(),"max_iter":self.spin_iter.value(),"init":self.combo_init.currentText(),"solver":self.combo_solver.currentText(),"random_state":self.spin_seed.value(),"chunk_size":self.spin_chunk.value()}
@@ -5105,7 +5091,13 @@ This does not modify the current rr-NMF/manual tree results.
                     raw_full=self.cube[:,:,l0:l1].astype(np.float32,copy=False)
                     raw_roi=roi
                 corr_full=self.cube[:,:,l0:l1].astype(np.float32,copy=False)
-                plot_raw(self.canvas_raw.fig,roi,axis,cmap,full_cube=raw_full,spatial_roi=(y0,y1,x0,x1),raw_roi_before_bg=raw_full,corrected_roi=corr_full,bg_applied=getattr(self,"bg_applied",False),selected_pixel=getattr(self,"selected_raw_pixel",None),corrected_full_cube=corr_full); self.canvas_raw.set_base(); self.canvas_raw.draw()
+                bg_hist=[]
+                for hc in getattr(self, "bg_correction_history", []) or []:
+                    try:
+                        bg_hist.append(hc[:,:,l0:l1].astype(np.float32, copy=False))
+                    except Exception:
+                        pass
+                plot_raw(self.canvas_raw.fig,roi,axis,cmap,full_cube=raw_full,spatial_roi=(y0,y1,x0,x1),raw_roi_before_bg=raw_full,corrected_roi=corr_full,bg_applied=getattr(self,"bg_applied",False),selected_pixel=getattr(self,"selected_raw_pixel",None),corrected_full_cube=corr_full,corrected_full_history=bg_hist); self.canvas_raw.set_base(); self.canvas_raw.draw()
             except Exception: self.canvas_raw.clear()
         match_pct = self.spin_shape_match_pct.value() if hasattr(self, "spin_shape_match_pct") else 80.0
         match_window = self.energy_width_to_window_channels(self.spin_shape_match_window.value(), self.roi_axis_info, len(self.roi_axis_info.energy_axis) if self.roi_axis_info is not None else None) if hasattr(self, "spin_shape_match_window") else 21
