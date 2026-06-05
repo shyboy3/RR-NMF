@@ -3654,6 +3654,9 @@ class RR2NMFGui(QMainWindow):
         self.edit_shared_ref_idx=QLineEdit(""); self.edit_shared_ref_idx.setPlaceholderText("e.g. 0 or 0,2,4")
         self.edit_shared_ref_idx.setMaximumWidth(180)
         shared_lay.addWidget(self.edit_shared_ref_idx,0,4)
+        self.lbl_shared_process_hint=QLabel("Analysis targets are selected independently below. Mapping component/spectrum lists remain for visualization only.")
+        self.lbl_shared_process_hint.setWordWrap(True)
+        shared_lay.addWidget(self.lbl_shared_process_hint,2,0,1,9)
         shared_lay.addWidget(QLabel("Top %"),0,5)
         self.spin_shared_top_percent=QDoubleSpinBox(); self.spin_shared_top_percent.setRange(0.1,100.0); self.spin_shared_top_percent.setDecimals(1); self.spin_shared_top_percent.setValue(10.0); self.spin_shared_top_percent.setMaximumWidth(80)
         shared_lay.addWidget(self.spin_shared_top_percent,0,6)
@@ -3678,6 +3681,15 @@ class RR2NMFGui(QMainWindow):
         map_lists.addWidget(QLabel("Components")); map_lists.addWidget(self.list_map_components, 2)
         map_lists.addWidget(QLabel("Spectra")); map_lists.addWidget(self.list_map_spectra, 2)
         mapping_lay.addLayout(map_lists)
+
+        shared_target_lay=QHBoxLayout()
+        shared_target_lay.addWidget(QLabel("Shared Feature Analysis targets"))
+        self.list_shared_targets=QListWidget()
+        self.list_shared_targets.setSelectionMode(QListWidget.MultiSelection)
+        self.list_shared_targets.itemSelectionChanged.connect(lambda: self.update_shared_feature_interactive_preview())
+        self.list_shared_targets.setMinimumHeight(90)
+        shared_target_lay.addWidget(self.list_shared_targets, 1)
+        mapping_lay.addLayout(shared_target_lay)
         mapping_split=QSplitter(Qt.Vertical)
         mapping_split.setChildrenCollapsible(False)
         mapping_split.setHandleWidth(8)
@@ -3698,8 +3710,8 @@ class RR2NMFGui(QMainWindow):
         shared_result_split.setStretchFactor(0, 4)
         shared_result_split.setStretchFactor(1, 2)
         inline_lay.addWidget(shared_result_split, 1)
-        self.canvas_shared_feature=Canvas(18,5)
-        inline_lay.addWidget(PlotPanel(self.canvas_shared_feature))
+        # The old bottom summary plot was removed: the interactive spectra/map panel
+        # and the right-side tables now carry the shared-feature analysis result.
         mapping_split.addWidget(inline_panel)
         mapping_split.setStretchFactor(0, 5)
         mapping_split.setStretchFactor(1, 1)
@@ -3724,6 +3736,7 @@ class RR2NMFGui(QMainWindow):
         try:
             self.canvas_shared_interactive.mpl_connect('button_press_event', self.on_shared_interactive_press)
             self.canvas_shared_interactive.mpl_connect('button_release_event', self.on_shared_interactive_release)
+            self.canvas_shared_interactive.mpl_connect('motion_notify_event', self.on_shared_interactive_motion)
         except Exception:
             pass
 
@@ -5042,20 +5055,32 @@ This does not modify the current rr-NMF/manual tree results.
         items=self._full_mapping_items()
         old_comp={it.text().split(": ",1)[-1] for it in self.list_map_components.selectedItems()}
         old_spec={it.text().split(": ",1)[-1] for it in self.list_map_spectra.selectedItems()} if hasattr(self,"list_map_spectra") else set()
+        old_shared={it.text().split(": ",1)[-1] for it in self.list_shared_targets.selectedItems()} if hasattr(self,"list_shared_targets") else set()
         self.list_map_components.blockSignals(True)
         self.list_map_spectra.blockSignals(True)
+        if hasattr(self,"list_shared_targets"):
+            self.list_shared_targets.blockSignals(True)
         self.list_map_components.clear(); self.list_map_spectra.clear()
+        if hasattr(self,"list_shared_targets"):
+            self.list_shared_targets.clear()
         for i,it in enumerate(items):
             txt=f"{i}: {it.get('label',f'C{i}')}"
             a=QListWidgetItem(txt); a.setData(Qt.UserRole,int(i)); self.list_map_components.addItem(a)
             b=QListWidgetItem(txt); b.setData(Qt.UserRole,int(i)); self.list_map_spectra.addItem(b)
+            c=QListWidgetItem(txt); c.setData(Qt.UserRole,int(i))
+            if hasattr(self,"list_shared_targets"):
+                self.list_shared_targets.addItem(c)
             lab=str(it.get('label',f'C{i}'))
             if lab in old_comp:
                 a.setSelected(True)
             if lab in old_spec:
                 b.setSelected(True)
+            if lab in old_shared:
+                c.setSelected(True)
         self.list_map_components.blockSignals(False)
         self.list_map_spectra.blockSignals(False)
+        if hasattr(self,"list_shared_targets"):
+            self.list_shared_targets.blockSignals(False)
         self.refresh_full_mapping_view()
         try:
             self.update_shared_feature_interactive_preview()
@@ -5111,14 +5136,30 @@ This does not modify the current rr-NMF/manual tree results.
             pass
 
     def _shared_selected_indices_and_items(self):
+        """Return Full Mapping items and the indices used by Shared Feature Analysis.
+
+        This intentionally uses the dedicated Shared Feature Analysis target list.
+        The main Components/Spectra lists control the displayed mapping and spectra,
+        and should not restrict the analysis target pool.  If no dedicated target
+        is selected, all currently loaded Full Mapping items are used so the user
+        can inspect the whole dataset while choosing analysis targets separately.
+        """
         items=self._full_mapping_items()
-        if hasattr(self,"list_map_components") and self.combo_map_component_mode.currentText() == "User select":
-            selected=self._selected_mapping_indices(self.list_map_components, all_if_empty=False)
-        else:
-            selected=list(range(len(items)))
+        selected=[]
+        try:
+            if hasattr(self,"list_shared_targets"):
+                selected=self._selected_mapping_indices(self.list_shared_targets, all_if_empty=False)
+        except Exception:
+            selected=[]
         if not selected:
             selected=list(range(len(items)))
-        selected=[i for i in selected if 0 <= int(i) < len(items)]
+        selected=[int(i) for i in selected if 0 <= int(i) < len(items)]
+        try:
+            if hasattr(self,"lbl_shared_process_hint"):
+                mode="all loaded mapping items" if len(selected)==len(items) else f"{len(selected)} dedicated target item(s)"
+                self.lbl_shared_process_hint.setText("Shared Feature Analysis targets: "+mode+". Mapping component/spectrum lists are unchanged.")
+        except Exception:
+            pass
         return items, selected
 
     def _shared_energy_window(self, L=None):
@@ -5181,6 +5222,8 @@ This does not modify the current rr-NMF/manual tree results.
             gs=fig.add_gridspec(1,2,width_ratios=[2.2,1.0])
             axsp=fig.add_subplot(gs[0,0])
             axim=fig.add_subplot(gs[0,1])
+            self._shared_spectrum_ax=axsp
+            self._shared_image_ax=axim
             for rank,idx in enumerate(selected):
                 it=items[idx]
                 sp=np.asarray(it.get('spectrum'),dtype=np.float64).reshape(-1)
@@ -5215,15 +5258,27 @@ This does not modify the current rr-NMF/manual tree results.
             try: self.canvas_shared_interactive.draw()
             except Exception: pass
 
+    def on_shared_interactive_motion(self, event):
+        """Show a crosshair cursor when the mouse is over selectable shared-feature axes."""
+        try:
+            spec_ax=getattr(self,"_shared_spectrum_ax",None)
+            img_ax=getattr(self,"_shared_image_ax",None)
+            if event.inaxes is spec_ax or event.inaxes is img_ax:
+                self.canvas_shared_interactive.setCursor(Qt.CrossCursor)
+            else:
+                self.canvas_shared_interactive.setCursor(Qt.ArrowCursor)
+        except Exception:
+            pass
+
     def on_shared_interactive_press(self, event):
         if event.inaxes is None or event.xdata is None or event.ydata is None:
             return
-        axes=list(self.canvas_shared_interactive.fig.axes)
-        # First data axis is the spectrum axis; second data axis is usually the feature image axis.
+        spec_ax=getattr(self,"_shared_spectrum_ax",None)
+        img_ax=getattr(self,"_shared_image_ax",None)
         try:
-            if event.inaxes is axes[0]:
+            if event.inaxes is spec_ax:
                 self._shared_drag_mode='energy'; self._shared_drag_start=(float(event.xdata),float(event.ydata))
-            elif len(axes)>1 and event.inaxes is axes[1]:
+            elif event.inaxes is img_ax:
                 self._shared_drag_mode='roi'; self._shared_drag_start=(float(event.xdata),float(event.ydata))
             else:
                 self._shared_drag_mode=None; self._shared_drag_start=None
@@ -5293,8 +5348,6 @@ This does not modify the current rr-NMF/manual tree results.
                 pass
             cols=["index","label","feature_corr","positive_overlap","relative_amp","score_used_for_map"]
             self._fill_table_from_rows(self.table_shared_feature, rows, cols)
-            plot_shared_feature_analysis(self.canvas_shared_feature.fig,result,cmap=self.combo_cmap.currentText() if hasattr(self,"combo_cmap") else "viridis")
-            self.canvas_shared_feature.set_base(); self.canvas_shared_feature.draw()
             self.update_shared_feature_interactive_preview()
             self.append_log("Shared Feature Analysis updated: "+str(result.get('summary',{}).get('reference','')))
         except Exception as e:
@@ -5309,7 +5362,6 @@ This does not modify the current rr-NMF/manual tree results.
         self._shared_feature_map=None
         try:
             self.table_shared_feature.clear(); self.table_shared_feature.setRowCount(0); self.table_shared_feature.setColumnCount(0)
-            self.canvas_shared_feature.clear()
             if hasattr(self,"canvas_shared_interactive"):
                 self.update_shared_feature_interactive_preview()
             self.append_log("Shared Feature Analysis cleared.")
