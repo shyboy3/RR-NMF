@@ -3643,36 +3643,37 @@ class RR2NMFGui(QMainWindow):
         map_ctrl3.addStretch(1)
         mapping_lay.addLayout(map_ctrl3)
 
-        shared_box=QGroupBox("Shared Feature Analysis (interactive ROI/window)")
+        shared_box=QGroupBox("Shared Feature Analysis (feature-window cross-correlation)")
         shared_lay=QGridLayout(shared_box)
         self.chk_shared_enable=QCheckBox("Enable")
         shared_lay.addWidget(self.chk_shared_enable,0,0)
-        shared_lay.addWidget(QLabel("Reference mode"),0,1)
-        self.combo_shared_ref_mode=QComboBox(); self.combo_shared_ref_mode.addItems(["Manual ROI", "Component top-percent ROI"])
-        shared_lay.addWidget(self.combo_shared_ref_mode,0,2)
-        shared_lay.addWidget(QLabel("Ref component idx"),0,3)
-        self.edit_shared_ref_idx=QLineEdit(""); self.edit_shared_ref_idx.setPlaceholderText("e.g. 0 or 0,2,4")
-        self.edit_shared_ref_idx.setMaximumWidth(180)
-        shared_lay.addWidget(self.edit_shared_ref_idx,0,4)
-        self.lbl_shared_process_hint=QLabel("Analysis targets are selected independently below. Mapping component/spectrum lists remain for visualization only.")
+        shared_lay.addWidget(QLabel("Mode"),0,1)
+        self.combo_shared_mode=QComboBox(); self.combo_shared_mode.addItems(["Spectrum → energy window", "W image → spatial ROI"])
+        self.combo_shared_mode.currentIndexChanged.connect(lambda *_: self.update_shared_feature_interactive_preview())
+        shared_lay.addWidget(self.combo_shared_mode,0,2)
+        shared_lay.addWidget(QLabel("Spectrum display"),0,3)
+        self.combo_shared_spec_display=QComboBox(); self.combo_shared_spec_display.addItems(["raw", "normalized 0-1"])
+        self.combo_shared_spec_display.currentIndexChanged.connect(lambda *_: self.update_shared_feature_interactive_preview())
+        shared_lay.addWidget(self.combo_shared_spec_display,0,4)
+        self.lbl_shared_process_hint=QLabel("Select Shared Feature Analysis targets below. The main mapping component/spectrum selections remain unchanged.")
         self.lbl_shared_process_hint.setWordWrap(True)
-        shared_lay.addWidget(self.lbl_shared_process_hint,2,0,1,9)
-        shared_lay.addWidget(QLabel("Top %"),0,5)
-        self.spin_shared_top_percent=QDoubleSpinBox(); self.spin_shared_top_percent.setRange(0.1,100.0); self.spin_shared_top_percent.setDecimals(1); self.spin_shared_top_percent.setValue(10.0); self.spin_shared_top_percent.setMaximumWidth(80)
-        shared_lay.addWidget(self.spin_shared_top_percent,0,6)
-        self.lbl_shared_window=QLabel("Energy window: drag on H spectra panel")
-        shared_lay.addWidget(self.lbl_shared_window,1,1,1,3)
-        self.lbl_shared_roi=QLabel("ROI: drag on feature-energy map")
-        shared_lay.addWidget(self.lbl_shared_roi,1,4,1,3)
-        self.btn_shared_update=QPushButton("Update H/energy-map preview")
+        shared_lay.addWidget(self.lbl_shared_process_hint,1,0,1,6)
+        self.lbl_shared_window=QLabel("Energy window: drag on selected spectra panel")
+        shared_lay.addWidget(self.lbl_shared_window,2,0,1,3)
+        self.btn_shared_update=QPushButton("Update spectra / W images")
         self.btn_shared_update.clicked.connect(self.update_shared_feature_interactive_preview)
-        shared_lay.addWidget(self.btn_shared_update,0,7)
-        self.btn_run_shared=QPushButton("Run Shared Feature Analysis")
+        shared_lay.addWidget(self.btn_shared_update,0,5)
+        self.btn_run_shared=QPushButton("Update window cross-correlation table")
         self.btn_run_shared.clicked.connect(self.run_shared_feature_analysis)
-        shared_lay.addWidget(self.btn_run_shared,1,7)
+        shared_lay.addWidget(self.btn_run_shared,0,6)
         self.btn_clear_shared=QPushButton("Clear")
         self.btn_clear_shared.clicked.connect(self.clear_shared_feature_analysis)
-        shared_lay.addWidget(self.btn_clear_shared,1,8)
+        shared_lay.addWidget(self.btn_clear_shared,0,7)
+        # Backward-compatible hidden controls retained for older settings files.
+        self.combo_shared_ref_mode=QComboBox(); self.combo_shared_ref_mode.addItems(["Manual ROI", "Component top-percent ROI"]); self.combo_shared_ref_mode.hide()
+        self.edit_shared_ref_idx=QLineEdit(""); self.edit_shared_ref_idx.hide()
+        self.spin_shared_top_percent=QDoubleSpinBox(); self.spin_shared_top_percent.setRange(0.1,100.0); self.spin_shared_top_percent.setValue(10.0); self.spin_shared_top_percent.hide()
+        self.lbl_shared_roi=QLabel(""); self.lbl_shared_roi.hide()
         mapping_lay.addWidget(shared_box)
 
         map_lists=QHBoxLayout()
@@ -5205,81 +5206,111 @@ This does not modify the current rr-NMF/manual tree results.
             acc=acc/den
         return acc
 
+    def _shared_minmax01(self, y):
+        y=np.asarray(y,dtype=np.float64)
+        mn=float(np.nanmin(y)) if y.size else 0.0
+        mx=float(np.nanmax(y)) if y.size else 0.0
+        if not np.isfinite(mn) or not np.isfinite(mx) or abs(mx-mn) <= 1e-12:
+            return np.zeros_like(y,dtype=np.float64)
+        return (y-mn)/(mx-mn)
+
     def update_shared_feature_interactive_preview(self):
+        """Feature-window driven shared-feature viewer.
+
+        The dedicated Shared Feature Analysis target list defines the spectra/components
+        to compare.  The spectrum panel can be shown in raw or per-spectrum 0-1 normalized
+        mode.  Dragging an energy window updates the W-image grid for the selected
+        components; the table is a cross-correlation matrix over that selected window.
+        """
         if not hasattr(self,"canvas_shared_interactive"):
             return
         fig=self.canvas_shared_interactive.fig
         fig.clear(); fig.set_size_inches(22,7,forward=True)
         try:
             items, selected = self._shared_selected_indices_and_items()
-            if not items:
-                ax=fig.add_subplot(111); ax.axis('off'); ax.text(0.5,0.5,'No mapping items available.',ha='center',va='center',fontsize=13)
+            if not items or not selected:
+                ax=fig.add_subplot(111); ax.axis('off'); ax.text(0.5,0.5,'No Shared Feature Analysis targets selected or available.',ha='center',va='center',fontsize=13)
                 self.canvas_shared_interactive.draw(); return
             axis=getattr(self,"roi_axis_info",None)
-            e0,e1=self._shared_energy_window()
-            fmap=self._build_shared_feature_energy_map(items, selected, (e0,e1))
-            self._shared_feature_map=fmap
-            gs=fig.add_gridspec(1,2,width_ratios=[2.2,1.0])
+            # Use the first selected spectrum to define the energy axis and window mask.
+            first=np.asarray(items[selected[0]].get('spectrum'),dtype=np.float64).reshape(-1)
+            L=len(first)
+            e0,e1=self._shared_energy_window(L)
+            x,win=_energy_window_indices(axis,L,e0,e1)
+            self._shared_feature_map=None
+            gs=fig.add_gridspec(1,2,width_ratios=[2.25,1.35],wspace=0.22)
             axsp=fig.add_subplot(gs[0,0])
-            axim=fig.add_subplot(gs[0,1])
             self._shared_spectrum_ax=axsp
-            self._shared_image_ax=axim
+            self._shared_image_ax=None
+            display_mode=self.combo_shared_spec_display.currentText() if hasattr(self,"combo_shared_spec_display") else "raw"
             for rank,idx in enumerate(selected):
                 it=items[idx]
                 sp=np.asarray(it.get('spectrum'),dtype=np.float64).reshape(-1)
-                x=axis.energy_axis if axis is not None and len(axis.energy_axis)==len(sp) else np.arange(len(sp))
-                lab=f"{idx}: {it.get('label',f'C{idx}') }"
-                axsp.plot(x,sp,lw=1.1,label=lab)
-            axsp.axvspan(e0,e1,alpha=0.18,color='orange',label='Selected feature window')
-            axsp.set_title('Selected H/loading spectra — drag horizontally to choose feature energy window',fontsize=13)
+                xx=axis.energy_axis if axis is not None and len(axis.energy_axis)==len(sp) else np.arange(len(sp))
+                yy=self._shared_minmax01(sp) if display_mode.startswith('normalized') else sp
+                lab=f"{rank}: {it.get('label',f'C{idx}')}"
+                axsp.plot(xx,yy,lw=1.3,label=lab)
+            if np.any(win):
+                xx=np.asarray(x)[win]
+                axsp.axvspan(float(np.nanmin(xx)),float(np.nanmax(xx)),alpha=0.18,color='orange',label='Selected energy window')
+            axsp.set_title('Selected spectra for feature-window comparison — drag horizontally to choose energy range',fontsize=13)
             axsp.set_xlabel(axis.energy_label if axis is not None else 'Channel')
+            axsp.set_ylabel('Intensity (raw)' if display_mode=='raw' else 'Intensity (0-1 per spectrum)')
             axsp.grid(True,alpha=0.25)
-            if len(selected)<=14: axsp.legend(fontsize=9,loc='best')
-            if fmap is not None:
-                im=axim.imshow(fmap,cmap=self.combo_cmap.currentText() if hasattr(self,'combo_cmap') else 'viridis',origin='upper')
-                axim.set_title('Feature-energy image — drag ROI here',fontsize=13)
-                add_colorbar(fig,axim,im)
-                roi=getattr(self,"_shared_feature_roi",None)
-                if roi is not None:
-                    x0,x1,y0,y1=roi
-                    axim.add_patch(Rectangle((x0,y0),max(1,x1-x0),max(1,y1-y0),fill=False,edgecolor='red',lw=2.0))
-            else:
-                axim.axis('off'); axim.text(0.5,0.5,'No feature image',ha='center',va='center')
-            axim.set_xticks([]); axim.set_yticks([])
+            if len(selected)<=18: axsp.legend(fontsize=9,loc='best')
+
+            # Right side: W/component images corresponding to the selected feature window.
+            n=len(selected)
+            ncols=max(1,min(3,int(np.ceil(np.sqrt(max(1,n))))))
+            nrows=int(np.ceil(n/ncols))
+            sub=gs[0,1].subgridspec(nrows,ncols,wspace=0.18,hspace=0.32)
+            cmap=self.combo_cmap.currentText() if hasattr(self,'combo_cmap') else 'viridis'
+            for r,idx in enumerate(selected):
+                ax=fig.add_subplot(sub[r//ncols,r%ncols])
+                it=items[idx]
+                img=np.asarray(it.get('image'),dtype=np.float64)
+                sp=np.asarray(it.get('spectrum'),dtype=np.float64).reshape(-1)
+                if img.ndim==2:
+                    amp=float(np.nanmean(np.clip(sp[win],0,None))) if np.any(win) else 1.0
+                    if not np.isfinite(amp): amp=0.0
+                    imdata=np.clip(img,0,None)*max(0.0,amp)
+                    if not np.any(np.isfinite(imdata)) or float(np.nanmax(imdata))<=0:
+                        imdata=np.clip(img,0,None)
+                    im=ax.imshow(imdata,cmap=cmap,origin='upper')
+                    ax.set_title(f"{r}: {it.get('label',f'C{idx}')}\nW × window amp",fontsize=10)
+                    ax.set_xticks([]); ax.set_yticks([])
+                else:
+                    ax.axis('off'); ax.text(0.5,0.5,f"{r}: no image",ha='center',va='center')
             if hasattr(self,"lbl_shared_window"):
                 self.lbl_shared_window.setText(f"Energy window: {e0:.4g}–{e1:.4g}")
             if hasattr(self,"lbl_shared_roi"):
-                roi=getattr(self,"_shared_feature_roi",None)
-                self.lbl_shared_roi.setText("ROI: not selected" if roi is None else f"ROI x[{roi[0]}:{roi[1]}] y[{roi[2]}:{roi[3]}]")
+                self.lbl_shared_roi.setText("")
             fig.tight_layout()
             self.canvas_shared_interactive.set_base(); self.canvas_shared_interactive.draw()
+            # Keep the table synchronized with the selected energy range.
+            self.run_shared_feature_analysis(redraw_preview=False)
         except Exception as e:
-            ax=fig.add_subplot(111); ax.axis('off'); ax.text(0.5,0.5,'Shared preview failed: '+str(e),ha='center',va='center')
+            ax=fig.add_subplot(111); ax.axis('off'); ax.text(0.5,0.5,'Shared feature-window preview failed: '+str(e),ha='center',va='center')
             try: self.canvas_shared_interactive.draw()
             except Exception: pass
 
     def on_shared_interactive_motion(self, event):
-        """Show a crosshair cursor when the mouse is over selectable shared-feature axes."""
         try:
             spec_ax=getattr(self,"_shared_spectrum_ax",None)
-            img_ax=getattr(self,"_shared_image_ax",None)
-            if event.inaxes is spec_ax or event.inaxes is img_ax:
-                self.canvas_shared_interactive.setCursor(Qt.CrossCursor)
+            if event.inaxes is spec_ax:
+                self.canvas_shared_interactive.setCursor(Qt.SizeHorCursor)
             else:
                 self.canvas_shared_interactive.setCursor(Qt.ArrowCursor)
         except Exception:
             pass
 
     def on_shared_interactive_press(self, event):
-        if event.inaxes is None or event.xdata is None or event.ydata is None:
+        if event.inaxes is None or event.xdata is None:
             return
         spec_ax=getattr(self,"_shared_spectrum_ax",None)
-        img_ax=getattr(self,"_shared_image_ax",None)
         try:
             if event.inaxes is spec_ax:
-                self._shared_drag_mode='energy'; self._shared_drag_start=(float(event.xdata),float(event.ydata))
-            elif event.inaxes is img_ax:
-                self._shared_drag_mode='roi'; self._shared_drag_start=(float(event.xdata),float(event.ydata))
+                self._shared_drag_mode='energy'; self._shared_drag_start=(float(event.xdata),0.0)
             else:
                 self._shared_drag_mode=None; self._shared_drag_start=None
         except Exception:
@@ -5288,71 +5319,64 @@ This does not modify the current rr-NMF/manual tree results.
     def on_shared_interactive_release(self, event):
         mode=getattr(self,"_shared_drag_mode",None); start=getattr(self,"_shared_drag_start",None)
         self._shared_drag_mode=None; self._shared_drag_start=None
-        if mode is None or start is None or event.xdata is None or event.ydata is None:
+        if mode != 'energy' or start is None or event.xdata is None:
             return
         try:
-            if mode == 'energy':
-                x0=float(start[0]); x1=float(event.xdata)
-                if abs(x1-x0) > 1e-12:
-                    self._shared_feature_range=(min(x0,x1),max(x0,x1))
-            elif mode == 'roi':
-                fmap=getattr(self,"_shared_feature_map",None)
-                if fmap is None:
-                    return
-                h,w=fmap.shape[:2]
-                x0=int(round(min(start[0],event.xdata))); x1=int(round(max(start[0],event.xdata)))
-                y0=int(round(min(start[1],event.ydata))); y1=int(round(max(start[1],event.ydata)))
-                x0=max(0,min(w-1,x0)); x1=max(0,min(w,x1+1))
-                y0=max(0,min(h-1,y0)); y1=max(0,min(h,y1+1))
-                if x1<=x0: x1=min(w,x0+1)
-                if y1<=y0: y1=min(h,y0+1)
-                self._shared_feature_roi=(x0,x1,y0,y1)
-                # ROI selection is the natural trigger for analysis.
-                self.run_shared_feature_analysis()
+            x0=float(start[0]); x1=float(event.xdata)
+            if abs(x1-x0) > 1e-12:
+                self._shared_feature_range=(min(x0,x1),max(x0,x1))
+                self.update_shared_feature_interactive_preview()
         except Exception as e:
-            try: self.append_log('Shared interactive selection failed: '+str(e))
+            try: self.append_log('Shared energy-window selection failed: '+str(e))
             except Exception: pass
-        self.update_shared_feature_interactive_preview()
 
-    def run_shared_feature_analysis(self):
+    def run_shared_feature_analysis(self, redraw_preview=True):
+        """Fill the result table with cross-correlation among selected spectra in the selected energy window."""
         if not hasattr(self,"table_shared_feature"):
             return
         try:
-            items=self._full_mapping_items()
-            n=len(items)
-            ref_idx=_parse_index_list_text(self.edit_shared_ref_idx.text() if hasattr(self,"edit_shared_ref_idx") else "", n)
-            roi=getattr(self,"_shared_feature_roi",None)
-            if roi is None:
-                # Default to full field if user has not dragged an ROI yet.
-                if items:
-                    arr=np.asarray(items[0].get('image'))
-                    h,w=arr.shape[:2]
-                    roi=(0,w,0,h)
-                else:
-                    roi=(0,1,0,1)
-            result=compute_shared_feature_analysis(
-                items,
-                self.roi_axis_info,
-                self.combo_shared_ref_mode.currentText() if hasattr(self,"combo_shared_ref_mode") else "Manual ROI",
-                ref_indices=ref_idx,
-                roi=roi,
-                top_percent=float(self.spin_shared_top_percent.value()) if hasattr(self,"spin_shared_top_percent") else 10.0,
-                feature_range=self._shared_energy_window(),
-            )
-            self._shared_feature_result=result
-            rows=result.get("rows",[]) or []
-            # Sort for visibility: strongest shared-feature score first.
-            try:
-                rows=sorted(rows,key=lambda r: float(r.get('score_used_for_map',0.0)), reverse=True)
-            except Exception:
-                pass
-            cols=["index","label","feature_corr","positive_overlap","relative_amp","score_used_for_map"]
-            self._fill_table_from_rows(self.table_shared_feature, rows, cols)
-            self.update_shared_feature_interactive_preview()
-            self.append_log("Shared Feature Analysis updated: "+str(result.get('summary',{}).get('reference','')))
+            items, selected = self._shared_selected_indices_and_items()
+            if not items or not selected:
+                self.table_shared_feature.clear(); self.table_shared_feature.setRowCount(0); self.table_shared_feature.setColumnCount(0)
+                return
+            axis=getattr(self,"roi_axis_info",None)
+            first=np.asarray(items[selected[0]].get('spectrum'),dtype=np.float64).reshape(-1)
+            L=len(first)
+            e0,e1=self._shared_energy_window(L)
+            _,win=_energy_window_indices(axis,L,e0,e1)
+            labels=[]; spectra=[]
+            for rank,idx in enumerate(selected):
+                it=items[idx]
+                sp=np.asarray(it.get('spectrum'),dtype=np.float64).reshape(-1)
+                if len(sp)!=L:
+                    continue
+                labels.append(f"{rank}: {it.get('label',f'C{idx}')}")
+                spectra.append(sp[win])
+            n=len(spectra)
+            self.table_shared_feature.clear()
+            self.table_shared_feature.setRowCount(n)
+            self.table_shared_feature.setColumnCount(n)
+            self.table_shared_feature.setHorizontalHeaderLabels(labels)
+            self.table_shared_feature.setVerticalHeaderLabels(labels)
+            for i in range(n):
+                for j in range(n):
+                    if i==j:
+                        val=1.0
+                    else:
+                        val=_safe_corr_1d(spectra[i],spectra[j]) if len(spectra[i])>=2 and len(spectra[j])>=2 else np.nan
+                    txt="" if not np.isfinite(val) else f"{val:.4f}"
+                    self.table_shared_feature.setItem(i,j,QTableWidgetItem(txt))
+            self.table_shared_feature.resizeColumnsToContents()
+            self.table_shared_feature.resizeRowsToContents()
+            self._shared_feature_result={
+                'summary':{'mode':'feature-window cross-correlation','feature_start':float(e0),'feature_end':float(e1),'n_spectra':n},
+                'labels':labels,
+            }
+            if redraw_preview:
+                self.update_shared_feature_interactive_preview()
         except Exception as e:
             QMessageBox.warning(self,"Shared Feature Analysis",str(e))
-            try: self.append_log("Shared feature analysis failed: "+str(e))
+            try: self.append_log("Feature-window cross-correlation failed: "+str(e))
             except Exception: pass
 
     def clear_shared_feature_analysis(self):
@@ -5364,7 +5388,7 @@ This does not modify the current rr-NMF/manual tree results.
             self.table_shared_feature.clear(); self.table_shared_feature.setRowCount(0); self.table_shared_feature.setColumnCount(0)
             if hasattr(self,"canvas_shared_interactive"):
                 self.update_shared_feature_interactive_preview()
-            self.append_log("Shared Feature Analysis cleared.")
+            self.append_log("Shared feature-window analysis cleared.")
         except Exception:
             pass
 
@@ -6684,6 +6708,277 @@ This does not modify the current rr-NMF/manual tree results.
         if self.eds_hits: pd.DataFrame(self.eds_hits).to_csv(os.path.join(out,"eds_line_matches.csv"),index=False)
         if self.eels_hits: pd.DataFrame(self.eels_hits).to_csv(os.path.join(out,"eels_edge_matches.csv"),index=False)
         self.append_log(f"CSV exported to {out}")
+
+
+    # ------------------------------------------------------------------
+    # Shared Feature Analysis v11.0 override
+    # Two complementary modes:
+    #   1) Spectrum -> energy window -> W-window maps + spectral window corr.
+    #   2) W image -> spatial ROI -> ROI-weighted spectra + spectral corr.
+    # These definitions intentionally appear late in the class to override the
+    # earlier v10.9 implementations without disturbing the rest of the GUI.
+    # ------------------------------------------------------------------
+    def _shared_mode_is_spatial(self):
+        try:
+            return self.combo_shared_mode.currentText().startswith("W image")
+        except Exception:
+            return False
+
+    def _shared_current_roi(self, image_shape):
+        h, w = int(image_shape[0]), int(image_shape[1])
+        roi = getattr(self, "_shared_spatial_roi", None)
+        if roi is None:
+            return (0, h, 0, w)
+        y0, y1, x0, x1 = [int(v) for v in roi]
+        y0=max(0,min(y0,h-1)); y1=max(y0+1,min(y1,h))
+        x0=max(0,min(x0,w-1)); x1=max(x0+1,min(x1,w))
+        return (y0,y1,x0,x1)
+
+    def _shared_roi_weighted_spectra(self, items, selected):
+        """Return labels and spectra from selected W images over the selected spatial ROI.
+
+        If roi_cube is available and matches W-image shape, the returned spectrum is the
+        actual ROI weighted raw spectrum using W as spatial weights. Otherwise the code
+        falls back to the model contribution spectrum mean(W_ROI)*H.
+        """
+        labels=[]; spectra=[]
+        if not items or not selected:
+            return labels, spectra
+        # infer image shape from first valid image
+        img0=None
+        for idx in selected:
+            im=np.asarray(items[idx].get('image'), dtype=np.float64)
+            if im.ndim==2:
+                img0=im; break
+        if img0 is None:
+            return labels, spectra
+        y0,y1,x0,x1=self._shared_current_roi(img0.shape)
+        cube=getattr(self, 'roi_cube', None)
+        use_raw = cube is not None and getattr(cube, 'ndim', 0)==3 and cube.shape[:2]==img0.shape
+        for rank,idx in enumerate(selected):
+            it=items[idx]
+            im=np.asarray(it.get('image'), dtype=np.float64)
+            sp=np.asarray(it.get('spectrum'), dtype=np.float64).reshape(-1)
+            if im.ndim!=2 or sp.size==0:
+                continue
+            lab=f"{rank}: {it.get('label',f'C{idx}')}"
+            wroi=np.nan_to_num(im[y0:y1, x0:x1], nan=0.0, posinf=0.0, neginf=0.0)
+            wroi=np.clip(wroi, 0, None)
+            denom=float(np.nansum(wroi))
+            out=None
+            if use_raw:
+                sub=np.asarray(cube[y0:y1, x0:x1, :], dtype=np.float64)
+                if denom>1e-12:
+                    out=np.tensordot(wroi, sub, axes=([0,1],[0,1]))/(denom+1e-12)
+                else:
+                    out=np.nanmean(sub.reshape(-1, sub.shape[-1]), axis=0)
+            if out is None:
+                # fallback: component contribution within ROI; keeps amplitude information.
+                amp=float(np.nanmean(wroi)) if wroi.size else 0.0
+                out=sp*amp
+            labels.append(lab); spectra.append(np.asarray(out, dtype=np.float64).reshape(-1))
+        return labels, spectra
+
+    def update_shared_feature_interactive_preview(self):
+        if not hasattr(self,"canvas_shared_interactive"):
+            return
+        fig=self.canvas_shared_interactive.fig
+        fig.clear(); fig.set_size_inches(22,7,forward=True)
+        try:
+            items, selected = self._shared_selected_indices_and_items()
+            if not items or not selected:
+                ax=fig.add_subplot(111); ax.axis('off'); ax.text(0.5,0.5,'No Shared Feature Analysis targets selected or available.',ha='center',va='center',fontsize=13)
+                self.canvas_shared_interactive.draw(); return
+            axis=getattr(self,"roi_axis_info",None)
+            display_mode=self.combo_shared_spec_display.currentText() if hasattr(self,"combo_shared_spec_display") else "raw"
+            self._shared_spectrum_ax=None
+            self._shared_image_axes=[]
+
+            if self._shared_mode_is_spatial():
+                # Spatial ROI mode: left W images, right ROI-weighted spectra.
+                gs=fig.add_gridspec(1,2,width_ratios=[1.25,2.15],wspace=0.24)
+                n=len(selected)
+                ncols=max(1,min(3,int(np.ceil(np.sqrt(max(1,n))))))
+                nrows=int(np.ceil(n/ncols))
+                sub=gs[0,0].subgridspec(nrows,ncols,wspace=0.18,hspace=0.32)
+                cmap=self.combo_cmap.currentText() if hasattr(self,'combo_cmap') else 'viridis'
+                first_img=None
+                for idx in selected:
+                    im=np.asarray(items[idx].get('image'),dtype=np.float64)
+                    if im.ndim==2:
+                        first_img=im; break
+                roi=(0,1,0,1) if first_img is None else self._shared_current_roi(first_img.shape)
+                y0,y1,x0,x1=roi
+                import matplotlib.patches as mpatches
+                for rank,idx in enumerate(selected):
+                    ax=fig.add_subplot(sub[rank//ncols,rank%ncols])
+                    self._shared_image_axes.append(ax)
+                    it=items[idx]
+                    im=np.asarray(it.get('image'),dtype=np.float64)
+                    if im.ndim==2:
+                        ax.imshow(im,cmap=cmap,origin='upper')
+                        ax.add_patch(mpatches.Rectangle((x0,y0),x1-x0,y1-y0,fill=False,edgecolor='red',linewidth=1.8))
+                        ax.set_title(f"{rank}: {it.get('label',f'C{idx}')}",fontsize=10)
+                        ax.set_xticks([]); ax.set_yticks([])
+                    else:
+                        ax.axis('off'); ax.text(0.5,0.5,f"{rank}: no image",ha='center',va='center')
+                axsp=fig.add_subplot(gs[0,1])
+                labels,spectra=self._shared_roi_weighted_spectra(items, selected)
+                L=max([len(s) for s in spectra], default=0)
+                for lab,sp in zip(labels,spectra):
+                    xx=axis.energy_axis if axis is not None and len(axis.energy_axis)==len(sp) else np.arange(len(sp))
+                    yy=self._shared_minmax01(sp) if display_mode.startswith('normalized') else sp
+                    axsp.plot(xx,yy,lw=1.3,label=lab)
+                axsp.set_title(f'ROI-weighted spectra from selected W images — drag on W image to choose ROI x[{x0}:{x1}] y[{y0}:{y1}]',fontsize=13)
+                axsp.set_xlabel(axis.energy_label if axis is not None else 'Channel')
+                axsp.set_ylabel('Intensity (raw)' if display_mode=='raw' else 'Intensity (0-1 per spectrum)')
+                axsp.grid(True,alpha=0.25)
+                if len(labels)<=18: axsp.legend(fontsize=9,loc='best')
+                if hasattr(self,"lbl_shared_window"):
+                    self.lbl_shared_window.setText(f"Spatial ROI mode: x[{x0}:{x1}], y[{y0}:{y1}] | table = ROI-spectrum cross-correlation")
+                fig.tight_layout(); self.canvas_shared_interactive.set_base(); self.canvas_shared_interactive.draw()
+                self.run_shared_feature_analysis(redraw_preview=False)
+                return
+
+            # Spectrum energy-window mode: original v10.9 behavior.
+            first=np.asarray(items[selected[0]].get('spectrum'),dtype=np.float64).reshape(-1)
+            L=len(first)
+            e0,e1=self._shared_energy_window(L)
+            x,win=_energy_window_indices(axis,L,e0,e1)
+            gs=fig.add_gridspec(1,2,width_ratios=[2.25,1.35],wspace=0.22)
+            axsp=fig.add_subplot(gs[0,0])
+            self._shared_spectrum_ax=axsp
+            for rank,idx in enumerate(selected):
+                it=items[idx]
+                sp=np.asarray(it.get('spectrum'),dtype=np.float64).reshape(-1)
+                xx=axis.energy_axis if axis is not None and len(axis.energy_axis)==len(sp) else np.arange(len(sp))
+                yy=self._shared_minmax01(sp) if display_mode.startswith('normalized') else sp
+                lab=f"{rank}: {it.get('label',f'C{idx}')}"
+                axsp.plot(xx,yy,lw=1.3,label=lab)
+            if np.any(win):
+                xx=np.asarray(x)[win]
+                axsp.axvspan(float(np.nanmin(xx)),float(np.nanmax(xx)),alpha=0.18,color='orange',label='Selected energy window')
+            axsp.set_title('Selected spectra for feature-window comparison — drag horizontally to choose energy range',fontsize=13)
+            axsp.set_xlabel(axis.energy_label if axis is not None else 'Channel')
+            axsp.set_ylabel('Intensity (raw)' if display_mode=='raw' else 'Intensity (0-1 per spectrum)')
+            axsp.grid(True,alpha=0.25)
+            if len(selected)<=18: axsp.legend(fontsize=9,loc='best')
+            n=len(selected)
+            ncols=max(1,min(3,int(np.ceil(np.sqrt(max(1,n))))))
+            nrows=int(np.ceil(n/ncols))
+            sub=gs[0,1].subgridspec(nrows,ncols,wspace=0.18,hspace=0.32)
+            cmap=self.combo_cmap.currentText() if hasattr(self,'combo_cmap') else 'viridis'
+            for r,idx in enumerate(selected):
+                ax=fig.add_subplot(sub[r//ncols,r%ncols])
+                it=items[idx]
+                img=np.asarray(it.get('image'),dtype=np.float64)
+                sp=np.asarray(it.get('spectrum'),dtype=np.float64).reshape(-1)
+                if img.ndim==2:
+                    amp=float(np.nanmean(np.clip(sp[win],0,None))) if np.any(win) else 1.0
+                    if not np.isfinite(amp): amp=0.0
+                    imdata=np.clip(img,0,None)*max(0.0,amp)
+                    if not np.any(np.isfinite(imdata)) or float(np.nanmax(imdata))<=0:
+                        imdata=np.clip(img,0,None)
+                    ax.imshow(imdata,cmap=cmap,origin='upper')
+                    ax.set_title(f"{r}: {it.get('label',f'C{idx}')}",fontsize=10)
+                    ax.set_xticks([]); ax.set_yticks([])
+                else:
+                    ax.axis('off'); ax.text(0.5,0.5,f"{r}: no image",ha='center',va='center')
+            if hasattr(self,"lbl_shared_window"):
+                self.lbl_shared_window.setText(f"Energy-window mode: {e0:.4g}–{e1:.4g} | table = window cross-correlation")
+            fig.tight_layout(); self.canvas_shared_interactive.set_base(); self.canvas_shared_interactive.draw()
+            self.run_shared_feature_analysis(redraw_preview=False)
+        except Exception as e:
+            ax=fig.add_subplot(111); ax.axis('off'); ax.text(0.5,0.5,'Shared feature preview failed: '+str(e),ha='center',va='center')
+            try: self.canvas_shared_interactive.draw()
+            except Exception: pass
+
+    def on_shared_interactive_motion(self, event):
+        try:
+            if event.inaxes is getattr(self,"_shared_spectrum_ax",None):
+                self.canvas_shared_interactive.setCursor(Qt.SizeHorCursor)
+            elif event.inaxes in (getattr(self,"_shared_image_axes",[]) or []):
+                self.canvas_shared_interactive.setCursor(Qt.CrossCursor)
+            else:
+                self.canvas_shared_interactive.setCursor(Qt.ArrowCursor)
+        except Exception:
+            pass
+
+    def on_shared_interactive_press(self, event):
+        if event.inaxes is None or event.xdata is None:
+            return
+        try:
+            if event.inaxes is getattr(self,"_shared_spectrum_ax",None):
+                self._shared_drag_mode='energy'; self._shared_drag_start=(float(event.xdata),0.0)
+            elif event.inaxes in (getattr(self,"_shared_image_axes",[]) or []):
+                self._shared_drag_mode='spatial'; self._shared_drag_start=(float(event.xdata),float(event.ydata))
+            else:
+                self._shared_drag_mode=None; self._shared_drag_start=None
+        except Exception:
+            self._shared_drag_mode=None; self._shared_drag_start=None
+
+    def on_shared_interactive_release(self, event):
+        mode=getattr(self,"_shared_drag_mode",None); start=getattr(self,"_shared_drag_start",None)
+        self._shared_drag_mode=None; self._shared_drag_start=None
+        if start is None or event.xdata is None:
+            return
+        try:
+            if mode == 'energy':
+                x0=float(start[0]); x1=float(event.xdata)
+                if abs(x1-x0)>1e-12:
+                    self._shared_feature_range=(min(x0,x1),max(x0,x1))
+                    self.update_shared_feature_interactive_preview()
+            elif mode == 'spatial' and event.ydata is not None:
+                x0,x1=float(start[0]),float(event.xdata)
+                y0,y1=float(start[1]),float(event.ydata)
+                if abs(x1-x0)>=1 or abs(y1-y0)>=1:
+                    self._shared_spatial_roi=(int(np.floor(min(y0,y1))), int(np.ceil(max(y0,y1)))+1, int(np.floor(min(x0,x1))), int(np.ceil(max(x0,x1)))+1)
+                    self.update_shared_feature_interactive_preview()
+        except Exception as e:
+            try: self.append_log('Shared selection failed: '+str(e))
+            except Exception: pass
+
+    def run_shared_feature_analysis(self, redraw_preview=True):
+        if not hasattr(self,"table_shared_feature"):
+            return
+        try:
+            items, selected = self._shared_selected_indices_and_items()
+            if not items or not selected:
+                self.table_shared_feature.clear(); self.table_shared_feature.setRowCount(0); self.table_shared_feature.setColumnCount(0); return
+            if self._shared_mode_is_spatial():
+                labels,spectra=self._shared_roi_weighted_spectra(items, selected)
+                mode_label='spatial ROI spectrum cross-correlation'
+                e0=e1=np.nan
+            else:
+                axis=getattr(self,"roi_axis_info",None)
+                first=np.asarray(items[selected[0]].get('spectrum'),dtype=np.float64).reshape(-1)
+                L=len(first); e0,e1=self._shared_energy_window(L)
+                _,win=_energy_window_indices(axis,L,e0,e1)
+                labels=[]; spectra=[]
+                for rank,idx in enumerate(selected):
+                    it=items[idx]
+                    sp=np.asarray(it.get('spectrum'),dtype=np.float64).reshape(-1)
+                    if len(sp)!=L: continue
+                    labels.append(f"{rank}: {it.get('label',f'C{idx}')}")
+                    spectra.append(sp[win])
+                mode_label='energy-window cross-correlation'
+            n=len(spectra)
+            self.table_shared_feature.clear(); self.table_shared_feature.setRowCount(n); self.table_shared_feature.setColumnCount(n)
+            self.table_shared_feature.setHorizontalHeaderLabels(labels); self.table_shared_feature.setVerticalHeaderLabels(labels)
+            for i in range(n):
+                for j in range(n):
+                    if i==j: val=1.0
+                    else: val=_safe_corr_1d(spectra[i], spectra[j]) if len(spectra[i])>=2 and len(spectra[j])>=2 else np.nan
+                    self.table_shared_feature.setItem(i,j,QTableWidgetItem("" if not np.isfinite(val) else f"{val:.4f}"))
+            self.table_shared_feature.resizeColumnsToContents(); self.table_shared_feature.resizeRowsToContents()
+            self._shared_feature_result={'summary':{'mode':mode_label,'feature_start':float(e0) if np.isfinite(e0) else None,'feature_end':float(e1) if np.isfinite(e1) else None,'n_spectra':n},'labels':labels}
+            if redraw_preview:
+                self.update_shared_feature_interactive_preview()
+        except Exception as e:
+            QMessageBox.warning(self,"Shared Feature Analysis",str(e))
+            try: self.append_log("Shared feature analysis failed: "+str(e))
+            except Exception: pass
+
 
 
 def main():
