@@ -6734,27 +6734,45 @@ This does not modify the current rr-NMF/manual tree results.
         x0=max(0,min(x0,w-1)); x1=max(x0+1,min(x1,w))
         return (y0,y1,x0,x1)
 
-    def _shared_roi_weighted_spectra(self, items, selected):
-        """Return labels and spectra from selected W images over the selected spatial ROI.
+    def _shared_roi_contribution_spectra(self, items, selected):
+        """Return ROI component-contribution spectra from selected W/H pairs.
 
-        If roi_cube is available and matches W-image shape, the returned spectrum is the
-        actual ROI weighted raw spectrum using W as spatial weights. Otherwise the code
-        falls back to the model contribution spectrum mean(W_ROI)*H.
+        This replaces the older W-weighted raw spectrum mode.  For a spatial ROI,
+        each selected component contributes according to its W-map strength in the ROI:
+
+            a_i = mean(max(W_i[ROI], 0))
+            S_i(E) = a_i * H_i(E)
+
+        The table therefore compares the selected components' own H-basis spectra,
+        scaled by their contribution in the selected spatial ROI.  This avoids the
+        raw-spectrum mixing problem where all components see nearly the same
+        ROI-averaged experimental spectrum.
         """
-        labels=[]; spectra=[]
+        labels=[]; spectra=[]; contrib_rows=[]
         if not items or not selected:
-            return labels, spectra
-        # infer image shape from first valid image
+            return labels, spectra, contrib_rows
+
         img0=None
         for idx in selected:
             im=np.asarray(items[idx].get('image'), dtype=np.float64)
             if im.ndim==2:
                 img0=im; break
         if img0 is None:
-            return labels, spectra
+            return labels, spectra, contrib_rows
+
         y0,y1,x0,x1=self._shared_current_roi(img0.shape)
-        cube=getattr(self, 'roi_cube', None)
-        use_raw = cube is not None and getattr(cube, 'ndim', 0)==3 and cube.shape[:2]==img0.shape
+        raw_amp=[]
+        for idx in selected:
+            it=items[idx]
+            im=np.asarray(it.get('image'), dtype=np.float64)
+            if im.ndim!=2:
+                raw_amp.append(0.0); continue
+            wroi=np.nan_to_num(im[y0:y1, x0:x1], nan=0.0, posinf=0.0, neginf=0.0)
+            wroi=np.clip(wroi, 0, None)
+            # Integrated contribution is useful for ranking; mean is less ROI-size dependent.
+            raw_amp.append(float(np.nansum(wroi)))
+        total_amp=float(np.nansum(raw_amp))
+
         for rank,idx in enumerate(selected):
             it=items[idx]
             im=np.asarray(it.get('image'), dtype=np.float64)
@@ -6764,19 +6782,24 @@ This does not modify the current rr-NMF/manual tree results.
             lab=f"{rank}: {it.get('label',f'C{idx}')}"
             wroi=np.nan_to_num(im[y0:y1, x0:x1], nan=0.0, posinf=0.0, neginf=0.0)
             wroi=np.clip(wroi, 0, None)
-            denom=float(np.nansum(wroi))
-            out=None
-            if use_raw:
-                sub=np.asarray(cube[y0:y1, x0:x1, :], dtype=np.float64)
-                if denom>1e-12:
-                    out=np.tensordot(wroi, sub, axes=([0,1],[0,1]))/(denom+1e-12)
-                else:
-                    out=np.nanmean(sub.reshape(-1, sub.shape[-1]), axis=0)
-            if out is None:
-                # fallback: component contribution within ROI; keeps amplitude information.
-                amp=float(np.nanmean(wroi)) if wroi.size else 0.0
-                out=sp*amp
-            labels.append(lab); spectra.append(np.asarray(out, dtype=np.float64).reshape(-1))
+            amp_sum=float(np.nansum(wroi))
+            amp_mean=float(np.nanmean(wroi)) if wroi.size else 0.0
+            frac=amp_sum/(total_amp+1e-12) if total_amp>0 else 0.0
+            # ROI contribution spectrum: component H basis scaled by ROI mean W.
+            out=sp*amp_mean
+            labels.append(lab)
+            spectra.append(np.asarray(out, dtype=np.float64).reshape(-1))
+            contrib_rows.append({
+                'label': lab,
+                'roi_sum_W': amp_sum,
+                'roi_mean_W': amp_mean,
+                'roi_fraction': frac,
+            })
+        return labels, spectra, contrib_rows
+
+    # Backward-compatible alias for any older calls.
+    def _shared_roi_weighted_spectra(self, items, selected):
+        labels, spectra, _rows = self._shared_roi_contribution_spectra(items, selected)
         return labels, spectra
 
     def update_shared_feature_interactive_preview(self):
@@ -6823,19 +6846,19 @@ This does not modify the current rr-NMF/manual tree results.
                     else:
                         ax.axis('off'); ax.text(0.5,0.5,f"{rank}: no image",ha='center',va='center')
                 axsp=fig.add_subplot(gs[0,1])
-                labels,spectra=self._shared_roi_weighted_spectra(items, selected)
+                labels,spectra,contrib_rows=self._shared_roi_contribution_spectra(items, selected)
                 L=max([len(s) for s in spectra], default=0)
                 for lab,sp in zip(labels,spectra):
                     xx=axis.energy_axis if axis is not None and len(axis.energy_axis)==len(sp) else np.arange(len(sp))
                     yy=self._shared_minmax01(sp) if display_mode.startswith('normalized') else sp
                     axsp.plot(xx,yy,lw=1.3,label=lab)
-                axsp.set_title(f'ROI-weighted spectra from selected W images — drag on W image to choose ROI x[{x0}:{x1}] y[{y0}:{y1}]',fontsize=13)
+                axsp.set_title(f'ROI component-contribution spectra: mean(W_ROI) × H — drag W image to choose ROI x[{x0}:{x1}] y[{y0}:{y1}]',fontsize=13)
                 axsp.set_xlabel(axis.energy_label if axis is not None else 'Channel')
                 axsp.set_ylabel('Intensity (raw)' if display_mode=='raw' else 'Intensity (0-1 per spectrum)')
                 axsp.grid(True,alpha=0.25)
                 if len(labels)<=18: axsp.legend(fontsize=9,loc='best')
                 if hasattr(self,"lbl_shared_window"):
-                    self.lbl_shared_window.setText(f"Spatial ROI mode: x[{x0}:{x1}], y[{y0}:{y1}] | table = ROI-spectrum cross-correlation")
+                    self.lbl_shared_window.setText(f"Spatial ROI mode: x[{x0}:{x1}], y[{y0}:{y1}] | table = H-basis contribution cross-correlation")
                 fig.tight_layout(); self.canvas_shared_interactive.set_base(); self.canvas_shared_interactive.draw()
                 self.run_shared_feature_analysis(redraw_preview=False)
                 return
@@ -6946,8 +6969,11 @@ This does not modify the current rr-NMF/manual tree results.
             if not items or not selected:
                 self.table_shared_feature.clear(); self.table_shared_feature.setRowCount(0); self.table_shared_feature.setColumnCount(0); return
             if self._shared_mode_is_spatial():
-                labels,spectra=self._shared_roi_weighted_spectra(items, selected)
-                mode_label='spatial ROI spectrum cross-correlation'
+                labels,spectra,contrib_rows=self._shared_roi_contribution_spectra(items, selected)
+                # Include ROI contribution fraction in row/column labels for interpretation.
+                if contrib_rows and len(contrib_rows)==len(labels):
+                    labels=[f"{lab} | f={row.get('roi_fraction',0.0):.3f}" for lab,row in zip(labels,contrib_rows)]
+                mode_label='spatial ROI H-contribution cross-correlation'
                 e0=e1=np.nan
             else:
                 axis=getattr(self,"roi_axis_info",None)
