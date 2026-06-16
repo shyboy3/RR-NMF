@@ -6931,6 +6931,392 @@ This does not modify the current rr-NMF/manual tree results.
         return labels, spectra
 
 
+
+# -----------------------------------------------------------------------------
+# Morphology-Chemistry Coupling post-analysis
+# Added as a light-weight extension around the existing Full Mapping Analysis data.
+# It decomposes rr-NMF depth results in two meta spaces:
+#   W-only meta NMF: summarizes "where?" morphology patterns.
+#   H-only meta NMF: summarizes "what?" spectral/chemical patterns.
+# The soft memberships are then linked by P(MH_j | MW_i).
+# -----------------------------------------------------------------------------
+
+def _safe_corrcoef_rows(A: np.ndarray) -> np.ndarray:
+    A = np.asarray(A, dtype=np.float64)
+    if A.ndim != 2 or A.shape[0] == 0:
+        return np.zeros((0, 0), dtype=np.float64)
+    if A.shape[0] == 1:
+        return np.ones((1, 1), dtype=np.float64)
+    C = np.corrcoef(A)
+    return np.nan_to_num(C, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _minmax01(y: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    y = np.asarray(y, dtype=np.float64)
+    mn = float(np.nanmin(y)) if y.size else 0.0
+    mx = float(np.nanmax(y)) if y.size else 0.0
+    return (y - mn) / (mx - mn + eps) if mx > mn else np.zeros_like(y, dtype=np.float64)
+
+
+def _run_meta_nmf_matrix(X: np.ndarray, k: int, stack_mode: str, random_state: int = 0, max_iter: int = 500):
+    """Return meta basis, component membership, and raw NMF objects.
+
+    Input X is arranged as original components x features.
+    stack_mode:
+        component_rows: NMF(X) => memberships per original component are W.
+        feature_rows:   NMF(X.T) => memberships per original component are H.T.
+    """
+    X = np.asarray(X, dtype=np.float64)
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    X = np.clip(X, 0.0, None)
+    n_comp, n_feat = X.shape
+    k_eff = int(max(1, min(int(k), max(1, min(n_comp, n_feat)))))
+    init = 'nndsvda' if k_eff <= min(n_comp, n_feat) else 'random'
+    model = NMF(n_components=k_eff, init=init, solver='mu', max_iter=max_iter, random_state=random_state)
+    if str(stack_mode).startswith('feature'):
+        Wf = model.fit_transform(X.T)      # features x k
+        Hf = model.components_             # k x original_components
+        basis = Wf.T                       # k x features
+        membership = Hf.T                  # original_components x k
+        raw_W, raw_H = Wf, Hf
+    else:
+        Wc = model.fit_transform(X)        # original_components x k
+        Hc = model.components_             # k x features
+        basis = Hc                         # k x features
+        membership = Wc                    # original_components x k
+        raw_W, raw_H = Wc, Hc
+    membership = np.nan_to_num(np.asarray(membership, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+    membership = np.clip(membership, 0.0, None)
+    basis = np.nan_to_num(np.asarray(basis, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+    basis = np.clip(basis, 0.0, None)
+    return {
+        'basis': basis,
+        'membership': membership,
+        'model': model,
+        'raw_W': raw_W,
+        'raw_H': raw_H,
+        'k_eff': k_eff,
+    }
+
+
+def plot_morphochem_coupling(fig, result, axis_info=None, cmap='viridis'):
+    fig.clear()
+    if not result:
+        fig.set_size_inches(12, 6, forward=True)
+        ax = fig.add_subplot(111)
+        ax.axis('off')
+        ax.text(0.5, 0.5, 'Run Morphology-Chemistry Coupling analysis first.', ha='center', va='center', fontsize=13)
+        return
+    w_basis = result.get('w_basis_images', [])
+    h_basis = np.asarray(result.get('h_basis_spectra', []), dtype=np.float64)
+    P = np.asarray(result.get('P_MH_given_MW', []), dtype=np.float64)
+    depth = result.get('depth', '?')
+    nW = len(w_basis)
+    nH = h_basis.shape[0] if h_basis.ndim == 2 else 0
+    cols = max(2, max(nW, nH))
+    fig.set_size_inches(max(18, cols * 3.2), 10.5, forward=True)
+    gs = fig.add_gridspec(3, cols, height_ratios=[1.05, 1.05, 1.0], hspace=0.55, wspace=0.35)
+
+    for i in range(cols):
+        if i < nW:
+            ax = fig.add_subplot(gs[0, i])
+            im = ax.imshow(w_basis[i], cmap=cmap, origin='upper', aspect='equal')
+            ax.set_title(f'MW{i}: spatial meta-basis', fontsize=10)
+            ax.set_xticks([]); ax.set_yticks([])
+            try:
+                add_colorbar(fig, ax, im)
+            except Exception:
+                pass
+        else:
+            ax = fig.add_subplot(gs[0, i]); ax.axis('off')
+
+    x = None
+    if axis_info is not None and hasattr(axis_info, 'energy_axis') and h_basis.ndim == 2 and len(axis_info.energy_axis) == h_basis.shape[1]:
+        x = np.asarray(axis_info.energy_axis)
+    elif h_basis.ndim == 2:
+        x = np.arange(h_basis.shape[1])
+    for j in range(cols):
+        if j < nH:
+            ax = fig.add_subplot(gs[1, j])
+            ax.plot(x, h_basis[j], lw=1.8)
+            ax.set_title(f'MH{j}: spectral meta-basis', fontsize=10)
+            ax.grid(True, alpha=0.25)
+            if axis_info is not None:
+                ax.set_xlabel(getattr(axis_info, 'energy_label', 'Energy'), fontsize=8)
+        else:
+            ax = fig.add_subplot(gs[1, j]); ax.axis('off')
+
+    if P.size:
+        axp = fig.add_subplot(gs[2, :min(cols, max(2, P.shape[1]))])
+        im = axp.imshow(P, vmin=0, vmax=1, cmap='viridis', aspect='auto')
+        axp.set_title(f'Spatial-Chemical Mapping: P(MH_j | MW_i), depth {depth}', fontsize=12)
+        axp.set_xlabel('Spectral meta-state MH_j')
+        axp.set_ylabel('Spatial meta-state MW_i')
+        axp.set_xticks(range(P.shape[1])); axp.set_xticklabels([f'MH{j}' for j in range(P.shape[1])])
+        axp.set_yticks(range(P.shape[0])); axp.set_yticklabels([f'MW{i}' for i in range(P.shape[0])])
+        for i in range(P.shape[0]):
+            for j in range(P.shape[1]):
+                axp.text(j, i, f'{P[i,j]*100:.0f}', ha='center', va='center', color='white' if P[i,j] < 0.45 else 'black', fontsize=9)
+        try:
+            cb = fig.colorbar(im, ax=axp, fraction=0.025, pad=0.02)
+            cb.set_label('Probability')
+        except Exception:
+            pass
+    fig.suptitle('Morphology-Chemistry Coupling: W-only meta NMF ↔ H-only meta NMF', fontsize=14, y=0.99)
+
+
+def _mcc_add_tab(self):
+    """Add Morphology-Chemistry Coupling tab after the normal UI exists."""
+    if not hasattr(self, 'tabs'):
+        return
+    page = QWidget()
+    lay = QVBoxLayout(page)
+    ctrl1 = QHBoxLayout()
+    ctrl1.addWidget(QLabel('rr-NMF depth'))
+    self.combo_mcc_depth = QComboBox()
+    ctrl1.addWidget(self.combo_mcc_depth)
+    self.btn_mcc_refresh_depths = QPushButton('Refresh depth/components')
+    self.btn_mcc_refresh_depths.clicked.connect(self.refresh_mcc_depth_components)
+    ctrl1.addWidget(self.btn_mcc_refresh_depths)
+    ctrl1.addWidget(QLabel('Meta NMF k'))
+    self.spin_mcc_k = QSpinBox(); self.spin_mcc_k.setRange(1, 200); self.spin_mcc_k.setValue(3)
+    ctrl1.addWidget(self.spin_mcc_k)
+    ctrl1.addWidget(QLabel('W stack'))
+    self.combo_mcc_w_stack = QComboBox(); self.combo_mcc_w_stack.addItems(['component rows (membership-first)', 'feature rows / transpose'])
+    ctrl1.addWidget(self.combo_mcc_w_stack)
+    ctrl1.addWidget(QLabel('H stack'))
+    self.combo_mcc_h_stack = QComboBox(); self.combo_mcc_h_stack.addItems(['component rows (membership-first)', 'feature rows / transpose'])
+    ctrl1.addWidget(self.combo_mcc_h_stack)
+    self.btn_mcc_run = QPushButton('Run Morphology-Chemistry Coupling')
+    self.btn_mcc_run.clicked.connect(self.run_morphochem_coupling)
+    ctrl1.addWidget(self.btn_mcc_run)
+    ctrl1.addStretch(1)
+    lay.addLayout(ctrl1)
+
+    ctrl2 = QHBoxLayout()
+    ctrl2.addWidget(QLabel('Depth components'))
+    self.list_mcc_components = QListWidget()
+    self.list_mcc_components.setSelectionMode(QListWidget.MultiSelection)
+    self.list_mcc_components.setMinimumHeight(100)
+    ctrl2.addWidget(self.list_mcc_components, 1)
+    hint = QLabel('Select none = use all depth components. This analysis ignores merge/pass outputs and uses direct depth W/H results only.')
+    hint.setWordWrap(True)
+    ctrl2.addWidget(hint, 1)
+    lay.addLayout(ctrl2)
+
+    split = QSplitter(Qt.Horizontal)
+    self.canvas_mcc = Canvas(18, 10)
+    split.addWidget(PlotPanel(self.canvas_mcc))
+    side = QWidget(); side_lay = QVBoxLayout(side); side_lay.setContentsMargins(0,0,0,0)
+    side_lay.addWidget(QLabel('P(MH_j | MW_i) soft mapping table (%)'))
+    self.table_mcc_prob = QTableWidget(); self.table_mcc_prob.setMinimumWidth(360)
+    side_lay.addWidget(self.table_mcc_prob, 2)
+    side_lay.addWidget(QLabel('Component soft memberships'))
+    self.table_mcc_membership = QTableWidget(); self.table_mcc_membership.setMinimumWidth(360)
+    side_lay.addWidget(self.table_mcc_membership, 3)
+    split.addWidget(side)
+    split.setStretchFactor(0, 4); split.setStretchFactor(1, 2)
+    lay.addWidget(split, 1)
+    self.tabs.addTab(page, 'Morphology-Chemistry Coupling')
+    self._mcc_result = None
+    try:
+        self.combo_mcc_depth.currentIndexChanged.connect(lambda *_: self.refresh_mcc_depth_components())
+    except Exception:
+        pass
+    self.refresh_mcc_depth_components()
+
+
+def _mcc_get_depth_entries(self, depth=None):
+    rr = getattr(self, 'rr_result', None)
+    if rr is None:
+        return []
+    if depth is None:
+        try:
+            depth = int(self.combo_mcc_depth.currentData())
+        except Exception:
+            depth = 0
+    depths = getattr(rr, 'node_summaries_by_depth', []) or []
+    if depth < 0 or depth >= len(depths):
+        return []
+    entries = []
+    for n, ns in enumerate(depths[depth]):
+        for c, (im, sp) in enumerate(zip(getattr(ns, 'component_maps', []) or [], getattr(ns, 'component_spectra', []) or [])):
+            entries.append({
+                'label': f'D{depth} N{n} C{c}',
+                'image': np.asarray(im, dtype=np.float64),
+                'spectrum': np.asarray(sp, dtype=np.float64).reshape(-1),
+                'depth': depth,
+                'node': n,
+                'component': c,
+            })
+    return entries
+
+
+def _mcc_refresh_depth_components(self):
+    if not hasattr(self, 'combo_mcc_depth'):
+        return
+    rr = getattr(self, 'rr_result', None)
+    current = self.combo_mcc_depth.currentData()
+    self.combo_mcc_depth.blockSignals(True)
+    self.combo_mcc_depth.clear()
+    if rr is not None:
+        for d, nodes in enumerate(getattr(rr, 'node_summaries_by_depth', []) or []):
+            self.combo_mcc_depth.addItem(f'Depth {d} ({sum(len(getattr(ns,"component_maps",[]) or []) for ns in nodes)} comps)', d)
+    if current is not None:
+        idx = self.combo_mcc_depth.findData(current)
+        if idx >= 0:
+            self.combo_mcc_depth.setCurrentIndex(idx)
+    self.combo_mcc_depth.blockSignals(False)
+    if not hasattr(self, 'list_mcc_components'):
+        return
+    self.list_mcc_components.clear()
+    depth = self.combo_mcc_depth.currentData()
+    if depth is None:
+        return
+    for i, e in enumerate(self._mcc_get_depth_entries(int(depth))):
+        self.list_mcc_components.addItem(f'{i}: {e["label"]}')
+
+
+def _mcc_selected_entries(self):
+    depth = self.combo_mcc_depth.currentData() if hasattr(self, 'combo_mcc_depth') else 0
+    entries = self._mcc_get_depth_entries(int(depth or 0))
+    if not hasattr(self, 'list_mcc_components'):
+        return entries
+    selected = []
+    for it in self.list_mcc_components.selectedItems():
+        try:
+            selected.append(int(it.text().split(':', 1)[0]))
+        except Exception:
+            pass
+    if not selected:
+        return entries
+    return [entries[i] for i in selected if 0 <= i < len(entries)]
+
+
+def _mcc_run(self):
+    entries = self._mcc_selected_entries()
+    if not entries:
+        QMessageBox.warning(self, 'Morphology-Chemistry Coupling', 'No rr-NMF depth components are available. Run rr-NMF first.')
+        return
+    try:
+        k = int(self.spin_mcc_k.value()) if hasattr(self, 'spin_mcc_k') else 3
+        w_stack = 'feature' if 'feature' in self.combo_mcc_w_stack.currentText().lower() else 'component'
+        h_stack = 'feature' if 'feature' in self.combo_mcc_h_stack.currentText().lower() else 'component'
+        labels = [e['label'] for e in entries]
+        Wmaps = [np.asarray(e['image'], dtype=np.float64) for e in entries]
+        Hspecs = [np.asarray(e['spectrum'], dtype=np.float64).reshape(-1) for e in entries]
+        shape = Wmaps[0].shape
+        XW = np.stack([_minmax01(w).reshape(-1) for w in Wmaps], axis=0)
+        XH = np.stack([_minmax01(h).reshape(-1) for h in Hspecs], axis=0)
+        seed = int(self.spin_seed.value()) if hasattr(self, 'spin_seed') else 0
+        max_iter = max(300, int(self.spin_iter.value()) if hasattr(self, 'spin_iter') else 500)
+        mw = _run_meta_nmf_matrix(XW, k, w_stack, random_state=seed, max_iter=max_iter)
+        mh = _run_meta_nmf_matrix(XH, k, h_stack, random_state=seed, max_iter=max_iter)
+        w_basis = [np.asarray(b).reshape(shape) for b in mw['basis']]
+        h_basis = np.asarray(mh['basis'], dtype=np.float64)
+        MW = np.asarray(mw['membership'], dtype=np.float64)
+        MH = np.asarray(mh['membership'], dtype=np.float64)
+        # Soft probabilistic coupling. Rows MW_i; columns MH_j.
+        C = np.clip(MW, 0, None).T @ np.clip(MH, 0, None)
+        P = C / (np.sum(C, axis=1, keepdims=True) + 1e-12)
+        depth = int(self.combo_mcc_depth.currentData()) if hasattr(self, 'combo_mcc_depth') and self.combo_mcc_depth.currentData() is not None else 0
+        self._mcc_result = {
+            'depth': depth,
+            'labels': labels,
+            'w_basis_images': w_basis,
+            'h_basis_spectra': h_basis,
+            'MW_membership': MW,
+            'MH_membership': MH,
+            'P_MH_given_MW': P,
+            'w_stack': w_stack,
+            'h_stack': h_stack,
+        }
+        plot_morphochem_coupling(self.canvas_mcc.fig, self._mcc_result, getattr(self, 'roi_axis_info', None), self.combo_cmap.currentText() if hasattr(self, 'combo_cmap') else 'viridis')
+        self.canvas_mcc.set_base(); self.canvas_mcc.draw()
+        _mcc_fill_tables(self)
+        self.append_log(f'Morphology-Chemistry Coupling: depth D{depth}, {len(entries)} components, k={k}, W stack={w_stack}, H stack={h_stack}')
+    except Exception as e:
+        QMessageBox.critical(self, 'Morphology-Chemistry Coupling error', str(e))
+        self.append_log('Morphology-Chemistry Coupling failed:\n' + traceback.format_exc())
+
+
+def _mcc_fill_tables(self):
+    res = getattr(self, '_mcc_result', None)
+    if not res:
+        return
+    P = np.asarray(res.get('P_MH_given_MW', []), dtype=np.float64)
+    tbl = self.table_mcc_prob
+    tbl.clear()
+    tbl.setRowCount(P.shape[0]); tbl.setColumnCount(P.shape[1])
+    tbl.setHorizontalHeaderLabels([f'MH{j}' for j in range(P.shape[1])])
+    tbl.setVerticalHeaderLabels([f'MW{i}' for i in range(P.shape[0])])
+    for i in range(P.shape[0]):
+        for j in range(P.shape[1]):
+            tbl.setItem(i, j, QTableWidgetItem(f'{P[i,j]*100:.2f}'))
+    tbl.resizeColumnsToContents()
+
+    labels = list(res.get('labels', []))
+    MW = np.asarray(res.get('MW_membership', []), dtype=np.float64)
+    MH = np.asarray(res.get('MH_membership', []), dtype=np.float64)
+    MWn = MW / (np.sum(MW, axis=1, keepdims=True) + 1e-12) if MW.size else MW
+    MHn = MH / (np.sum(MH, axis=1, keepdims=True) + 1e-12) if MH.size else MH
+    n = len(labels)
+    cols = 1 + MWn.shape[1] + MHn.shape[1]
+    mt = self.table_mcc_membership
+    mt.clear(); mt.setRowCount(n); mt.setColumnCount(cols)
+    headers = ['component'] + [f'MW{i}' for i in range(MWn.shape[1])] + [f'MH{j}' for j in range(MHn.shape[1])]
+    mt.setHorizontalHeaderLabels(headers)
+    for r, lab in enumerate(labels):
+        mt.setItem(r, 0, QTableWidgetItem(str(lab)))
+        c = 1
+        for v in (MWn[r] if r < MWn.shape[0] else []):
+            mt.setItem(r, c, QTableWidgetItem(f'{float(v)*100:.1f}')); c += 1
+        for v in (MHn[r] if r < MHn.shape[0] else []):
+            mt.setItem(r, c, QTableWidgetItem(f'{float(v)*100:.1f}')); c += 1
+    mt.resizeColumnsToContents()
+
+
+def _mcc_refresh_views_hook(self):
+    # Keep depth list fresh after new analysis without forcing expensive recalculation.
+    try:
+        if hasattr(self, 'combo_mcc_depth'):
+            cur = self.combo_mcc_depth.currentData()
+            _mcc_refresh_depth_components(self)
+            if cur is not None:
+                idx = self.combo_mcc_depth.findData(cur)
+                if idx >= 0:
+                    self.combo_mcc_depth.setCurrentIndex(idx)
+    except Exception:
+        pass
+
+
+# Install methods on the GUI class without disturbing the large existing class body.
+RR2NMFGui._add_morphochem_coupling_tab = _mcc_add_tab
+RR2NMFGui.refresh_mcc_depth_components = _mcc_refresh_depth_components
+RR2NMFGui._mcc_get_depth_entries = _mcc_get_depth_entries
+RR2NMFGui._mcc_selected_entries = _mcc_selected_entries
+RR2NMFGui.run_morphochem_coupling = _mcc_run
+
+_ORIGINAL_RR2_BUILD_UI = RR2NMFGui._build_ui
+def _build_ui_with_mcc(self, *args, **kwargs):
+    _ORIGINAL_RR2_BUILD_UI(self, *args, **kwargs)
+    try:
+        self._add_morphochem_coupling_tab()
+    except Exception:
+        try:
+            self.append_log('Failed to add Morphology-Chemistry Coupling tab:\n' + traceback.format_exc())
+        except Exception:
+            pass
+RR2NMFGui._build_ui = _build_ui_with_mcc
+
+_ORIGINAL_RR2_REFRESH_VIEWS = RR2NMFGui.refresh_views
+def _refresh_views_with_mcc(self, *args, **kwargs):
+    out = _ORIGINAL_RR2_REFRESH_VIEWS(self, *args, **kwargs)
+    _mcc_refresh_views_hook(self)
+    return out
+RR2NMFGui.refresh_views = _refresh_views_with_mcc
+
+
 def main():
     app=QApplication(sys.argv)
     w=RR2NMFGui()
