@@ -7127,6 +7127,150 @@ def plot_morphochem_coupling(fig, result, axis_info=None, cmap='viridis'):
 
     fig.suptitle('Morphology-Chemistry Coupling: M_W ≈ A_WB_W, M_H ≈ A_HB_H, and P(MH|MW)', fontsize=14, y=0.995)
 
+
+
+
+def plot_mcc_membership_viewer(fig, result, mode='MW membership', index=0, axis_info=None, cmap='viridis', top_n=12):
+    """Focused viewer for A_W/A_H memberships and MW<->MH coupling paths.
+
+    This complements the overview plot by showing the original rr-NMF components
+    that contribute most strongly to one selected spatial meta-state (MW_i) or
+    spectral meta-state (MH_j). The network mode visualizes the soft relation
+    MW -> rr-component -> MH using normalized A_W/A_H memberships.
+    """
+    fig.clear()
+    if not result:
+        fig.set_size_inches(10, 5, forward=True)
+        ax = fig.add_subplot(111); ax.axis('off')
+        ax.text(0.5, 0.5, 'Run Morphology-Chemistry Coupling first.', ha='center', va='center')
+        return
+
+    labels = list(result.get('labels', []))
+    Wmaps = list(result.get('component_images', []))
+    Hspecs = [np.asarray(h, dtype=np.float64).reshape(-1) for h in result.get('component_spectra', [])]
+    AW = np.asarray(result.get('MW_membership_norm', []), dtype=np.float64)
+    AH = np.asarray(result.get('MH_membership_norm', []), dtype=np.float64)
+    BW_imgs = list(result.get('w_basis_images', []))
+    BH = np.asarray(result.get('h_basis_spectra', []), dtype=np.float64)
+    P = np.asarray(result.get('P_MH_given_MW', []), dtype=np.float64)
+    n = len(labels)
+    if n == 0:
+        fig.set_size_inches(10, 5, forward=True)
+        ax = fig.add_subplot(111); ax.axis('off')
+        ax.text(0.5, 0.5, 'No selected rr-components available.', ha='center', va='center')
+        return
+
+    if axis_info is not None and hasattr(axis_info, 'energy_axis') and Hspecs and len(axis_info.energy_axis) == len(Hspecs[0]):
+        x = np.asarray(axis_info.energy_axis); xlabel = getattr(axis_info, 'energy_label', 'Energy')
+    elif Hspecs:
+        x = np.arange(len(Hspecs[0])); xlabel = 'Channel'
+    else:
+        x = np.arange(1); xlabel = 'Channel'
+
+    mode_l = str(mode).lower()
+    top_n = int(max(1, min(int(top_n), n)))
+
+    if 'network' in mode_l:
+        # Simple interpretable soft network: MW nodes -> top rr-components -> MH nodes.
+        kW = AW.shape[1] if AW.ndim == 2 else 0
+        kH = AH.shape[1] if AH.ndim == 2 else 0
+        fig.set_size_inches(14, max(5, 0.35 * n + 3), forward=True)
+        ax = fig.add_subplot(111)
+        ax.set_xlim(0, 1); ax.set_ylim(-0.5, max(kW, kH, min(n, top_n)) - 0.5)
+        ax.axis('off')
+        ax.set_title('MW → rr-component → MH soft membership network', fontsize=13)
+        # pick globally strongest components by max joint participation
+        strength = np.zeros(n, dtype=float)
+        if AW.ndim == 2 and AH.ndim == 2:
+            strength = (np.max(AW, axis=1) * np.max(AH, axis=1))
+        order = np.argsort(-strength)[:top_n]
+        # positions
+        for i in range(kW):
+            y = kW - 1 - i
+            ax.text(0.05, y, f'MW{i}', ha='center', va='center', fontsize=10, bbox=dict(boxstyle='round', fc='lightgray', alpha=0.55))
+        for j in range(kH):
+            y = kH - 1 - j
+            ax.text(0.95, y, f'MH{j}', ha='center', va='center', fontsize=10, bbox=dict(boxstyle='round', fc='lightblue', alpha=0.55))
+        for rpos, cidx in enumerate(order):
+            y = len(order) - 1 - rpos
+            ax.text(0.50, y, labels[cidx], ha='center', va='center', fontsize=8, bbox=dict(boxstyle='round', fc='white', alpha=0.85))
+            if AW.ndim == 2:
+                for i in np.argsort(-AW[cidx])[:2]:
+                    if AW[cidx, i] > 0.05:
+                        y0 = kW - 1 - i
+                        ax.annotate('', xy=(0.47, y), xytext=(0.10, y0), arrowprops=dict(arrowstyle='-', lw=0.8 + 3.0*AW[cidx,i], alpha=0.55))
+                        ax.text(0.24, (y+y0)/2, f'{AW[cidx,i]*100:.0f}', fontsize=7, alpha=0.8)
+            if AH.ndim == 2:
+                for j in np.argsort(-AH[cidx])[:2]:
+                    if AH[cidx, j] > 0.05:
+                        y1 = kH - 1 - j
+                        ax.annotate('', xy=(0.90, y1), xytext=(0.53, y), arrowprops=dict(arrowstyle='-', lw=0.8 + 3.0*AH[cidx,j], alpha=0.55))
+                        ax.text(0.72, (y+y1)/2, f'{AH[cidx,j]*100:.0f}', fontsize=7, alpha=0.8)
+        if P.size:
+            txt = 'P(MH|MW): ' + ', '.join([f'MW{i}->MH{int(np.argmax(P[i]))}:{np.max(P[i])*100:.0f}%' for i in range(P.shape[0])])
+            ax.text(0.5, -0.35, txt, ha='center', va='center', fontsize=9)
+        return
+
+    if 'mh' in mode_l:
+        j = int(max(0, min(int(index), AH.shape[1]-1 if AH.ndim == 2 and AH.shape[1] else 0)))
+        weights = AH[:, j] if AH.ndim == 2 and AH.shape[1] > j else np.zeros(n)
+        order = np.argsort(-weights)[:top_n]
+        cols = min(4, max(1, top_n))
+        rows = 2 + int(np.ceil(len(order) / cols))
+        fig.set_size_inches(max(14, cols*3.4), max(7, rows*2.5), forward=True)
+        gs = fig.add_gridspec(rows, cols, height_ratios=[1.1, 1.0] + [1.1]*(rows-2), hspace=0.75, wspace=0.38)
+        ax0 = fig.add_subplot(gs[0, :])
+        if BH.ndim == 2 and BH.shape[0] > j:
+            ax0.plot(x, BH[j], lw=2.0)
+        ax0.set_title(f'Selected spectral meta-state BH / MH{j}', fontsize=12)
+        ax0.set_xlabel(xlabel); ax0.grid(True, alpha=0.25)
+        axb = fig.add_subplot(gs[1, :])
+        axb.bar(np.arange(len(order)), weights[order])
+        axb.set_xticks(np.arange(len(order))); axb.set_xticklabels([labels[i] for i in order], rotation=60, ha='right', fontsize=8)
+        axb.set_ylim(0, max(1e-12, np.max(weights[order]) * 1.15 if len(order) else 1))
+        axb.set_title(f'Top rr-components by A_H membership in MH{j}', fontsize=11)
+        axb.set_ylabel('A_H row-normalized membership')
+        for pos, cidx in enumerate(order):
+            r = 2 + pos // cols; c = pos % cols
+            ax = fig.add_subplot(gs[r, c])
+            if Hspecs:
+                ax.plot(x, Hspecs[cidx], lw=1.4)
+            ax.set_title(f'{labels[cidx]}\nA_H={weights[cidx]*100:.1f}%', fontsize=9)
+            ax.grid(True, alpha=0.2)
+        return
+
+    # Default: MW membership viewer.
+    i = int(max(0, min(int(index), AW.shape[1]-1 if AW.ndim == 2 and AW.shape[1] else 0)))
+    weights = AW[:, i] if AW.ndim == 2 and AW.shape[1] > i else np.zeros(n)
+    order = np.argsort(-weights)[:top_n]
+    cols = min(4, max(1, top_n))
+    rows = 2 + int(np.ceil(len(order) / cols))
+    fig.set_size_inches(max(14, cols*3.4), max(7, rows*2.5), forward=True)
+    gs = fig.add_gridspec(rows, cols, height_ratios=[1.1, 1.0] + [1.2]*(rows-2), hspace=0.75, wspace=0.38)
+    ax0 = fig.add_subplot(gs[0, :])
+    if len(BW_imgs) > i:
+        im = ax0.imshow(BW_imgs[i], cmap=cmap, origin='upper', aspect='equal')
+        ax0.set_xticks([]); ax0.set_yticks([])
+        try:
+            add_colorbar(fig, ax0, im)
+        except Exception:
+            pass
+    ax0.set_title(f'Selected spatial meta-state BW / MW{i}', fontsize=12)
+    axb = fig.add_subplot(gs[1, :])
+    axb.bar(np.arange(len(order)), weights[order])
+    axb.set_xticks(np.arange(len(order))); axb.set_xticklabels([labels[idx] for idx in order], rotation=60, ha='right', fontsize=8)
+    axb.set_ylim(0, max(1e-12, np.max(weights[order]) * 1.15 if len(order) else 1))
+    axb.set_title(f'Top rr-components by A_W membership in MW{i}', fontsize=11)
+    axb.set_ylabel('A_W row-normalized membership')
+    for pos, cidx in enumerate(order):
+        r = 2 + pos // cols; c = pos % cols
+        ax = fig.add_subplot(gs[r, c])
+        if Wmaps:
+            im = ax.imshow(Wmaps[cidx], cmap=cmap, origin='upper', aspect='equal')
+            ax.set_xticks([]); ax.set_yticks([])
+        ax.set_title(f'{labels[cidx]}\nA_W={weights[cidx]*100:.1f}%', fontsize=9)
+    return
+
 def _mcc_add_tab(self):
     """Add Morphology-Chemistry Coupling tab after the normal UI exists."""
     if not hasattr(self, 'tabs'):
@@ -7176,6 +7320,30 @@ def _mcc_add_tab(self):
     side_lay.addWidget(QLabel('Component soft memberships'))
     self.table_mcc_membership = QTableWidget(); self.table_mcc_membership.setMinimumWidth(360)
     side_lay.addWidget(self.table_mcc_membership, 3)
+
+    # Focused membership/network viewer controls.
+    viewer_ctrl = QHBoxLayout()
+    viewer_ctrl.addWidget(QLabel('Viewer'))
+    self.combo_mcc_view_mode = QComboBox(); self.combo_mcc_view_mode.addItems(['MW membership', 'MH membership', 'MW-MH network'])
+    viewer_ctrl.addWidget(self.combo_mcc_view_mode)
+    viewer_ctrl.addWidget(QLabel('Index'))
+    self.combo_mcc_view_index = QComboBox()
+    viewer_ctrl.addWidget(self.combo_mcc_view_index)
+    viewer_ctrl.addWidget(QLabel('Top N'))
+    self.spin_mcc_topn = QSpinBox(); self.spin_mcc_topn.setRange(1, 200); self.spin_mcc_topn.setValue(12)
+    viewer_ctrl.addWidget(self.spin_mcc_topn)
+    self.btn_mcc_view_refresh = QPushButton('Refresh viewer')
+    self.btn_mcc_view_refresh.clicked.connect(self.update_mcc_membership_viewer)
+    viewer_ctrl.addWidget(self.btn_mcc_view_refresh)
+    side_lay.addLayout(viewer_ctrl)
+    self.canvas_mcc_view = Canvas(10, 6)
+    side_lay.addWidget(PlotPanel(self.canvas_mcc_view), 4)
+    try:
+        self.combo_mcc_view_mode.currentIndexChanged.connect(lambda *_: self.update_mcc_view_index_choices())
+        self.combo_mcc_view_index.currentIndexChanged.connect(lambda *_: self.update_mcc_membership_viewer())
+        self.spin_mcc_topn.valueChanged.connect(lambda *_: self.update_mcc_membership_viewer())
+    except Exception:
+        pass
     split.addWidget(side)
     split.setStretchFactor(0, 4); split.setStretchFactor(1, 2)
     lay.addWidget(split, 1)
@@ -7300,12 +7468,16 @@ def _mcc_run(self):
             'MW_membership_norm': MWn,
             'MH_membership_norm': MHn,
             'P_MH_given_MW': P,
+            'component_images': Wmaps,
+            'component_spectra': Hspecs,
             'w_stack': w_stack,
             'h_stack': h_stack,
         }
+        self.update_mcc_view_index_choices()
         plot_morphochem_coupling(self.canvas_mcc.fig, self._mcc_result, getattr(self, 'roi_axis_info', None), self.combo_cmap.currentText() if hasattr(self, 'combo_cmap') else 'viridis')
         self.canvas_mcc.set_base(); self.canvas_mcc.draw()
         _mcc_fill_tables(self)
+        self.update_mcc_membership_viewer()
         self.append_log(f'Morphology-Chemistry Coupling: depth D{depth}, {len(entries)} components, k={k}, W stack={w_stack}, H stack={h_stack}')
     except Exception as e:
         QMessageBox.critical(self, 'Morphology-Chemistry Coupling error', str(e))
@@ -7362,12 +7534,64 @@ def _mcc_refresh_views_hook(self):
         pass
 
 
+
+
+def _mcc_update_view_index_choices(self):
+    if not hasattr(self, 'combo_mcc_view_index'):
+        return
+    res = getattr(self, '_mcc_result', None)
+    mode = self.combo_mcc_view_mode.currentText() if hasattr(self, 'combo_mcc_view_mode') else 'MW membership'
+    cur = self.combo_mcc_view_index.currentData()
+    self.combo_mcc_view_index.blockSignals(True)
+    self.combo_mcc_view_index.clear()
+    if res:
+        if 'MH' in mode and 'network' not in mode.lower():
+            AH = np.asarray(res.get('MH_membership_norm', []))
+            k = AH.shape[1] if AH.ndim == 2 else 0
+            for j in range(k):
+                self.combo_mcc_view_index.addItem(f'MH{j}', j)
+        elif 'network' in mode.lower():
+            self.combo_mcc_view_index.addItem('All', 0)
+        else:
+            AW = np.asarray(res.get('MW_membership_norm', []))
+            k = AW.shape[1] if AW.ndim == 2 else 0
+            for i in range(k):
+                self.combo_mcc_view_index.addItem(f'MW{i}', i)
+    if cur is not None:
+        idx = self.combo_mcc_view_index.findData(cur)
+        if idx >= 0:
+            self.combo_mcc_view_index.setCurrentIndex(idx)
+    self.combo_mcc_view_index.blockSignals(False)
+
+
+def _mcc_update_membership_viewer(self):
+    if not hasattr(self, 'canvas_mcc_view'):
+        return
+    res = getattr(self, '_mcc_result', None)
+    mode = self.combo_mcc_view_mode.currentText() if hasattr(self, 'combo_mcc_view_mode') else 'MW membership'
+    idx = self.combo_mcc_view_index.currentData() if hasattr(self, 'combo_mcc_view_index') else 0
+    if idx is None:
+        idx = 0
+    topn = int(self.spin_mcc_topn.value()) if hasattr(self, 'spin_mcc_topn') else 12
+    plot_mcc_membership_viewer(
+        self.canvas_mcc_view.fig,
+        res,
+        mode=mode,
+        index=int(idx),
+        axis_info=getattr(self, 'roi_axis_info', None),
+        cmap=self.combo_cmap.currentText() if hasattr(self, 'combo_cmap') else 'viridis',
+        top_n=topn,
+    )
+    self.canvas_mcc_view.set_base(); self.canvas_mcc_view.draw()
+
 # Install methods on the GUI class without disturbing the large existing class body.
 RR2NMFGui._add_morphochem_coupling_tab = _mcc_add_tab
 RR2NMFGui.refresh_mcc_depth_components = _mcc_refresh_depth_components
 RR2NMFGui._mcc_get_depth_entries = _mcc_get_depth_entries
 RR2NMFGui._mcc_selected_entries = _mcc_selected_entries
 RR2NMFGui.run_morphochem_coupling = _mcc_run
+RR2NMFGui.update_mcc_view_index_choices = _mcc_update_view_index_choices
+RR2NMFGui.update_mcc_membership_viewer = _mcc_update_membership_viewer
 
 _ORIGINAL_RR2_BUILD_UI = RR2NMFGui._build_ui
 def _build_ui_with_mcc(self, *args, **kwargs):
