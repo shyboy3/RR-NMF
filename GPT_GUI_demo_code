@@ -7000,6 +7000,13 @@ def _run_meta_nmf_matrix(X: np.ndarray, k: int, stack_mode: str, random_state: i
 
 
 def plot_morphochem_coupling(fig, result, axis_info=None, cmap='viridis'):
+    """Plot B_W/B_H bases plus A_W/A_H membership heatmaps and P(MH|MW).
+
+    NMF notation used here:
+        M_W ~= A_W B_W,  M_H ~= A_H B_H
+    where rows of M_W/M_H are original rr-NMF components.
+    B_W/B_H are meta-bases; A_W/A_H are soft memberships of each rr-component.
+    """
     fig.clear()
     if not result:
         fig.set_size_inches(12, 6, forward=True)
@@ -7007,21 +7014,28 @@ def plot_morphochem_coupling(fig, result, axis_info=None, cmap='viridis'):
         ax.axis('off')
         ax.text(0.5, 0.5, 'Run Morphology-Chemistry Coupling analysis first.', ha='center', va='center', fontsize=13)
         return
+
     w_basis = result.get('w_basis_images', [])
     h_basis = np.asarray(result.get('h_basis_spectra', []), dtype=np.float64)
     P = np.asarray(result.get('P_MH_given_MW', []), dtype=np.float64)
+    AW = np.asarray(result.get('MW_membership_norm', result.get('MW_membership', [])), dtype=np.float64)
+    AH = np.asarray(result.get('MH_membership_norm', result.get('MH_membership', [])), dtype=np.float64)
+    labels = list(result.get('labels', []))
     depth = result.get('depth', '?')
+
     nW = len(w_basis)
     nH = h_basis.shape[0] if h_basis.ndim == 2 else 0
-    cols = max(2, max(nW, nH))
-    fig.set_size_inches(max(18, cols * 3.2), 10.5, forward=True)
-    gs = fig.add_gridspec(3, cols, height_ratios=[1.05, 1.05, 1.0], hspace=0.55, wspace=0.35)
+    nComp = max(len(labels), AW.shape[0] if AW.ndim == 2 else 0, AH.shape[0] if AH.ndim == 2 else 0)
+    cols = max(3, max(nW, nH))
+    # Rows: B_W images, B_H spectra, P(MH|MW), A_W heatmap, A_H heatmap.
+    fig.set_size_inches(max(20, cols * 3.2), 15.0, forward=True)
+    gs = fig.add_gridspec(5, cols, height_ratios=[1.1, 1.05, 0.95, 0.95, 0.95], hspace=0.78, wspace=0.38)
 
     for i in range(cols):
         if i < nW:
             ax = fig.add_subplot(gs[0, i])
             im = ax.imshow(w_basis[i], cmap=cmap, origin='upper', aspect='equal')
-            ax.set_title(f'MW{i}: spatial meta-basis', fontsize=10)
+            ax.set_title(f'B_W / MW{i}\nspatial meta-basis', fontsize=10)
             ax.set_xticks([]); ax.set_yticks([])
             try:
                 add_colorbar(fig, ax, im)
@@ -7030,24 +7044,28 @@ def plot_morphochem_coupling(fig, result, axis_info=None, cmap='viridis'):
         else:
             ax = fig.add_subplot(gs[0, i]); ax.axis('off')
 
-    x = None
     if axis_info is not None and hasattr(axis_info, 'energy_axis') and h_basis.ndim == 2 and len(axis_info.energy_axis) == h_basis.shape[1]:
         x = np.asarray(axis_info.energy_axis)
+        xlabel = getattr(axis_info, 'energy_label', 'Energy')
     elif h_basis.ndim == 2:
         x = np.arange(h_basis.shape[1])
+        xlabel = 'Channel'
+    else:
+        x = []
+        xlabel = 'Energy'
     for j in range(cols):
         if j < nH:
             ax = fig.add_subplot(gs[1, j])
             ax.plot(x, h_basis[j], lw=1.8)
-            ax.set_title(f'MH{j}: spectral meta-basis', fontsize=10)
+            ax.set_title(f'B_H / MH{j}\nspectral meta-basis', fontsize=10)
             ax.grid(True, alpha=0.25)
-            if axis_info is not None:
-                ax.set_xlabel(getattr(axis_info, 'energy_label', 'Energy'), fontsize=8)
+            ax.set_xlabel(xlabel, fontsize=8)
         else:
             ax = fig.add_subplot(gs[1, j]); ax.axis('off')
 
+    # Coupling matrix P(MH|MW)
     if P.size:
-        axp = fig.add_subplot(gs[2, :min(cols, max(2, P.shape[1]))])
+        axp = fig.add_subplot(gs[2, :])
         im = axp.imshow(P, vmin=0, vmax=1, cmap='viridis', aspect='auto')
         axp.set_title(f'Spatial-Chemical Mapping: P(MH_j | MW_i), depth {depth}', fontsize=12)
         axp.set_xlabel('Spectral meta-state MH_j')
@@ -7058,12 +7076,56 @@ def plot_morphochem_coupling(fig, result, axis_info=None, cmap='viridis'):
             for j in range(P.shape[1]):
                 axp.text(j, i, f'{P[i,j]*100:.0f}', ha='center', va='center', color='white' if P[i,j] < 0.45 else 'black', fontsize=9)
         try:
-            cb = fig.colorbar(im, ax=axp, fraction=0.025, pad=0.02)
+            cb = fig.colorbar(im, ax=axp, fraction=0.018, pad=0.015)
             cb.set_label('Probability')
         except Exception:
             pass
-    fig.suptitle('Morphology-Chemistry Coupling: W-only meta NMF ↔ H-only meta NMF', fontsize=14, y=0.99)
 
+    # A_W soft membership heatmap.
+    if AW.size:
+        axaw = fig.add_subplot(gs[3, :])
+        im = axaw.imshow(AW, vmin=0, vmax=1, cmap='magma', aspect='auto')
+        axaw.set_title('A_W: rr-component soft membership in spatial meta-states MW', fontsize=12)
+        axaw.set_xlabel('MW spatial meta-state')
+        axaw.set_ylabel('rr-NMF component')
+        axaw.set_xticks(range(AW.shape[1])); axaw.set_xticklabels([f'MW{i}' for i in range(AW.shape[1])])
+        if nComp <= 40:
+            axaw.set_yticks(range(nComp)); axaw.set_yticklabels(labels[:nComp], fontsize=7)
+        else:
+            axaw.set_yticks([])
+        for r in range(AW.shape[0]):
+            for c in range(AW.shape[1]):
+                if AW.shape[0] <= 35 and AW.shape[1] <= 12:
+                    axaw.text(c, r, f'{AW[r,c]*100:.0f}', ha='center', va='center', color='white' if AW[r,c] < 0.45 else 'black', fontsize=7)
+        try:
+            cb = fig.colorbar(im, ax=axaw, fraction=0.018, pad=0.015)
+            cb.set_label('Membership')
+        except Exception:
+            pass
+
+    # A_H soft membership heatmap.
+    if AH.size:
+        axah = fig.add_subplot(gs[4, :])
+        im = axah.imshow(AH, vmin=0, vmax=1, cmap='cividis', aspect='auto')
+        axah.set_title('A_H: rr-component soft membership in spectral meta-states MH', fontsize=12)
+        axah.set_xlabel('MH spectral meta-state')
+        axah.set_ylabel('rr-NMF component')
+        axah.set_xticks(range(AH.shape[1])); axah.set_xticklabels([f'MH{j}' for j in range(AH.shape[1])])
+        if nComp <= 40:
+            axah.set_yticks(range(nComp)); axah.set_yticklabels(labels[:nComp], fontsize=7)
+        else:
+            axah.set_yticks([])
+        for r in range(AH.shape[0]):
+            for c in range(AH.shape[1]):
+                if AH.shape[0] <= 35 and AH.shape[1] <= 12:
+                    axah.text(c, r, f'{AH[r,c]*100:.0f}', ha='center', va='center', color='white' if AH[r,c] < 0.45 else 'black', fontsize=7)
+        try:
+            cb = fig.colorbar(im, ax=axah, fraction=0.018, pad=0.015)
+            cb.set_label('Membership')
+        except Exception:
+            pass
+
+    fig.suptitle('Morphology-Chemistry Coupling: M_W ≈ A_WB_W, M_H ≈ A_HB_H, and P(MH|MW)', fontsize=14, y=0.995)
 
 def _mcc_add_tab(self):
     """Add Morphology-Chemistry Coupling tab after the normal UI exists."""
@@ -7216,8 +7278,16 @@ def _mcc_run(self):
         h_basis = np.asarray(mh['basis'], dtype=np.float64)
         MW = np.asarray(mw['membership'], dtype=np.float64)
         MH = np.asarray(mh['membership'], dtype=np.float64)
-        # Soft probabilistic coupling. Rows MW_i; columns MH_j.
-        C = np.clip(MW, 0, None).T @ np.clip(MH, 0, None)
+        # Soft probabilistic coupling using row-normalized memberships.
+        # A_W[c,i] = how much rr-component c belongs to spatial meta-state MW_i.
+        # A_H[c,j] = how much the same rr-component c belongs to spectral meta-state MH_j.
+        # Joint(i,j) = sum_c P(MW_i|component c) * P(MH_j|component c).
+        # P(MH_j|MW_i) is obtained by row-normalizing Joint over j.
+        MWn = np.clip(MW, 0, None)
+        MHn = np.clip(MH, 0, None)
+        MWn = MWn / (np.sum(MWn, axis=1, keepdims=True) + 1e-12)
+        MHn = MHn / (np.sum(MHn, axis=1, keepdims=True) + 1e-12)
+        C = MWn.T @ MHn
         P = C / (np.sum(C, axis=1, keepdims=True) + 1e-12)
         depth = int(self.combo_mcc_depth.currentData()) if hasattr(self, 'combo_mcc_depth') and self.combo_mcc_depth.currentData() is not None else 0
         self._mcc_result = {
@@ -7227,6 +7297,8 @@ def _mcc_run(self):
             'h_basis_spectra': h_basis,
             'MW_membership': MW,
             'MH_membership': MH,
+            'MW_membership_norm': MWn,
+            'MH_membership_norm': MHn,
             'P_MH_given_MW': P,
             'w_stack': w_stack,
             'h_stack': h_stack,
