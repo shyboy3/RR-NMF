@@ -7085,10 +7085,15 @@ def plot_morphochem_coupling(fig, result, axis_info=None, cmap='viridis'):
     aw_h = _hm_height(AW, 1.0)
     ah_h = _hm_height(AH, 1.0)
     fig.set_size_inches(max(20, cols * 3.2), 15.5 + 1.2 * (aw_h + ah_h), forward=True)
+    # Final MCC overview layout:
+    #   row 0: MW images       | row 1: MH spectra
+    #   row 2: A_W heatmap     | row 3: A_H heatmap
+    #   row 4: P(MH|MW)-like association
+    #   row 5: Corr(A_W, A_H) direct coupling
     gs = fig.add_gridspec(
         6, cols,
-        height_ratios=[1.10, 1.05, 0.92, 0.92, aw_h, ah_h],
-        hspace=0.78,
+        height_ratios=[1.10, 1.05, aw_h, ah_h, 0.92, 0.92],
+        hspace=0.82,
         wspace=0.38,
     )
 
@@ -7153,7 +7158,7 @@ def plot_morphochem_coupling(fig, result, axis_info=None, cmap='viridis'):
         except Exception:
             pass
 
-    axp = fig.add_subplot(gs[2, :])
+    axp = fig.add_subplot(gs[4, :])
     _draw_matrix(
         axp, P,
         f'Soft association: row-normalized P-like A(MH_j | MW_i), depth {depth}',
@@ -7161,7 +7166,7 @@ def plot_morphochem_coupling(fig, result, axis_info=None, cmap='viridis'):
         vmin=0, vmax=1, cmap_name='viridis', fmt='{:.0f}', scale=100.0, colorbar_label='Association (%)'
     )
 
-    axc = fig.add_subplot(gs[3, :])
+    axc = fig.add_subplot(gs[5, :])
     _draw_matrix(
         axc, Ccorr,
         'Direct morphology-chemistry coupling: Corr(A_W[:,i], A_H[:,j])',
@@ -7169,7 +7174,7 @@ def plot_morphochem_coupling(fig, result, axis_info=None, cmap='viridis'):
         vmin=-1, vmax=1, cmap_name='coolwarm', fmt='{:+.2f}', scale=1.0, colorbar_label='Correlation'
     )
 
-    axaw = fig.add_subplot(gs[4, :])
+    axaw = fig.add_subplot(gs[2, :])
     if AW.size:
         im = axaw.imshow(AW, vmin=0, vmax=1, cmap='magma', aspect='auto')
         axaw.set_title(f'A_W: rr-component membership in spatial meta-states MW  | shape={AW.shape[0]}×{AW.shape[1]}', fontsize=12)
@@ -7192,7 +7197,7 @@ def plot_morphochem_coupling(fig, result, axis_info=None, cmap='viridis'):
     else:
         axaw.axis('off')
 
-    axah = fig.add_subplot(gs[5, :])
+    axah = fig.add_subplot(gs[3, :])
     if AH.size:
         im = axah.imshow(AH, vmin=0, vmax=1, cmap='cividis', aspect='auto')
         axah.set_title(f'A_H: rr-component membership in spectral meta-states MH  | shape={AH.shape[0]}×{AH.shape[1]}', fontsize=12)
@@ -7215,7 +7220,7 @@ def plot_morphochem_coupling(fig, result, axis_info=None, cmap='viridis'):
     else:
         axah.axis('off')
 
-    fig.suptitle('Morphology-Chemistry Coupling: MW/where, MH/what, association, and direct A_W–A_H correlation', fontsize=14, y=0.996)
+    fig.suptitle('Morphology-Chemistry Coupling: MW/MH bases, A_W/A_H memberships, association, and direct coupling', fontsize=14, y=0.996)
 
 
 def plot_mcc_membership_viewer(fig, result, mode='MW membership', index=0, axis_info=None, cmap='viridis', top_n=12):
