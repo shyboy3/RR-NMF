@@ -3519,7 +3519,9 @@ class RR2NMFGui(QMainWindow):
         self.btn_export_all_decomp.clicked.connect(self.export_all_decomposition_results)
         self.btn_load_decomp=QPushButton("Load Saved Decomposition Results (NPZ)")
         self.btn_load_decomp.clicked.connect(self.load_saved_decomposition_results)
-        vf.addRow(self.btn_run); vf.addRow(self.btn_run_conv_only); vf.addRow(self.btn_run_pca_only); vf.addRow(self.btn_run_auto_stage); vf.addRow(self.btn_continue_manual); vf.addRow(self.btn_auto_score_step); vf.addRow(self.btn_reset_analysis); vf.addRow(self.btn_save_settings); vf.addRow(self.btn_load_settings); vf.addRow(self.btn_export); vf.addRow(self.btn_export_all_decomp); vf.addRow(self.btn_load_decomp); cl.addWidget(vg)
+        self.btn_export_visible_html=QPushButton("Save Visible Processing Results (HTML)")
+        self.btn_export_visible_html.clicked.connect(self.export_visible_results_html)
+        vf.addRow(self.btn_run); vf.addRow(self.btn_run_conv_only); vf.addRow(self.btn_run_pca_only); vf.addRow(self.btn_run_auto_stage); vf.addRow(self.btn_continue_manual); vf.addRow(self.btn_auto_score_step); vf.addRow(self.btn_reset_analysis); vf.addRow(self.btn_save_settings); vf.addRow(self.btn_load_settings); vf.addRow(self.btn_export); vf.addRow(self.btn_export_all_decomp); vf.addRow(self.btn_load_decomp); vf.addRow(self.btn_export_visible_html); cl.addWidget(vg)
         self.log=QTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(180); cl.addWidget(QLabel("Log")); cl.addWidget(self.log); cl.addStretch(1)
 
         self.tabs=QTabWidget()
@@ -7196,9 +7198,11 @@ def plot_morphochem_coupling(fig, result, axis_info=None, cmap='viridis'):
 
     aw_h = _hm_height(AW, 1.0)
     ah_h = _hm_height(AH, 1.0)
-    pair_cols = max(2, min(8, n_meta))
+    # Show every meta-state.  Earlier versions capped this at 8, so k=9 drew only 0..7.
+    pair_cols = max(2, int(n_meta))
     # Width follows number of columns in the basis rows; matrix rows span all columns.
-    fig.set_size_inches(max(22, pair_cols * 4.4), 18.5 + 1.2 * (aw_h + ah_h), forward=True)
+    # This can become wide for large k, but PlotPanel is scrollable and complete display is preferred.
+    fig.set_size_inches(max(22, pair_cols * 4.1), 18.5 + 1.2 * (aw_h + ah_h), forward=True)
     gs = fig.add_gridspec(
         6, pair_cols * 2,
         height_ratios=[1.20, 1.20, 1.18, 1.18, aw_h, ah_h],
@@ -7207,7 +7211,8 @@ def plot_morphochem_coupling(fig, result, axis_info=None, cmap='viridis'):
     )
 
     def _meta_slice_indices(n):
-        return list(range(min(n, pair_cols)))
+        # Return all available meta indices; do not silently truncate at 8.
+        return list(range(int(n)))
 
     # Row 0 left: MW basis images.
     for col, i in enumerate(_meta_slice_indices(nMW)):
@@ -7823,6 +7828,297 @@ def _refresh_views_with_mcc(self, *args, **kwargs):
     return out
 RR2NMFGui.refresh_views = _refresh_views_with_mcc
 
+
+
+# -----------------------------------------------------------------------------
+# ver11_8_3: MCC direct-coupling layout refinement and HTML export helpers
+# -----------------------------------------------------------------------------
+
+def _mcc_matrix_figsize_fixed(M, base_w=5.8, base_h=3.2):
+    """Return a stable heatmap panel size independent of meta-state count.
+
+    The axis uses aspect='auto', so tall/fat membership matrices stay readable
+    without expanding the whole overview figure horizontally.
+    """
+    M = np.asarray(M)
+    if M.ndim != 2 or M.size == 0:
+        return base_w, base_h
+    r, c = M.shape
+    ratio = r / max(c, 1)
+    h = float(min(4.2, max(2.4, base_h * (0.85 + 0.10 * np.log1p(ratio)))))
+    w = float(min(7.2, max(4.6, base_w * (0.90 + 0.08 * np.log1p(c / max(r, 1))))))
+    return w, h
+
+
+def _draw_mcc_matrix_fixed(fig, ax, M, title, xlabel, ylabel, xtag, ytag,
+                           vmin=None, vmax=None, cmap_name='viridis',
+                           fmt='{:.0f}', scale=100.0, colorbar_label='',
+                           ylabels=None):
+    M = np.asarray(M, dtype=np.float64)
+    if M.size == 0:
+        ax.axis('off')
+        ax.text(0.5, 0.5, title + '\nNo data', ha='center', va='center')
+        return
+    im = ax.imshow(M, vmin=vmin, vmax=vmax, cmap=cmap_name, aspect='auto')
+    ax.set_title(title, fontsize=11)
+    ax.set_xlabel(xlabel, fontsize=9)
+    ax.set_ylabel(ylabel, fontsize=9)
+    ax.set_xticks(range(M.shape[1]))
+    ax.set_xticklabels([f'{xtag}{j}' for j in range(M.shape[1])], fontsize=8, rotation=0)
+    if ylabels is not None and len(ylabels) == M.shape[0] and M.shape[0] <= 55:
+        ax.set_yticks(range(M.shape[0]))
+        ax.set_yticklabels(ylabels, fontsize=6)
+    else:
+        step = max(1, int(np.ceil(M.shape[0] / 25)))
+        ticks = list(range(0, M.shape[0], step))
+        ax.set_yticks(ticks)
+        ax.set_yticklabels([f'{ytag}{i}' for i in ticks], fontsize=7)
+    if M.shape[0] <= 35 and M.shape[1] <= 16:
+        if vmin is None or vmax is None:
+            vmin2 = float(np.nanmin(M)); vmax2 = float(np.nanmax(M))
+        else:
+            vmin2, vmax2 = float(vmin), float(vmax)
+        for r in range(M.shape[0]):
+            for c in range(M.shape[1]):
+                val = float(M[r, c])
+                norm = (val - vmin2) / (vmax2 - vmin2 + 1e-12)
+                ax.text(c, r, fmt.format(val * scale), ha='center', va='center',
+                        color='white' if norm < 0.45 else 'black', fontsize=7)
+    try:
+        cb = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.02)
+        if colorbar_label:
+            cb.set_label(colorbar_label, fontsize=8)
+    except Exception:
+        pass
+
+
+def plot_morphochem_coupling(fig, result, axis_info=None, cmap='viridis'):
+    """ver11_8_3 MCC overview.
+
+    Fixed layout:
+      MW Images | H_from_AW spectra
+      W_from_AH Images | MH Spectra
+      A_W Heatmap | A_H Heatmap
+      Direct Coupling Corr(A_W,A_H)
+
+    Soft association/P-like matrix is intentionally not shown in the overview.
+    """
+    fig.clear()
+    if not result:
+        fig.set_size_inches(12, 6, forward=True)
+        ax = fig.add_subplot(111); ax.axis('off')
+        ax.text(0.5, 0.5, 'Run Morphology-Chemistry Coupling analysis first.', ha='center', va='center', fontsize=13)
+        return
+
+    w_basis = result.get('w_basis_images', []) or []
+    h_basis = np.asarray(result.get('h_basis_spectra', []), dtype=np.float64)
+    H_from_MW = np.asarray(result.get('H_from_MW', []), dtype=np.float64)
+    W_from_MH = result.get('W_from_MH', []) or []
+    Ccorr = np.asarray(result.get('AW_AH_corr', []), dtype=np.float64)
+    AW = np.asarray(result.get('MW_membership_norm', result.get('MW_membership', [])), dtype=np.float64)
+    AH = np.asarray(result.get('MH_membership_norm', result.get('MH_membership', [])), dtype=np.float64)
+    labels = list(result.get('labels', []))
+    depth = result.get('depth', '?')
+
+    nMW = len(w_basis)
+    nHMw = H_from_MW.shape[0] if H_from_MW.ndim == 2 else 0
+    nWMh = len(W_from_MH)
+    nMH = h_basis.shape[0] if h_basis.ndim == 2 else 0
+    n_meta = max(nMW, nHMw, nWMh, nMH, Ccorr.shape[0] if Ccorr.ndim == 2 else 0, Ccorr.shape[1] if Ccorr.ndim == 2 else 0, 1)
+
+    if axis_info is not None and hasattr(axis_info, 'energy_axis'):
+        energy_axis = np.asarray(axis_info.energy_axis)
+        energy_label = getattr(axis_info, 'energy_label', 'Energy')
+    else:
+        energy_axis = None
+        energy_label = 'Channel'
+    def _x_for(y):
+        y = np.asarray(y).reshape(-1)
+        if energy_axis is not None and len(energy_axis) == len(y):
+            return energy_axis, energy_label
+        return np.arange(len(y)), 'Channel'
+
+    # Basis/cross-counterpart rows still expand with k so every meta-state is visible.
+    pair_cols = max(2, int(n_meta))
+    # Membership heatmaps are fixed-size subpanels below and do not expand with pair_cols.
+    fig.set_size_inches(max(20, min(48, pair_cols * 3.2)), 19.0, forward=True)
+    outer = fig.add_gridspec(4, 1, height_ratios=[1.15, 1.15, 1.05, 0.90], hspace=0.72)
+    gs0 = outer[0].subgridspec(1, pair_cols * 2, wspace=0.45)
+    gs1 = outer[1].subgridspec(1, pair_cols * 2, wspace=0.45)
+    gs2 = outer[2].subgridspec(1, 2, wspace=0.26)
+    gs3 = outer[3].subgridspec(1, 1)
+
+    def _blank(ax):
+        ax.axis('off')
+
+    for col in range(pair_cols):
+        ax = fig.add_subplot(gs0[0, col])
+        if col < nMW:
+            im = ax.imshow(w_basis[col], cmap=cmap, origin='upper', aspect='equal')
+            ax.set_title(f'B_W / MW{col}\nspatial meta-basis', fontsize=9)
+            ax.set_xticks([]); ax.set_yticks([])
+            try: add_colorbar(fig, ax, im)
+            except Exception: pass
+        else:
+            _blank(ax)
+    for col in range(pair_cols):
+        ax = fig.add_subplot(gs0[0, pair_cols + col])
+        if col < nHMw:
+            y = H_from_MW[col]; x, xlabel = _x_for(y)
+            ax.plot(x, y, lw=1.5)
+            ax.set_title(f'H̃(MW{col})\nA_W-weighted rr-H', fontsize=9)
+            ax.grid(True, alpha=0.25); ax.set_xlabel(xlabel, fontsize=7)
+        else:
+            _blank(ax)
+
+    for col in range(pair_cols):
+        ax = fig.add_subplot(gs1[0, col])
+        if col < nWMh:
+            im = ax.imshow(W_from_MH[col], cmap=cmap, origin='upper', aspect='equal')
+            ax.set_title(f'W̃(MH{col})\nA_H-weighted rr-W', fontsize=9)
+            ax.set_xticks([]); ax.set_yticks([])
+            try: add_colorbar(fig, ax, im)
+            except Exception: pass
+        else:
+            _blank(ax)
+    for col in range(pair_cols):
+        ax = fig.add_subplot(gs1[0, pair_cols + col])
+        if col < nMH:
+            y = h_basis[col]; x, xlabel = _x_for(y)
+            ax.plot(x, y, lw=1.5)
+            ax.set_title(f'B_H / MH{col}\nspectral meta-basis', fontsize=9)
+            ax.grid(True, alpha=0.25); ax.set_xlabel(xlabel, fontsize=7)
+        else:
+            _blank(ax)
+
+    axaw = fig.add_subplot(gs2[0, 0])
+    _draw_mcc_matrix_fixed(
+        fig, axaw, AW,
+        f'A_W: rr-component membership in MW | shape={AW.shape[0] if AW.ndim==2 else 0}×{AW.shape[1] if AW.ndim==2 else 0}',
+        'MW spatial meta-state', 'rr-NMF component', 'MW', 'C',
+        vmin=0, vmax=1, cmap_name='magma', fmt='{:.0f}', scale=100.0,
+        colorbar_label='Membership (%)', ylabels=labels if AW.ndim == 2 and len(labels)==AW.shape[0] else None
+    )
+    axah = fig.add_subplot(gs2[0, 1])
+    _draw_mcc_matrix_fixed(
+        fig, axah, AH,
+        f'A_H: rr-component membership in MH | shape={AH.shape[0] if AH.ndim==2 else 0}×{AH.shape[1] if AH.ndim==2 else 0}',
+        'MH spectral meta-state', 'rr-NMF component', 'MH', 'C',
+        vmin=0, vmax=1, cmap_name='cividis', fmt='{:.0f}', scale=100.0,
+        colorbar_label='Membership (%)', ylabels=labels if AH.ndim == 2 and len(labels)==AH.shape[0] else None
+    )
+
+    axc = fig.add_subplot(gs3[0, 0])
+    _draw_mcc_matrix_fixed(
+        fig, axc, Ccorr,
+        'Direct Coupling: Corr(A_W[:,i], A_H[:,j])',
+        'Spectral meta-state MH_j', 'Spatial meta-state MW_i', 'MH', 'MW',
+        vmin=-1, vmax=1, cmap_name='coolwarm', fmt='{:+.2f}', scale=1.0,
+        colorbar_label='Correlation'
+    )
+    fig.suptitle('Morphology-Chemistry Coupling: meta-bases, cross-reconstructed counterparts, memberships, and direct coupling', fontsize=14, y=0.995)
+
+
+def _mcc_fill_tables(self):
+    """ver11_8_3: show Direct Coupling table instead of the P-like soft association."""
+    res = getattr(self, '_mcc_result', None)
+    if not res:
+        return
+    Ccorr = np.asarray(res.get('AW_AH_corr', []), dtype=np.float64)
+    tbl = self.table_mcc_prob
+    tbl.clear()
+    tbl.setRowCount(Ccorr.shape[0]); tbl.setColumnCount(Ccorr.shape[1])
+    tbl.setHorizontalHeaderLabels([f'MH{j}' for j in range(Ccorr.shape[1])])
+    tbl.setVerticalHeaderLabels([f'MW{i}' for i in range(Ccorr.shape[0])])
+    for i in range(Ccorr.shape[0]):
+        for j in range(Ccorr.shape[1]):
+            tbl.setItem(i, j, QTableWidgetItem(f'{Ccorr[i,j]:+.3f}'))
+    tbl.resizeColumnsToContents()
+
+    labels = list(res.get('labels', []))
+    MW = np.asarray(res.get('MW_membership', []), dtype=np.float64)
+    MH = np.asarray(res.get('MH_membership', []), dtype=np.float64)
+    MWn = MW / (np.sum(MW, axis=1, keepdims=True) + 1e-12) if MW.size else MW
+    MHn = MH / (np.sum(MH, axis=1, keepdims=True) + 1e-12) if MH.size else MH
+    n = len(labels)
+    cols = 1 + (MWn.shape[1] if MWn.ndim == 2 else 0) + (MHn.shape[1] if MHn.ndim == 2 else 0)
+    mt = self.table_mcc_membership
+    mt.clear(); mt.setRowCount(n); mt.setColumnCount(cols)
+    headers = ['component'] + [f'MW{i}' for i in range(MWn.shape[1] if MWn.ndim == 2 else 0)] + [f'MH{j}' for j in range(MHn.shape[1] if MHn.ndim == 2 else 0)]
+    mt.setHorizontalHeaderLabels(headers)
+    for r, lab in enumerate(labels):
+        mt.setItem(r, 0, QTableWidgetItem(str(lab)))
+        c = 1
+        if MWn.ndim == 2 and r < MWn.shape[0]:
+            for v in MWn[r]:
+                mt.setItem(r, c, QTableWidgetItem(f'{float(v)*100:.1f}')); c += 1
+        if MHn.ndim == 2 and r < MHn.shape[0]:
+            for v in MHn[r]:
+                mt.setItem(r, c, QTableWidgetItem(f'{float(v)*100:.1f}')); c += 1
+    mt.resizeColumnsToContents()
+
+
+def _fig_to_base64_png(fig, dpi=130):
+    import io, base64
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight')
+    return base64.b64encode(buf.getvalue()).decode('ascii')
+
+
+def _html_escape(s):
+    import html
+    return html.escape(str(s), quote=True)
+
+
+def _export_visible_results_html(self):
+    """Export currently visible/available processing result figures as one self-contained HTML report."""
+    sections = [
+        ('Morphology-Chemistry Coupling', 'canvas_mcc'),
+        ('Auto Merge W Tree', 'canvas_auto_prov'),
+        ('rr-NMF Tree', 'canvas_tree'),
+        ('Conventional NMF', 'canvas_conv'),
+        ('PCA', 'canvas_pca'),
+        ('Full Component Analysis', 'canvas_full'),
+    ]
+    path, _ = QFileDialog.getSaveFileName(self, 'Save visible processing results as HTML', 'rr_nmf_visible_results.html', 'HTML Files (*.html)')
+    if not path:
+        return
+    if not path.lower().endswith('.html'):
+        path += '.html'
+    try:
+        parts = []
+        parts.append('<!doctype html><html><head><meta charset="utf-8">')
+        parts.append('<title>rr-NMF visible processing results</title>')
+        parts.append('<style>body{font-family:Arial,Helvetica,sans-serif;margin:24px;background:#fff;color:#111} h1{font-size:22px} h2{margin-top:32px;border-bottom:1px solid #ddd;padding-bottom:6px} .fig{width:100%;overflow:auto;border:1px solid #ddd;padding:10px;margin-top:10px;background:#fafafa} img{max-width:none} .note{color:#555;font-size:13px}</style>')
+        parts.append('</head><body>')
+        parts.append('<h1>rr-NMF visible processing results</h1>')
+        parts.append('<p class="note">Self-contained HTML export of the current GUI figure canvases. It captures the current visual state; it does not recompute analysis.</p>')
+        exported = 0
+        for title, attr in sections:
+            canvas = getattr(self, attr, None)
+            if canvas is None or not hasattr(canvas, 'fig'):
+                continue
+            try:
+                if len(canvas.fig.axes) == 0:
+                    continue
+                b64 = _fig_to_base64_png(canvas.fig)
+                parts.append(f'<h2>{_html_escape(title)}</h2>')
+                parts.append(f'<div class="fig"><img src="data:image/png;base64,{b64}" alt="{_html_escape(title)}"></div>')
+                exported += 1
+            except Exception as e:
+                parts.append(f'<h2>{_html_escape(title)}</h2><p>Export failed: {_html_escape(e)}</p>')
+        parts.append(f'<p class="note">Exported sections: {exported}</p>')
+        parts.append('</body></html>')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(parts))
+        self.append_log(f'Saved visible processing results HTML: {path} | sections={exported}')
+    except Exception as e:
+        QMessageBox.critical(self, 'HTML export failed', str(e))
+        try: self.append_log(traceback.format_exc())
+        except Exception: pass
+
+# Install/override ver11_8_3 helpers.
+RR2NMFGui.export_visible_results_html = _export_visible_results_html
 
 def main():
     app=QApplication(sys.argv)
